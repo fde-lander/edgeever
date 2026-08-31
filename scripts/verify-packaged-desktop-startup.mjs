@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -21,6 +22,7 @@ const child = spawn(executablePath, [`--user-data-dir=${userDataDirectory}`], {
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
 });
+const childClosed = new Promise((resolveClosed) => child.once("close", resolveClosed));
 child.on("error", (error) => { processError = error; });
 child.stdout.on("data", (chunk) => output.push(chunk.toString()));
 child.stderr.on("data", (chunk) => output.push(chunk.toString()));
@@ -31,6 +33,22 @@ let startupReady = false;
 let lastLog = "";
 const requiredEvents = new Set(["sidecar.ready", "renderer.bootstrap-ready"]);
 const observedEvents = new Set();
+const wait = (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+
+const removeUserDataDirectory = async () => {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    try {
+      await rm(userDataDirectory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EBUSY", "ENOTEMPTY", "EPERM"].includes(error?.code)) break;
+      if (attempt < 20) await wait(250);
+    }
+  }
+  console.warn(`Temporary profile cleanup failed without changing the packaged startup result: ${lastError?.message || lastError}`);
+};
 
 try {
   while (Date.now() < deadline) {
@@ -48,7 +66,7 @@ try {
       }
     }
     if (processError || child.exitCode !== null) break;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    await wait(100);
   }
 
   if (!startupReady) {
@@ -69,6 +87,7 @@ try {
     } else {
       child.kill("SIGTERM");
     }
+    await Promise.race([childClosed, wait(5_000)]);
   }
-  rmSync(userDataDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await removeUserDataDirectory();
 }
