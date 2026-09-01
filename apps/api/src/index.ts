@@ -29,6 +29,7 @@ import {
   createHidingDatabaseWithSymbol,
   loadHiddenNotebookIds,
 } from "./mcp-hiding";
+import { registerHidingRoutes } from "./hiding-routes";
 import {
   isDemoModeEnabled,
   resolveDemoPasswordHash,
@@ -343,6 +344,8 @@ registerMcpRoutes(app, {
   authenticateRequest: (...args) => authenticateRequestWithHiding(...args),
   callTool: (...args) => callMcpTool(...args),
 });
+
+registerHidingRoutes(app);
 
 
 registerResourceRoutes(app, {
