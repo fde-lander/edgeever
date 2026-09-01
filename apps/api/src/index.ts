@@ -26,6 +26,10 @@ import {
   isDatabaseNotReadyError,
 } from "./auth-state";
 import {
+  createHidingDatabaseWithSymbol,
+  loadHiddenNotebookIds,
+} from "./mcp-hiding";
+import {
   isDemoModeEnabled,
   resolveDemoPasswordHash,
   shouldUpsertDemoSeedRecord,
@@ -224,7 +228,7 @@ app.get("/api/openapi.json", (c) => c.json(openApiSpec));
 registerPublicShareRoutes(app);
 
 registerAuthRoutes(app, {
-  authenticateRequest: (...args) => authenticateRequest(...args),
+  authenticateRequest: (...args) => authenticateRequestWithHiding(...args),
   authenticateSession: (...args) => authenticateSession(...args),
   createSession: (...args) => createSession(...args),
   ensureUserWorkspace: (...args) => ensureUserWorkspace(...args),
@@ -239,7 +243,7 @@ registerAuthRoutes(app, {
   verifyLogin: (...args) => verifyLogin(...args),
 });
 registerUserRoutes(app, {
-  authenticateRequest: (...args) => authenticateRequest(...args),
+  authenticateRequest: (...args) => authenticateRequestWithHiding(...args),
   getInstanceUser: (...args) => getInstanceUser(...args),
 });
 
@@ -270,7 +274,7 @@ app.use("/api/v1/*", async (c, next) => {
     return;
   }
 
-  const auth = await authenticateRequest(c, true);
+  const auth = await authenticateRequestWithHiding(c, true);
 
   if (!auth) {
     return unauthorized(c, "Authentication required.");
@@ -336,7 +340,7 @@ registerBackupRoutes(app, {
 });
 
 registerMcpRoutes(app, {
-  authenticateRequest: (...args) => authenticateRequest(...args),
+  authenticateRequest: (...args) => authenticateRequestWithHiding(...args),
   callTool: (...args) => callMcpTool(...args),
 });
 
@@ -383,6 +387,52 @@ app.post("/api/v1/demo/reset", async (c) => {
 });
 
 /**
+ * Wraps authenticateRequest to inject per-token notebook hiding.
+ *
+ * After authentication succeeds for an agent (API token) request, loads the
+ * token's hidden notebook set (including descendants via recursive CTE) and
+ * replaces c.env.storage.db with a HidingDatabaseAdapter.
+ *
+ * Session (user) requests and disabled-auth synthetic owner are NOT injected
+ * — web/mobile see everything, zero impact.
+ *
+ * Must be called AFTER fetchEdgeEverApp has shallow-cloned env (so replacing
+ * c.env.storage only affects this request's copy, not the shared singleton).
+ */
+const authenticateRequestWithHiding = async (
+  c: AppContext,
+  requireAuth = false,
+) => {
+  const auth = await authenticateRequest(c, requireAuth);
+
+  // Only inject for agent (API token) requests with a tokenId
+  if (auth && auth.kind === "agent" && auth.tokenId) {
+    try {
+      const hiddenIds = await loadHiddenNotebookIds(
+        c.env.storage.db, // use original db for loading (not yet wrapped)
+        auth.tokenId,
+        auth.workspaceId,
+      );
+
+      if (hiddenIds.size > 0) {
+        // Replace this request's storage.db with hiding wrapper
+        // Safe because fetchEdgeEverApp shallow-cloned env per request
+        c.env.storage = {
+          ...c.env.storage,
+          db: createHidingDatabaseWithSymbol(c.env.storage.db, hiddenIds),
+        };
+      }
+    } catch (err) {
+      // fail-closed: if hidden set loading fails, reject the request entirely
+      console.error("[mcp-hiding] Failed to load hidden notebook set:", err);
+      throw err;
+    }
+  }
+
+  return auth;
+};
+
+/**
  * Executes the platform-neutral EdgeEver application with an injected storage
  * adapter. Runtime entrypoints must remain thin and call this function rather
  * than introducing platform-specific route or service implementations.
@@ -396,7 +446,10 @@ export const fetchEdgeEverApp = async (
       await ensureLocalDemoSeed(runtimeEnv);
     }
 
-    return app.fetch(request, runtimeEnv, ctx);
+    // Shallow-clone env per request so authenticateRequestWithHiding can
+    // safely replace c.env.storage without mutating the shared Bun singleton.
+    // Cloudflare worker.fetch already creates a new env per request; clone is harmless.
+    return app.fetch(request, { ...runtimeEnv }, ctx);
 };
 
 const worker = {
