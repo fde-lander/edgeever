@@ -1617,6 +1617,18 @@ export const zhCN = {
       "read:tags": "读取标签",
       "write:tags": "管理标签",
     },
+    hiding: {
+      title: "分类隔离",
+      description: "选择对此 Token 隐藏的笔记本分类。被隐藏的分类及其子分类、笔记、附件对 AI Agent 不可见。网页和手机端不受影响。",
+      configure: "配置分类隔离",
+      configureTooltip: "控制此 Token 能看到哪些笔记本分类",
+      hidden: "已隐藏",
+      collapse: "收起",
+      expand: "展开",
+      loading: "正在加载隔离配置...",
+      noNotebooks: "暂无可用的笔记本分类",
+      updateError: "更新隔离配置失败，请重试",
+    },
   },
   advancedPlay: {
     title: "进阶玩法",

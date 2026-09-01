@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Copy, KeyRound, Plus, ShieldCheck, Trash2 } from "lucide-react";
-import type { ApiToken } from "@edgeever/shared";
+import type { ApiToken, Notebook } from "@edgeever/shared";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -23,6 +23,7 @@ import {
   getTokenScopeLabel,
   type TokenAccessLevel,
 } from "./settings-utils";
+import { TokenHidingEditor } from "./TokenHidingEditor";
 
 const McpExampleDialog = () => {
   const { t } = useTranslation();
@@ -149,9 +150,10 @@ interface TokenListProps {
   isLoading: boolean;
   isDeleting: boolean;
   onDelete: (token: ApiToken) => void;
+  notebooks: Notebook[];
 }
 
-const TokenList = ({ tokens, availableScopes, newlyCreatedTokenId, isLoading, isDeleting, onDelete }: TokenListProps) => {
+const TokenList = ({ tokens, availableScopes, newlyCreatedTokenId, isLoading, isDeleting, onDelete, notebooks }: TokenListProps) => {
   const { t } = useTranslation();
   const [copiedAction, setCopiedAction] = useState<{ tokenId: string; action: "token" | "config" } | null>(null);
 
@@ -315,6 +317,7 @@ const TokenList = ({ tokens, availableScopes, newlyCreatedTokenId, isLoading, is
                 </Tooltip>
               </TooltipProvider>
             </div>
+            <TokenHidingEditor tokenId={token.id} notebooks={notebooks} />
           </div>
         );
       })}
@@ -333,6 +336,11 @@ export const McpConfigCard = () => {
   const tokensQuery = useQuery({
     queryKey: ["api-tokens"],
     queryFn: () => api.listApiTokens(),
+  });
+
+  const notebooksQuery = useQuery({
+    queryKey: ["notebooks"],
+    queryFn: () => api.listNotebooks(),
   });
 
   const availableScopes = tokensQuery.data?.availableScopes ?? ALL_TOKEN_SCOPES;
@@ -427,6 +435,7 @@ export const McpConfigCard = () => {
               isLoading={tokensQuery.isLoading}
               isDeleting={deleteTokenMutation.isPending}
               onDelete={setTokenDeleteConfirmation}
+              notebooks={notebooksQuery.data?.notebooks ?? []}
             />
           </section>
         </CardContent>

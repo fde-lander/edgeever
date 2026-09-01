@@ -1619,6 +1619,18 @@ export const enUS = {
       "read:tags": "Read tags",
       "write:tags": "Manage tags",
     },
+    hiding: {
+      title: "Notebook Hiding",
+      description: "Select notebooks to hide from this token. Hidden notebooks, their sub-notebooks, memos, and attachments are invisible to AI Agents. Web and mobile sessions are unaffected.",
+      configure: "Configure hiding",
+      configureTooltip: "Control which notebooks this token can see",
+      hidden: "hidden",
+      collapse: "Collapse",
+      expand: "Expand",
+      loading: "Loading hiding configuration...",
+      noNotebooks: "No notebooks available",
+      updateError: "Failed to update hiding configuration. Please try again.",
+    },
   },
   advancedPlay: {
     title: "Advanced plays",

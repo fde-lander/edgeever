@@ -617,6 +617,15 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
         method: "DELETE",
       }),
 
+    getTokenHiding: (tokenId: string) =>
+      request<{ tokenId: string; hiddenNotebookIds: string[] }>(`/api/v1/api-tokens/${tokenId}/hiding`),
+
+    updateTokenHiding: (tokenId: string, hiddenNotebookIds: string[]) =>
+      request<{ tokenId: string; hiddenNotebookIds: string[] }>(`/api/v1/api-tokens/${tokenId}/hiding`, {
+        method: "PUT",
+        body: JSON.stringify({ hiddenNotebookIds }),
+      }),
+
     listMemos: (params: {
       notebookId?: string | null;
       includeDescendants?: boolean;
