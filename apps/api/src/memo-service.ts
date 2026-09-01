@@ -23,6 +23,7 @@ import { AppError } from "./app-error";
 import { createId, isoNow, parseJsonArray } from "./entity-utils";
 import { sha256 } from "./hash-utils";
 import { getRequiredString } from "./mcp-json-rpc";
+import { assertNotebookWritable, assertNotebooksWritable } from "./hiding-guards";
 import {
   escapeLike,
   listMemos,
@@ -698,6 +699,9 @@ export const moveMemosToNotebook = async (
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string
 ) => {
+  // Hiding write guard: reject agent moves to hidden notebooks
+  assertNotebookWritable(db, notebookId);
+
   const uniqueMemoIds = Array.from(new Set(memoIds));
 
   if (uniqueMemoIds.length === 0) {
@@ -763,6 +767,11 @@ export const mergeMemosRecord = async (
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string
 ) => {
+  // Hiding write guard: if target notebook specified, check it's not hidden
+  if (input.notebookId) {
+    assertNotebookWritable(db, input.notebookId);
+  }
+
   const uniqueMemoIds = Array.from(new Set(input.memoIds));
 
   if (uniqueMemoIds.length < 2) {
@@ -909,6 +918,9 @@ export const createMemoRecord = async (
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string
 ): Promise<MemoDetail> => {
+  // Hiding write guard: reject agent writes to hidden notebooks
+  assertNotebookWritable(db, input.notebookId);
+
   const tags = normalizeTags(input.tags);
   const contentMarkdown = input.contentMarkdown ?? "";
   const contentJson = markdownToDoc(contentMarkdown);
@@ -1037,6 +1049,9 @@ export const importMemosRecord = async (
     actorLabel: string;
   },
 ) => {
+  // Hiding write guard: reject agent imports to hidden notebooks
+  assertNotebookWritable(db, input.notebookId);
+
   const source = normalizeImportSource(input.source);
   if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > 25) {
     throw new AppError("invalid_import_items", "items must contain between 1 and 25 memos", 400);
@@ -1167,6 +1182,11 @@ export const updateMemoRecord = async (
   }
 
   const hasDocumentUpdate = input.contentJson !== undefined || input.contentMarkdown !== undefined;
+
+  // Hiding write guard: if moving to a new notebook, check it's not hidden
+  if (input.notebookId !== undefined) {
+    assertNotebookWritable(db, input.notebookId);
+  }
   let editSession: MemoEditSessionRow | null = null;
 
   if (requireEditSession && hasDocumentUpdate) {

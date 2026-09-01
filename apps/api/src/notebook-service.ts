@@ -3,6 +3,7 @@ import type { AuditActor } from "./api-context";
 import { AppError } from "./app-error";
 import { audit, auditStatement } from "./audit";
 import { createId, isoNow, slugify } from "./entity-utils";
+import { assertNotebookWritable } from "./hiding-guards";
 import type { DatabaseAdapter } from "./storage-contract";
 
 export type NotebookRow = {
@@ -148,6 +149,11 @@ export const createNotebookRecord = async (
 ) => {
   const parentId = input.parentId ?? null;
 
+  // Hiding write guard: if parent notebook is hidden, reject
+  if (parentId) {
+    assertNotebookWritable(db, parentId);
+  }
+
   if (parentId && !(await getNotebook(db, workspaceId, parentId))) {
     throw new AppError("not_found", "Parent notebook not found", 404);
   }
@@ -186,6 +192,9 @@ export const updateNotebookRecord = async (
   input: { name?: string; parentId?: string | null; sortOrder?: number },
   actor: AuditActor
 ) => {
+  // Hiding write guard: reject agent updates to hidden notebooks
+  assertNotebookWritable(db, id);
+
   const current = await getNotebook(db, workspaceId, id);
 
   if (!current) {
