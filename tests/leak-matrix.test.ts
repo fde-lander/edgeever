@@ -310,6 +310,100 @@ describe("9.9 泄露矩阵 — BUILD 前硬 GATE", () => {
     expect(hidingDb).toBe(rawAdapter); // same reference = passthrough
   });
 
+  // ── Scenario 8 (BUG-001 D3 regression): list_memos includeDescendants=1 ──
+  // Real memo-list-service.ts pattern: memos m ... m.notebook_id IN (
+  //   WITH RECURSIVE descendants ... FROM notebooks ... ) SELECT id ...
+  // Before fix: CTE-inside `notebooks` got `notebooks.id NOT IN` appended to
+  // the OUTER WHERE → "no such column: notebooks.id" at runtime.
+  // After fix: id-set subquery untouched; outer m.notebook_id NOT IN guards.
+
+  test("S8 (D3 regression): includeDescendants subquery executes + hidden memos excluded", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    // Real list-memos descendants pattern (memo-list-service.ts:169-186)
+    const result = await hidingDb.prepare(
+      `SELECT m.id, m.title FROM memos m
+       WHERE m.workspace_id = ? AND m.is_deleted = 0
+         AND m.notebook_id IN (
+           WITH RECURSIVE descendants(id) AS (
+             SELECT id FROM notebooks WHERE workspace_id = ? AND id = ? AND is_deleted = 0
+             UNION
+             SELECT n.id FROM notebooks n INNER JOIN descendants d ON n.parent_id = d.id
+             WHERE n.workspace_id = ? AND n.is_deleted = 0
+           )
+           SELECT id FROM descendants
+         )
+       ORDER BY m.is_pinned DESC, m.updated_at DESC LIMIT ?`
+    ).bind("ws1", "ws1", "nb_public", "ws1", 50).all<{ id: string }>();
+
+    // Traversal root = nb_public (visible): only memo3 may appear.
+    // Must NOT throw "no such column: notebooks.id" (pre-fix D3 symptom).
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toEqual(["memo3"]);
+
+    // Traversal root = nb_root (hidden): CTE yields hidden ids, but the outer
+    // m.notebook_id NOT IN (hidden) guard must filter everything out.
+    const hiddenRoot = await hidingDb.prepare(
+      `SELECT m.id FROM memos m
+       WHERE m.workspace_id = ? AND m.is_deleted = 0
+         AND m.notebook_id IN (
+           WITH RECURSIVE descendants(id) AS (
+             SELECT id FROM notebooks WHERE workspace_id = ? AND id = ? AND is_deleted = 0
+             UNION
+             SELECT n.id FROM notebooks n INNER JOIN descendants d ON n.parent_id = d.id
+             WHERE n.workspace_id = ? AND n.is_deleted = 0
+           )
+           SELECT id FROM descendants
+         )
+       LIMIT ?`
+    ).bind("ws1", "ws1", "nb_root", "ws1", 50).all<{ id: string }>();
+    expect(hiddenRoot.results.map((r) => r.id)).toEqual([]); // memo1/memo2 (hidden) never leak
+  });
+
+  // ── Scenario 9 (BUG-001 D4 regression): isNotebookDescendant tree walk ──
+  // Real notebook-service.ts pattern: recursive CTE over notebooks, outer
+  // query reads only from the CTE. Pre-fix: notebooks refs collected →
+  // notebooks.id NOT IN appended to outer WHERE → "no such column".
+  // After fix: notebooks-only tree walk passes through UNCHANGED.
+
+  test("S9 (D4 regression): isNotebookDescendant executes unchanged + correct semantics", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    // Real isNotebookDescendant SQL (notebook-service.ts:313-333)
+    const stmt = hidingDb.prepare(
+      `WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM notebooks WHERE workspace_id = ? AND parent_id = ? AND is_deleted = 0
+         UNION ALL
+         SELECT n.id FROM notebooks n INNER JOIN descendants d ON n.parent_id = d.id
+         WHERE n.workspace_id = ? AND n.is_deleted = 0
+       )
+       SELECT id FROM descendants WHERE id = ? LIMIT 1`
+    );
+
+    // nb_grandchild IS a descendant of nb_root → found (no SQL error)
+    const isChild = await stmt.bind("ws1", "nb_root", "ws1", "nb_grandchild").first<{ id: string }>();
+    expect(isChild).not.toBeNull();
+    expect(isChild!.id).toBe("nb_grandchild");
+
+    // nb_public is NOT a descendant of nb_root → null
+    const stmt2 = hidingDb.prepare(
+      `WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM notebooks WHERE workspace_id = ? AND parent_id = ? AND is_deleted = 0
+         UNION ALL
+         SELECT n.id FROM notebooks n INNER JOIN descendants d ON n.parent_id = d.id
+         WHERE n.workspace_id = ? AND n.is_deleted = 0
+       )
+       SELECT id FROM descendants WHERE id = ? LIMIT 1`
+    );
+    const notChild = await stmt2.bind("ws1", "nb_root", "ws1", "nb_public").first<unknown>();
+    expect(notChild).toBeNull();
+
+    // Write guard still blocks moves INTO hidden notebooks (D4 does not weaken writes)
+    expect(() => assertNotebookWritable(hidingDb, "nb_root")).toThrow(HiddenNotebookError);
+  });
+
   // ── Full test suite summary ──
 
   test("ALL 7 SCENARIOS PASSED — ready for BUILD", () => {

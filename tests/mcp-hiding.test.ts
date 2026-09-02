@@ -191,11 +191,17 @@ describe("9.4 HidingDatabaseAdapter", () => {
     const underlying = new MockDatabaseAdapter();
     const hiding = createHidingDatabase(underlying, hiddenIds);
 
+    // Fixture must be VALID SQL (real CTE definitions) so that real-SQLite
+    // execution assertions (BUG-001 fix) can run against it. The old fixture
+    // referenced an undefined `search_matches` CTE — toContain assertions
+    // passed but the SQL itself was broken (self-blind test, DOUBT 2).
     const sql = `WITH raw_matches(memo_id, rank) AS (
       SELECT memo_id, bm25(memos_fts) FROM memos_fts WHERE memos_fts MATCH ?
       UNION ALL
       SELECT m.id, 100.0 FROM memos m INNER JOIN memo_contents c ON c.memo_id = m.id
-      WHERE m.title LIKE ? ESCAPE '\\'
+      WHERE m.title LIKE ? ESCAPE '\\\\'
+    ), search_matches AS (
+      SELECT memo_id, MIN(rank) AS rank FROM raw_matches GROUP BY memo_id
     )
     SELECT m.id, m.notebook_id FROM search_matches s
     INNER JOIN memos m ON m.id = s.memo_id
@@ -209,6 +215,10 @@ describe("9.4 HidingDatabaseAdapter", () => {
     expect(rewritten).toContain("memo_id NOT IN");
     // memos table should get m.notebook_id NOT IN
     expect(rewritten).toContain("m.notebook_id NOT IN");
+    // BUG-001 fix: FTS injection must be INSIDE the CTE (after MATCH), not
+    // appended as a bare memo_id to the outer WHERE (ambiguity source)
+    expect(rewritten).toMatch(/memos_fts MATCH \? AND memo_id NOT IN/);
+    expect(rewritten).not.toMatch(/WHERE m\.workspace_id = \? AND memo_id NOT IN/);
   });
 
   // ── stats COUNT query (workspace-stats-service pattern) ──
@@ -448,5 +458,241 @@ describe("9.4 HidingDatabaseAdapter", () => {
     expect(rewritten).toContain("memo_id NOT IN");
     // memos → m.notebook_id NOT IN
     expect(rewritten).toContain("m.notebook_id NOT IN");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
+// 11.7 (Q3) Real-SQLite execution sweep — every rewriting-class fixture
+// above is re-run against a REAL bun:sqlite in-memory database.
+//
+// BUG-001 lesson: toContain assertions pass on ambiguous/broken SQL. This
+// sweep prepares (and executes) every rewritten fixture so a broken rewrite
+// FAILS here instead of on a remote server.
+//
+// The fixtures mirror the production SQL shapes found in:
+// memo-service / memo-list-service / notebook-service / tag-service /
+// workspace-stats-service / sync-routes / backup-routes / resources.
+// ═════════════════════════════════════════════════════════════
+import { Database } from "bun:sqlite";
+
+function createSweepDb(): Database {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE notebooks (
+      id TEXT PRIMARY KEY, parent_id TEXT REFERENCES notebooks(id), workspace_id TEXT,
+      name TEXT, slug TEXT, icon TEXT, color TEXT, sort_order INTEGER DEFAULT 0,
+      is_deleted INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT
+    );
+    CREATE TABLE memos (
+      id TEXT PRIMARY KEY, workspace_id TEXT, notebook_id TEXT REFERENCES notebooks(id),
+      title TEXT, excerpt TEXT, tags_json TEXT DEFAULT '[]',
+      is_pinned INTEGER DEFAULT 0, is_archived INTEGER DEFAULT 0, is_deleted INTEGER DEFAULT 0,
+      created_at TEXT, updated_at TEXT, deleted_at TEXT
+    );
+    CREATE TABLE memo_contents (
+      memo_id TEXT PRIMARY KEY REFERENCES memos(id), content_text TEXT, content_json TEXT,
+      content_markdown TEXT, content_hash TEXT, revision INTEGER DEFAULT 0,
+      created_at TEXT, updated_at TEXT
+    );
+    CREATE TABLE resources (
+      id TEXT PRIMARY KEY, memo_id TEXT REFERENCES memos(id), is_deleted INTEGER DEFAULT 0,
+      filename TEXT, byte_size INTEGER, kind TEXT, mime_type TEXT
+    );
+    CREATE TABLE memo_revisions (
+      id TEXT PRIMARY KEY, memo_id TEXT REFERENCES memos(id), revision INTEGER, created_at TEXT
+    );
+    CREATE TABLE memo_tags (
+      memo_id TEXT REFERENCES memos(id), workspace_id TEXT, name TEXT, normalized_name TEXT,
+      PRIMARY KEY (memo_id, name)
+    );
+    CREATE TABLE memo_search_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, memo_id TEXT NOT NULL REFERENCES memos(id),
+      title TEXT, content_text TEXT, tags TEXT
+    );
+    CREATE VIRTUAL TABLE memos_fts USING fts5(
+      memo_id UNINDEXED, title, content_text, tags,
+      content = 'memo_search_documents', content_rowid = 'id'
+    );
+    INSERT INTO notebooks VALUES ('n_ok', NULL, 'ws1', 'OK', 'ok', '', '', 0, 0, '', '');
+    INSERT INTO notebooks VALUES ('n_hidden', NULL, 'ws1', 'H', 'h', '', '', 1, 0, '', '');
+    INSERT INTO memos (id, workspace_id, notebook_id, title, is_pinned, updated_at) VALUES
+      ('memo_ok', 'ws1', 'n_ok', 'OK memo', 0, ''),
+      ('memo_hidden', 'ws1', 'n_hidden', 'Secret memo', 1, '');
+    INSERT INTO memo_contents (memo_id, content_text) VALUES
+      ('memo_ok', 'visible content'), ('memo_hidden', 'secret content');
+    INSERT INTO memo_search_documents (memo_id, title, content_text) VALUES
+      ('memo_ok', 'OK memo', 'visible content'), ('memo_hidden', 'Secret memo', 'secret content');
+    INSERT INTO memos_fts(memos_fts) VALUES('rebuild');
+    INSERT INTO resources VALUES ('res_ok', 'memo_ok', 0, 'f.png', 1, 'image', 'image/png');
+    INSERT INTO memo_revisions VALUES ('rev_ok', 'memo_ok', 1, '');
+    INSERT INTO memo_tags VALUES ('memo_ok', 'ws1', 't1', 't1');
+  `);
+  return db;
+}
+
+function wrapSweepDb(db: Database, hiddenIds: Set<string>): DatabaseAdapter {
+  const adapter: DatabaseAdapter = {
+    prepare(sql: string): PreparedStatementAdapter {
+      const stmt = db.prepare(sql);
+      return {
+        bind(...vals: unknown[]) {
+          const bound = db.prepare(sql);
+          return {
+            bind() { return this; },
+            async all<T = Record<string, unknown>>() {
+              return { results: bound.all(...vals) as T[], success: true as const, meta: {} };
+            },
+            async first<T = unknown>() {
+              const row = bound.get(...vals) as T | undefined;
+              return row ?? null;
+            },
+            async run() {
+              bound.run(...vals);
+              return { results: [], success: true as const, meta: {} };
+            },
+          } as PreparedStatementAdapter;
+        },
+        async all<T = Record<string, unknown>>() {
+          return { results: stmt.all() as T[], success: true as const, meta: {} };
+        },
+        async first<T = unknown>() {
+          return (stmt.get() as T | undefined) ?? null;
+        },
+        async run() {
+          stmt.run();
+          return { results: [], success: true as const, meta: {} };
+        },
+      };
+    },
+    async batch() { return []; },
+  } as unknown as DatabaseAdapter;
+  return createHidingDatabase(adapter, hiddenIds);
+}
+
+describe("11.7 real-SQLite sweep — every rewriting fixture executes", () => {
+  const HIDDEN = new Set(["n_hidden"]);
+  const okBind = { bind: (..._v: unknown[]) => [] };
+
+  test("sweep: memos JOIN memo_contents executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT m.id, m.title FROM memos m INNER JOIN memo_contents c ON c.memo_id = m.id WHERE m.workspace_id = ?"
+    ).bind("ws1").all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["memo_ok"]);
+  });
+
+  test("sweep: memos JOIN memo_contents mc (alias collision variant) executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT m.id FROM memos m INNER JOIN memo_contents mc ON mc.memo_id = m.id WHERE m.workspace_id = ?"
+    ).bind("ws1").all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["memo_ok"]);
+  });
+
+  test("sweep: resources SELECT executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT r.id, r.memo_id FROM resources r WHERE r.is_deleted = 0 AND r.memo_id IN (?, ?)"
+    ).bind("memo_ok", "memo_hidden").all<{ id: string }>();
+    // res_ok visible; hidden memo's resources filtered by memo_id subquery
+    expect(r.results.map((x) => x.id)).toEqual(["res_ok"]);
+  });
+
+  test("sweep: memo_tags SELECT executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT mt.name, COUNT(*) AS cnt FROM memo_tags mt WHERE mt.workspace_id = ? GROUP BY mt.name"
+    ).bind("ws1").all<{ name: string }>();
+    expect(r.results.map((x) => x.name)).toEqual(["t1"]);
+  });
+
+  test("sweep: FTS5 CTE search (real searchMemoSummaries shape) executes + isolates", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      `WITH raw_matches(memo_id, rank) AS (
+        SELECT memo_id, bm25(memos_fts) FROM memos_fts WHERE memos_fts MATCH ?
+        UNION ALL
+        SELECT m.id, 100.0 FROM memos m INNER JOIN memo_contents c ON c.memo_id = m.id
+        WHERE m.title LIKE ? ESCAPE '\\'
+      ), search_matches AS (
+        SELECT memo_id, MIN(rank) AS rank FROM raw_matches GROUP BY memo_id
+      )
+      SELECT m.id, m.notebook_id FROM search_matches s
+      INNER JOIN memos m ON m.id = s.memo_id
+      INNER JOIN memo_contents mc ON mc.memo_id = m.id
+      WHERE m.workspace_id = ?`
+    ).bind("memo", "%memo%", "ws1").all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["memo_ok"]); // hidden memo never leaks
+  });
+
+  test("sweep: stats COUNT FROM memos executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT COUNT(*) AS total FROM memos WHERE workspace_id = ?"
+    ).bind("ws1").first<{ total: number }>();
+    expect(r!.total).toBe(1); // hidden memo not counted (stats 口径: hidden 不计入)
+  });
+
+  test("sweep: stats COUNT FROM notebooks executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT COUNT(*) AS count FROM notebooks WHERE workspace_id = ? AND is_deleted = 0"
+    ).bind("ws1").first<{ count: number }>();
+    expect(r!.count).toBe(1); // hidden notebook not counted
+  });
+
+  test("sweep: notebooks LEFT JOIN memos (notebookSelectSql pattern) executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      `SELECT n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order,
+        n.created_at, n.updated_at, COUNT(m.id) AS memo_count, MAX(m.updated_at) AS last_memo_updated_at
+        FROM notebooks n
+        LEFT JOIN memos m ON m.notebook_id = n.id AND m.workspace_id = n.workspace_id AND m.is_deleted = 0
+        WHERE n.workspace_id = ? AND n.is_deleted = 0
+        GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at
+        ORDER BY n.sort_order ASC, n.name ASC`
+    ).bind("ws1").all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["n_ok"]);
+  });
+
+  test("sweep: backup-routes memos JOIN mc with LIMIT/OFFSET executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      `SELECT m.id, m.notebook_id, m.title FROM memos m
+        INNER JOIN memo_contents mc ON mc.memo_id = m.id
+        WHERE m.workspace_id = ? AND m.is_deleted = 0
+        ORDER BY m.created_at ASC LIMIT ? OFFSET ?`
+    ).bind("ws1", 50, 0).all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["memo_ok"]);
+  });
+
+  test("sweep: tag-service memo_tags JOIN memos executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      `SELECT mt.name, COUNT(DISTINCT m.id) AS memo_count, MAX(m.updated_at) AS updated_at
+        FROM memo_tags mt
+        INNER JOIN memos m ON m.id = mt.memo_id AND m.workspace_id = mt.workspace_id
+        WHERE mt.workspace_id = ? AND m.is_deleted = 0
+        GROUP BY mt.name`
+    ).bind("ws1").all<{ name: string }>();
+    expect(r.results.map((x) => x.name)).toEqual(["t1"]);
+  });
+
+  test("sweep: resources JOIN memos (stats pattern) executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      `SELECT COUNT(*) AS total FROM resources r
+        INNER JOIN memos m ON m.id = r.memo_id
+        WHERE m.workspace_id = ? AND r.is_deleted = 0`
+    ).bind("ws1").first<{ total: number }>();
+    expect(r!.total).toBe(1);
+  });
+
+  test("sweep: no-alias memos subquery (fail-closed fixture) executes", async () => {
+    const db = wrapSweepDb(createSweepDb(), HIDDEN);
+    const r = await db.prepare(
+      "SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = ?"
+    ).bind("ws1", 0).all<{ id: string }>();
+    expect(r.results.map((x) => x.id)).toEqual(["memo_ok"]);
   });
 });
