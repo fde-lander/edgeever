@@ -176,7 +176,7 @@ restore flow. Do not copy a live D1 database file or rewrite migration history.
 docker build --tag edgeever:local .
 docker run --rm -p 8787:8787 \
   -e EDGE_EVER_AUTH_PASSWORD='replace-with-a-long-random-password' \
-  -v edgeever-data:/data \
+  -v ./edgeever-data:/data \
   edgeever:local
 ```
 

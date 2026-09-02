@@ -10,12 +10,9 @@ services:
       EDGE_EVER_AUTH_PASSWORD: "${EDGE_EVER_AUTH_PASSWORD:?Set EDGE_EVER_AUTH_PASSWORD before starting EdgeEver}"
       EDGE_EVER_CONTAINER_IMAGE: "${EDGE_EVER_IMAGE:-ghcr.io/tianma-if/edgeever}"
     volumes:
-      - edgeever-data:/data
+      - ./edgeever-data:/data
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     stop_grace_period: 30s
-
-volumes:
-  edgeever-data:

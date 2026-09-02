@@ -162,7 +162,7 @@ docker compose ps
 docker build --tag edgeever:local .
 docker run --rm -p 8787:8787 \
   -e EDGE_EVER_AUTH_PASSWORD='请替换为足够长的随机密码' \
-  -v edgeever-data:/data \
+  -v ./edgeever-data:/data \
   edgeever:local
 ```
 
