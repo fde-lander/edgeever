@@ -72,6 +72,22 @@ export const listTagSummaries = async (db: DatabaseAdapter, workspaceId: string)
     .map(mapTagSummary);
 };
 
+/**
+ * Outcome of a tag rename/delete.
+ *
+ * BUG-003: `updated` alone was misleading — it is a statement-assembly count,
+ * not proof of persistence. `verified` reports a post-write ground-truth
+ * re-read so a silent write loss can no longer look like success.
+ */
+export type TagUpdateOutcome = {
+  /** Number of memos the service intended to update (statement count). */
+  updated: number;
+  /** True when a post-write ground-truth re-read confirmed the rename/delete. */
+  verified: boolean;
+  /** Memos that still carry the old tag after the write (0 when verified). */
+  remainingOldTag: number;
+};
+
 export const updateTagAcrossMemos = async (
   db: DatabaseAdapter,
   workspaceId: string,
@@ -79,11 +95,13 @@ export const updateTagAcrossMemos = async (
   nextTag: string | null,
   actor: AuditActor,
   actorLabel: string
-) => {
+): Promise<TagUpdateOutcome> => {
   const normalizedOld = normalizeTags([oldTag])[0];
   const normalizedNext = nextTag === null ? null : normalizeTags([nextTag])[0];
 
-  if (!normalizedOld || normalizedOld === normalizedNext) return 0;
+  if (!normalizedOld || normalizedOld === normalizedNext) {
+    return { updated: 0, verified: true, remainingOldTag: 0 };
+  }
 
   const rows = await getMemoRowsByTag(db, workspaceId, normalizedOld);
   const now = isoNow();
@@ -113,7 +131,13 @@ export const updateTagAcrossMemos = async (
   }
 
   if (statements.length > 0) await db.batch(statements);
-  return updated;
+
+  // Post-write ground-truth verification: the old tag must be gone. Without
+  // this the response only reflects statement assembly, not persistence.
+  // NOTE: SQLite `changes` cannot be used here — trg_memo_tags_update's
+  // DELETE+INSERT inflates it (a single-row UPDATE measured changes=5).
+  const remaining = updated === 0 ? [] : await getMemoRowsByTag(db, workspaceId, normalizedOld);
+  return { updated, verified: remaining.length === 0, remainingOldTag: remaining.length };
 };
 
 export const previewTagRename = async (

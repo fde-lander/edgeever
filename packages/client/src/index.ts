@@ -593,14 +593,16 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
 
     listTags: () => request<ListTagsResponse>("/api/v1/tags"),
 
+    // BUG-003: `verified` / `remainingOldTag` are optional so older servers
+    // (which only return `updated`) stay type-compatible.
     renameTag: (tag: string, name: string) =>
-      request<{ ok: true; updated: number }>(`/api/v1/tags/${encodeURIComponent(tag)}`, {
+      request<{ ok: true; updated: number; verified?: boolean; remainingOldTag?: number }>(`/api/v1/tags/${encodeURIComponent(tag)}`, {
         method: "PATCH",
         body: JSON.stringify({ name }),
       }),
 
     deleteTag: (tag: string) =>
-      request<{ ok: true; updated: number }>(`/api/v1/tags/${encodeURIComponent(tag)}`, {
+      request<{ ok: true; updated: number; verified?: boolean; remainingOldTag?: number }>(`/api/v1/tags/${encodeURIComponent(tag)}`, {
         method: "DELETE",
       }),
 

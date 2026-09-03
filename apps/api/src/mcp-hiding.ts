@@ -50,15 +50,26 @@ interface InjectionRule {
 const literalList = (ids: string[]): string =>
   ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
 
+// NOTE (BUG-002 / BUG-002b): the memo-linked fragments below must be NULL-safe.
+// They are injected into the outer WHERE clause, so on an OUTER JOIN the joined
+// column can be NULL and `NULL NOT IN (...)` evaluates to NULL — dropping the
+// whole row (empty notebooks disappeared, memos without a content row vanished).
+// A NULL join column carries no notebook identity, so accepting it leaks nothing:
+// hidden notebooks themselves are still cut by NOTEBOOKS_INJECTION below, which
+// stays strict because `notebooks` is always a driving table with a NOT NULL PK.
 const NOTEBOOKS_INJECTION = (alias: string | null, ids: string[]): string =>
   `${alias ?? "notebooks"}.id NOT IN (${literalList(ids)})`;
 
-const MEMOS_INJECTION = (alias: string | null, ids: string[]): string =>
-  `${alias ?? "memos"}.notebook_id NOT IN (${literalList(ids)})`;
+const MEMOS_INJECTION = (alias: string | null, ids: string[]): string => {
+  const column = `${alias ?? "memos"}.notebook_id`;
+  return `(${column} IS NULL OR ${column} NOT IN (${literalList(ids)}))`;
+};
 
 /** For tables linked via memo_id (not notebook_id), inject a subquery. */
-const MEMO_ID_SUBQUERY = (alias: string | null, ids: string[]): string =>
-  `${alias ? `${alias}.memo_id` : "memo_id"} NOT IN (SELECT id FROM memos WHERE notebook_id IN (${literalList(ids)}))`;
+const MEMO_ID_SUBQUERY = (alias: string | null, ids: string[]): string => {
+  const column = alias ? `${alias}.memo_id` : "memo_id";
+  return `(${column} IS NULL OR ${column} NOT IN (SELECT id FROM memos WHERE notebook_id IN (${literalList(ids)})))`;
+};
 
 const INJECTION_RULES: InjectionRule[] = [
   // Primary tables with direct notebook_id / id

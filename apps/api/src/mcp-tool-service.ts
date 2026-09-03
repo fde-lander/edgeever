@@ -421,8 +421,8 @@ export const callMcpTool = async (
         return await previewTagRename(c.env.storage.db, auth.workspaceId, from, to);
       }
 
-      const updated = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, from, to, getAuditActor(c), getActorLabel(c));
-      return { ok: true, updated };
+      const outcome = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, from, to, getAuditActor(c), getActorLabel(c));
+      return { ok: true, ...outcome };
     }
     case "delete_tag": {
       assertScope(auth, "write:tags");
@@ -432,8 +432,8 @@ export const callMcpTool = async (
         return await previewTagRename(c.env.storage.db, auth.workspaceId, tag, null);
       }
 
-      const updated = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, tag, null, getAuditActor(c), getActorLabel(c));
-      return { ok: true, updated };
+      const outcome = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, tag, null, getAuditActor(c), getActorLabel(c));
+      return { ok: true, ...outcome };
     }
     case "merge_memos": {
       assertScope(auth, "write:memos");

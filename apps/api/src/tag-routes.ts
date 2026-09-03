@@ -33,7 +33,7 @@ export const registerTagRoutes = (app: Hono<AppEnv>) => {
     const denied = requireScopes(c, "write:tags");
     if (denied) return denied;
 
-    const updated = await updateTagAcrossMemos(
+    const outcome = await updateTagAcrossMemos(
       c.env.storage.db,
       getWorkspaceId(c),
       decodeTagParam(c.req.param("tag")),
@@ -41,14 +41,14 @@ export const registerTagRoutes = (app: Hono<AppEnv>) => {
       getAuditActor(c),
       getActorLabel(c)
     );
-    return c.json({ ok: true, updated });
+    return c.json({ ok: true, ...outcome });
   });
 
   app.delete("/api/v1/tags/:tag", async (c) => {
     const denied = requireScopes(c, "write:tags");
     if (denied) return denied;
 
-    const updated = await updateTagAcrossMemos(
+    const outcome = await updateTagAcrossMemos(
       c.env.storage.db,
       getWorkspaceId(c),
       decodeTagParam(c.req.param("tag")),
@@ -56,6 +56,6 @@ export const registerTagRoutes = (app: Hono<AppEnv>) => {
       getAuditActor(c),
       getActorLabel(c)
     );
-    return c.json({ ok: true, updated });
+    return c.json({ ok: true, ...outcome });
   });
 };
