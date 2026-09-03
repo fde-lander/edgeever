@@ -216,8 +216,9 @@ describe("9.4 HidingDatabaseAdapter", () => {
     // memos table should get m.notebook_id NOT IN
     expect(rewritten).toContain("m.notebook_id NOT IN");
     // BUG-001 fix: FTS injection must be INSIDE the CTE (after MATCH), not
-    // appended as a bare memo_id to the outer WHERE (ambiguity source)
-    expect(rewritten).toMatch(/memos_fts MATCH \? AND memo_id NOT IN/);
+    // appended as a bare memo_id to the outer WHERE (ambiguity source).
+    // BUG-002b: the fragment is now NULL-safe, hence the parenthesised form.
+    expect(rewritten).toMatch(/memos_fts MATCH \? AND \(memo_id IS NULL OR memo_id NOT IN/);
     expect(rewritten).not.toMatch(/WHERE m\.workspace_id = \? AND memo_id NOT IN/);
   });
 

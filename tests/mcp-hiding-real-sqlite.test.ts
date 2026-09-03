@@ -367,7 +367,8 @@ describe("mcp-hiding real-SQLite execution (BUG-001 fix)", () => {
     expect(
       /WHERE m\.workspace_id = \? AND m\.is_deleted = 0 AND memo_id NOT IN/.test(rewritten)
     ).toBe(false);
-    // FTS branch DOES get its scoped injection (inside CTE, after MATCH)
-    expect(/memos_fts MATCH \? AND memo_id NOT IN/.test(rewritten)).toBe(true);
+    // FTS branch DOES get its scoped injection (inside CTE, after MATCH).
+    // BUG-002b: the fragment is now NULL-safe, hence the parenthesised form.
+    expect(/memos_fts MATCH \? AND \(memo_id IS NULL OR memo_id NOT IN/.test(rewritten)).toBe(true);
   });
 });
