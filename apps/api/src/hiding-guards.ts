@@ -7,10 +7,11 @@
  */
 import { getHidingSet } from "./mcp-hiding";
 import type { DatabaseAdapter } from "./storage-contract";
+import { AppError } from "./app-error";
 
-export class HiddenNotebookError extends Error {
+export class HiddenNotebookError extends AppError {
   constructor(notebookId: string) {
-    super(`This notebook is restricted. You do not have permission to access notebook "${notebookId}".`);
+    super("restricted", `This notebook is restricted. You do not have permission to access notebook "${notebookId}".`, 403);
     this.name = "HiddenNotebookError";
   }
 }

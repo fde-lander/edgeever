@@ -208,7 +208,7 @@ export const TokenHidingEditor = ({ tokenId, notebooks }: TokenHidingEditorProps
           {t("mcp.hiding.loading")}
         </div>
       ) : (
-        <div className="max-h-64 overflow-y-auto rounded-md bg-white">
+        <div className="max-h-64 overflow-y-auto rounded-md bg-card">
           {tree.length === 0 ? (
             <p className="py-4 text-center text-xs text-slate-400">
               {t("mcp.hiding.noNotebooks")}
