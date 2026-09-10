@@ -208,7 +208,7 @@ export const DiagramToolbar = ({
   const resolvedTheme = themeCatalog === "flowchart" ? resolveFlowchartTheme(theme) : resolveDiagramTheme(theme);
   const themeLabel = t(`diagram.theme${resolvedTheme.charAt(0).toUpperCase()}${resolvedTheme.slice(1)}` as "diagram.themeBrand");
   return (
-    <MemoEditorToolbarRow className="shrink-0 border-b border-slate-200 bg-white" role="toolbar" aria-label={t("diagram.toolbar")}>
+    <MemoEditorToolbarRow className="shrink-0 border-b border-slate-200 bg-card" role="toolbar" aria-label={t("diagram.toolbar")}>
       {leading ? <>{leading}<MemoEditorToolbarDivider /></> : null}
       <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label={t("diagram.undo")} disabled={!canUndo || readOnly} onClick={onUndo}><Undo2 className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>{t("diagram.undo")}</TooltipContent></Tooltip>
       <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label={t("diagram.redo")} disabled={!canRedo || readOnly} onClick={onRedo}><Redo2 className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>{t("diagram.redo")}</TooltipContent></Tooltip>

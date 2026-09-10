@@ -85,7 +85,7 @@ const LegacyManualScheduledTasksSection = () => {
 
       <div className="mt-4 grid gap-2">
         {tasks.map((task) => (
-          <div key={task.id} className="flex flex-wrap items-center gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
+          <div key={task.id} className="flex flex-wrap items-center gap-3 rounded-md border border-slate-200 bg-card px-3 py-2">
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-semibold text-slate-800">{task.name}</div>
               <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">
@@ -426,7 +426,7 @@ export const PluginManagerCard = ({
           <CardTitle className="flex items-center gap-2 text-sm">
             <Puzzle className="h-4 w-4 text-emerald-700" />
             {selectedPluginId ? t("plugins.details.title") : t("plugins.title")}
-            <span className="inline-flex items-center rounded-full border border-emerald-200/80 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-700 dark:border-emerald-800/60 dark:bg-emerald-950/50 dark:text-emerald-300">
+            <span className="inline-flex items-center rounded-full border border-emerald-200/80 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-700   ">
               Beta
             </span>
           </CardTitle>
@@ -473,7 +473,7 @@ export const PluginManagerCard = ({
             <span>{t("plugins.marketplace.loadFailed", {
               message: marketplaceQuery.error instanceof Error ? marketplaceQuery.error.message : String(marketplaceQuery.error),
             })}</span>
-            <Button size="sm" variant="outline" className="h-7 bg-white px-2 text-xs" onClick={() => void marketplaceQuery.refetch()}>
+            <Button size="sm" variant="outline" className="h-7 bg-card px-2 text-xs" onClick={() => void marketplaceQuery.refetch()}>
               {t("plugins.marketplace.retry")}
             </Button>
           </div>

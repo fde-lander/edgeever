@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { flowchartNodePresentation } from "./diagram-node-presentation.ts";
 import {
+  DIAGRAM_READABLE_MIN_SCALE,
   FLOWCHART_READABLE_MIN_SCALE,
   FLOWCHART_SELECTABLE_THEMES,
   FLOWCHART_SURFACES,
@@ -120,6 +121,7 @@ describe("flowchart readable viewport", () => {
 
   test("refuses to shrink a tall flow below reading size", () => {
     expect(flowchartFitsReadableViewport({ width: 220, height: 1680 }, viewport)).toBe(false);
-    expect(FLOWCHART_READABLE_MIN_SCALE).toBe(0.85);
+    expect(FLOWCHART_READABLE_MIN_SCALE).toBe(DIAGRAM_READABLE_MIN_SCALE);
+    expect(DIAGRAM_READABLE_MIN_SCALE).toBe(0.85);
   });
 });

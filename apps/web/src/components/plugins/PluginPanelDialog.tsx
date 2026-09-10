@@ -93,7 +93,7 @@ export const PluginPanelDialog = ({ host, panel, options, onClose }: {
           <div ref={setContainer} hidden={Boolean(chrome.empty)} className={cn(
             chromeEnabled
               ? "min-h-40 text-sm text-slate-700"
-              : "min-h-40 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-700",
+              : "min-h-40 rounded-lg border border-slate-200 bg-card p-4 text-sm text-slate-700",
             panel?.presentation === "fullscreen" && "min-h-0 flex-1 overflow-auto",
           )} />
         </DialogContent>

@@ -33,6 +33,19 @@ describe("diagram editor keyboard workflow", () => {
     expect(source).not.toContain("visibleNodes.length !== graph.getNodes().length");
   });
 
+  test("fits a newly opened diagram after the canvas has size and scroller auto-resize settles", () => {
+    const init = source.slice(source.indexOf("graph = new Graph"), source.indexOf("const updateHistory"));
+    expect(init.indexOf("graphRef.current = graph")).toBeGreaterThan(-1);
+    expect(init.indexOf("graphRef.current = graph")).toBeLessThan(init.indexOf("const settleLoadedViewport"));
+    expect(init).toContain("diagramCanvasIsReady(canvasSurfaceRef.current)");
+    expect(init).toContain("scroller?.disableAutoResize()");
+    expect(init).toContain("new ResizeObserver");
+    expect(init).toContain("scroller?.enableAutoResize()");
+    expect(init).toContain("scroller?.updateScroller()");
+    expect(init).toContain("SCROLLER_AUTORESIZE_SETTLE_MS");
+    expect(init).toContain("loadFitObserver?.disconnect()");
+  });
+
   test("does not let scroller auto-fit flash a detached node while inserting", () => {
     expect(source).toContain("disableAutoResize()");
     expect(source).toContain("enableAutoResize()");
@@ -45,7 +58,10 @@ describe("diagram editor keyboard workflow", () => {
     expect(settleHelper).toContain("anchorAfter.left - anchorBefore.left");
     expect(settleHelper).toContain("anchorAfter.top - anchorBefore.top");
     expect(settleHelper).toContain("scroller.setScrollbarPosition(");
-    expect(settleHelper).toContain("requestAnimationFrame(restoreAnchor)");
+    expect(settleHelper).toContain("requestAnimationFrame(keepAnchor)");
+    expect(source).toContain("restoreAnchor: !isMindMap");
+    expect(source).toContain("if (isMindMap) revealDiagramNode(graph, node)");
+    expect(source).toContain("scroller.centerPoint(box.x + box.width / 2, box.y + box.height / 2)");
     expect(source).toContain("SCROLLER_AUTORESIZE_SETTLE_MS");
     expect(source).toContain("graph.localToClient");
     expect(source).toContain("canvasSurfaceRef.current");
@@ -186,13 +202,17 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain("bindDiagramScrollerFit(graph)");
     expect(source).toContain("applyDiagramScrollerFitOptions(");
     expect(source).toContain("diagramNodeBounds(graph)");
-    expect(source).toContain("graph.scale().sx < policy.minScale");
-    expect(source).toContain("readFlowchart(graph, document, container)");
+    expect(source).toContain("flowchartFitsReadableViewport(bounds, size, padding, minScale, policy.maxScale)");
+    expect(source).toContain("readDiagramContent(graph, document)");
+    expect(source).toContain("diagramReaderFocusNode(document)");
     expect(source).toContain("scroller.positionPoint({ x: box.x + box.width / 2, y: box.y }, \"50%\", 48)");
+    expect(source).toContain('policy.anchor === "leftmost"');
+    expect(source).toContain("scroller.positionPoint({ x: origin.x, y: origin.y }, 40, 48)");
     expect(source).toContain("fitDiagramRect(graph, bounds, { padding, maxScale: policy.maxScale })");
     expect(source).toContain("scroller.zoomToRect(bounds, options)");
     expect(source).toContain("getDiagramLayoutViewport(document.kind)");
     expect(source).toContain("fitDiagramContent(graph, document, containerRef.current);");
+    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport, { readable: true })");
   });
 
   test("labels auto layout directly instead of relying on an ambiguous icon", () => {
@@ -206,7 +226,7 @@ describe("diagram editor canvas surface", () => {
     expect(toolbarSource).toContain("onFit");
     expect(toolbarSource).toContain('t("diagram.fit")');
     expect(source).toContain("onFit={() =>");
-    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport);");
+    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport, { readable: true });");
   });
 
   test("delegates every diagram kind to one shared toolbar shell", () => {

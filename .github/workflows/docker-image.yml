@@ -98,6 +98,8 @@ jobs:
           docker exec edgeever-ci test -f /data/edgeever.sqlite
           docker exec edgeever-ci test -d /data/resources
           docker exec edgeever-ci test -s /app/scripts/self-hosted-server.js
+          docker exec edgeever-ci test -s /app/scripts/self-hosted-server.mjs
+          docker exec edgeever-ci cmp -s /app/scripts/self-hosted-server.js /app/scripts/self-hosted-server.mjs
           docker exec edgeever-ci test ! -e /app/node_modules
           docker exec edgeever-ci test ! -e /app/apps/api
           docker exec edgeever-ci test ! -e /app/packages
@@ -224,6 +226,8 @@ jobs:
           echo "${health}" | jq -e '.ok == true and .runtime == "self-hosted-bun" and .authMode == "required"'
           curl --fail --silent --show-error http://127.0.0.1:8787/ | grep -F '<!doctype html>'
           docker exec "${container_name}" test -s /app/scripts/self-hosted-server.js
+          docker exec "${container_name}" test -s /app/scripts/self-hosted-server.mjs
+          docker exec "${container_name}" cmp -s /app/scripts/self-hosted-server.js /app/scripts/self-hosted-server.mjs
           docker exec "${container_name}" test ! -e /app/node_modules
           docker exec "${container_name}" test ! -e /app/apps/api
           docker exec "${container_name}" test ! -e /app/packages

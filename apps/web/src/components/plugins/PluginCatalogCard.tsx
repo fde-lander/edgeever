@@ -66,7 +66,7 @@ export const PluginCatalogCard = ({
       role={extension ? "link" : undefined}
       tabIndex={extension ? 0 : undefined}
       aria-label={extension ? t("plugins.details.open", { name }) : undefined}
-      className={`flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-3 ${
+      className={`flex min-w-0 flex-col rounded-lg border border-slate-200 bg-card p-3 ${
         extension
           ? "cursor-pointer transition-colors hover:border-emerald-300 hover:bg-emerald-50/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
           : ""
