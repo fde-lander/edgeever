@@ -1,4 +1,4 @@
-# EdgeEver 远端 Git Clone + Build 部署教程（V2.4 — 远端 git clone + docker build）
+# EdgeEver 远端 Git Clone + Build 部署教程（V2.5 — 远端 git clone + docker build）
 
 > 📅 2026-09-10 | 本次部署目标：**分支 fde-v1.64.0.1（上游 merge v1.64.0 + MCP ping handler）**
 > 回滚锚点：**tag fde-v1.50.0.3（33f53658）** 首选 / **tag fde-v1.50.0.2（2dfd30ac）** 次选 | 适用本次及未来所有版本
@@ -10,6 +10,7 @@
 
 > **版本变更记录**
 >
+> - **V2.5（2026-09-10）**：⚠️ **新增 DATA 目录强制备份步骤（MASTER 钦定，升级铁律）**——大架构升级（如 v1.64.0.1 嘅 11 个新 migration）会改数据库结构，升级前必须先备份 `./edgeever-data`，否则新版本有问题时**回滚都救唔返数据**；插入位置 = 日常升级流程第 2.5 步（更新源码之后、build/上线之前）+ 升级铁律段；「回滚特殊注意」补充「DATA 备份先至係真正嘅回滚保障（镜像回滚只救代码，唔救数据）」。
 > - **V2.4（2026-09-10）**：目标版本 v1.50.0.3 → **v1.64.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）；⚠️ 本次为**大版本 merge**（v1.50.0 → v1.64.0，上游 263 commits），首次启动会自动应用 11 个新 migration（上游 0036_resource_multipart_uploads + 0037-0046 十个），`/api/health` 嘅 migration 字段会变为 0046；新增「回滚特殊注意（schema 变化）」章节；新增 .env 可选新变量说明（全部可唔改）。
 > - **V2.3（2026-09-04）**：目标版本 v1.50.0.2 → **v1.50.0.3**（build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）；明确交付方式定案（永久唔再打 tar）；新增「BUG-003 `verified` 字段说明」章节（调用方见到 `verified:false` 应自行重试）；新增本版修复内容与验证重点。
 > - **V2.2（2026-09-02）**：修正 V2.1 残留错误——第二步 build 命令及 .env 示例版本号 v1.50.0.1 → **v1.50.0.2**（BUILD_ID 改用 commit hash）；迁移验证改用 /api/health 的 migration 字段（实际日志字样为 `[self-hosted] applied migration 0036_...`，唔含 "migration" grep 友好词）；升级流程加入 fetch --tags；回滚步骤改为 `git checkout fde-v1.50.0.1`（实测 single-branch clone 自带全部 tag，无需额外 fetch）；补回滚到任意旧版通用步骤；明确「.env 改版本号 + docker compose up -d」即可重建容器。
@@ -201,6 +202,27 @@
        git pull origin fde-v1.64.0.1
        git log --oneline -1     # 应显示 docs: DEPLOY_REMOTE_BUILD V2.4 ...，一致先继续
 
+2.5. ⚠️ **DATA 目录强制备份（升级铁律 —— build / 上线之前必做，跳过 = 裸奔升级）**：
+
+    大架构升级会升级数据库结构（migration），一旦新版本启动后 schema 已变，
+    出问题时镜像可以回滚，**数据库本身冇备份就救唔返**。必须先备份 compose
+    所在目录映射出来嘅 `./edgeever-data`（含 SQLite 数据库 + 资源文件）：
+
+       # 先停容器（避免备份到写入中嘅数据库，保证一致性）：
+       cd /opt/edgeever        # ← compose 所在目录（按你实际路径）
+       docker compose stop
+
+       # 备份整个 data 目录（tar 保留权限结构，日期标记）：
+       cd /opt/edgeever
+       sudo tar -czf /opt/edgeever-data-backup-$(date +%Y%m%d-%H%M%S).tar.gz edgeever-data/
+
+       # 验证备份文件存在 + 大小合理（应接近 edgeever-data 实际大小）：
+       ls -lh /opt/edgeever-data-backup-*.tar.gz | tail -1
+       du -sh edgeever-data/
+
+    备份完成并验证后，先继续第 3 步 build。旧数据目录**唔好删**，留到新版
+    验证通过（第 5 步全绿）之后先清理，作为 7 日内快速回滚保障。
+
 3. 重新 build（BUILD_ID 自动填当前 HEAD）：
 
        docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.64.0.1 .
@@ -313,6 +335,7 @@ v1.64.0.1 首次启动会应用 11 个新 migration（上游 0036_resource_multi
 - **⚠️ 唯一例外：0046 有一次性 UPDATE 现有 notebooks 表**（inbox 规范化：恢复被删嘅 nb_inbox + slug 锁定 'inbox'）。呢个係**单向数据规范化**，回滚唔会还原，但无破坏性 —— 如果主人从未删过/改过 inbox 分类，呢条 UPDATE 对数据零影响
 - **⚠️ 如果之后又想再升级返 v1.64.0.1**：migration runner 睇 `_edgever_migrations` 表，0037-0046 已记录为已应用 → 唔会重跑 → 直接照常用，**无数据问题**
 - **唯一要避免嘅操作**：回滚期间**唔好删除/重建 data volume**（`./edgeever-data`）—— 咁样会连笔记数据一齐删埋
+- **⚠️ DATA 备份先至係真正嘅回滚保障（V2.5 起升级铁律）**：镜像回滚只救代码、唔救数据 —— schema 一旦被新版 migration 改过，出问题想完整还原旧数据，唯一方法係升级前备份嘅 `edgeever-data` tar 包（见日常升级流程 2.5 步）。**所以：每次启动新 IMAGES 之前，必须先备份好 Docker 映射出来嘅 edgeever-data 先可以**。v1.50.0.3 → v1.64.0.1 本次升级当时未做呢一步（教训记录），幸好 0037-0046 已逐条核实无破坏性改动 + 0046 UPDATE 无影响主人 inbox 数据；以后版本唔好再赌
 - **结论**：回滚安全（数据全保），再升级亦安全（migration 状态持久），只要**永远唔删 data volume** 就得
 
 ---
