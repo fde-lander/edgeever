@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 import { hasBootstrapCredential } from "../apps/api/src/auth-bootstrap.ts";
 import { isUnauthenticatedAccessEnabled } from "../apps/api/src/auth-state.ts";
 import { fetchEdgeEverApp } from "../apps/api/src/index.ts";
+import { nodePublicFetch } from "../apps/api/src/node-public-network.ts";
 import { createSelfHostedStorageAdapter } from "../apps/api/src/self-hosted-storage-adapter.ts";
-import { createS3CompatibleStorageAdapter } from "../apps/api/src/s3-compatible-storage-adapter.ts";
 import { resolveSelfHostedConfig } from "./self-hosted-config.mjs";
-import { loadSelfHostedEnvironment } from "./self-hosted-secrets.mjs";
+import { ensureSelfHostedCredentialSecrets, loadSelfHostedEnvironment } from "./self-hosted-secrets.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeEnvironment = await loadSelfHostedEnvironment(process.env);
@@ -17,6 +17,7 @@ const { dataDirectory, databaseFile, resourcesDirectory, webDirectory } = config
 
 await mkdir(dataDirectory, { recursive: true });
 await mkdir(resourcesDirectory, { recursive: true });
+await ensureSelfHostedCredentialSecrets(dataDirectory, runtimeEnvironment);
 const sqlite = new Database(databaseFile, { create: true });
 sqlite.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
 
@@ -61,33 +62,43 @@ if (
   );
 }
 
+await ensureSelfHostedCredentialSecrets(dataDirectory, runtimeEnvironment, { generateIfMissing: true });
+
 const storage = config.storageBackend === "s3"
-  ? createS3CompatibleStorageAdapter(sqlite, {
-      bucket: runtimeEnvironment.EDGE_EVER_S3_BUCKET ?? "",
-      region: runtimeEnvironment.EDGE_EVER_S3_REGION,
-      endpoint: runtimeEnvironment.EDGE_EVER_S3_ENDPOINT,
-      accessKeyId: runtimeEnvironment.EDGE_EVER_S3_ACCESS_KEY_ID,
-      secretAccessKey: runtimeEnvironment.EDGE_EVER_S3_SECRET_ACCESS_KEY,
-      forcePathStyle: runtimeEnvironment.EDGE_EVER_S3_FORCE_PATH_STYLE
-        ? runtimeEnvironment.EDGE_EVER_S3_FORCE_PATH_STYLE === "true"
-        : undefined,
-    })
+  ? (
+      await import("../apps/api/src/s3-compatible-storage-adapter.ts")
+    ).createS3CompatibleStorageAdapter(sqlite, {
+        bucket: runtimeEnvironment.EDGE_EVER_S3_BUCKET ?? "",
+        region: runtimeEnvironment.EDGE_EVER_S3_REGION,
+        endpoint: runtimeEnvironment.EDGE_EVER_S3_ENDPOINT,
+        accessKeyId: runtimeEnvironment.EDGE_EVER_S3_ACCESS_KEY_ID,
+        secretAccessKey: runtimeEnvironment.EDGE_EVER_S3_SECRET_ACCESS_KEY,
+        forcePathStyle: runtimeEnvironment.EDGE_EVER_S3_FORCE_PATH_STYLE
+          ? runtimeEnvironment.EDGE_EVER_S3_FORCE_PATH_STYLE === "true"
+          : undefined,
+      })
   : createSelfHostedStorageAdapter(sqlite, resourcesDirectory);
 const env = {
   storage,
+  publicNetworkFetch: nodePublicFetch,
   EDGE_EVER_AUTH_USERNAME: runtimeEnvironment.EDGE_EVER_AUTH_USERNAME ?? "admin",
   EDGE_EVER_RUNTIME: "self-hosted-bun",
   EDGE_EVER_CONTAINER_IMAGE: runtimeEnvironment.EDGE_EVER_CONTAINER_IMAGE,
+  EDGE_EVER_DEPLOYMENT_TRIGGER: runtimeEnvironment.EDGE_EVER_DEPLOYMENT_TRIGGER,
+  EDGE_EVER_DEPLOYMENT_METHOD: runtimeEnvironment.EDGE_EVER_DEPLOYMENT_METHOD,
   EDGE_EVER_AUTH_PASSWORD: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD,
   EDGE_EVER_AUTH_PASSWORD_HASH: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD_HASH,
+  EDGE_EVER_AUTH_PASSWORD_FALLBACK: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD_FALLBACK,
   EDGE_EVER_SESSION_TTL_DAYS: runtimeEnvironment.EDGE_EVER_SESSION_TTL_DAYS ?? "400",
   EDGE_EVER_AUTH_LOGIN_WINDOW_SECONDS: runtimeEnvironment.EDGE_EVER_AUTH_LOGIN_WINDOW_SECONDS,
   EDGE_EVER_AUTH_LOGIN_USERNAME_MAX_ATTEMPTS: runtimeEnvironment.EDGE_EVER_AUTH_LOGIN_USERNAME_MAX_ATTEMPTS,
   EDGE_EVER_AUTH_LOGIN_USERNAME_COOLDOWN_SECONDS: runtimeEnvironment.EDGE_EVER_AUTH_LOGIN_USERNAME_COOLDOWN_SECONDS,
   EDGE_EVER_AUTH_LOGIN_IP_MAX_ATTEMPTS: runtimeEnvironment.EDGE_EVER_AUTH_LOGIN_IP_MAX_ATTEMPTS,
   EDGE_EVER_AUTH_LOGIN_IP_COOLDOWN_SECONDS: runtimeEnvironment.EDGE_EVER_AUTH_LOGIN_IP_COOLDOWN_SECONDS,
+  // Legacy decryption fallback for credentials saved by older releases.
   EDGE_EVER_STORAGE_ENCRYPTION_KEY: runtimeEnvironment.EDGE_EVER_STORAGE_ENCRYPTION_KEY,
   EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY: runtimeEnvironment.EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY,
+  EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY_PREVIOUS: runtimeEnvironment.EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY_PREVIOUS,
   EDGE_EVER_DEMO_MODE: runtimeEnvironment.EDGE_EVER_DEMO_MODE,
   EDGE_EVER_ALLOW_UNAUTHENTICATED: runtimeEnvironment.EDGE_EVER_ALLOW_UNAUTHENTICATED,
 };

@@ -238,8 +238,6 @@ jobs:
       - name: Set up Bun
         if: steps.upstream.outputs.align_mode == 'merge'
         uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Verify customized merge
         if: steps.upstream.outputs.align_mode == 'merge'

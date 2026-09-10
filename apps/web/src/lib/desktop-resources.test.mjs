@@ -19,7 +19,9 @@ afterAll(() => {
 const {
   mapTiptapResourceUrls,
   createStagedResourceListItem,
+  stageDesktopResource,
   toApiResourceUrl,
+  toDesktopResourceDownloadUrl,
   toDesktopResourceUrl,
 } = await import("./desktop-resources.ts");
 
@@ -27,6 +29,19 @@ describe("desktop resource URLs", () => {
   test("maps remote resource URLs to the native cache protocol", () => {
     expect(toDesktopResourceUrl("/api/v1/resources/resource-1/blob")).toBe("edgeever-resource://resource/resource-1");
     expect(toDesktopResourceUrl("https://cdn.example.com/image.png")).toBe("https://cdn.example.com/image.png");
+  });
+
+  test("adds the requested filename to native resource downloads", () => {
+    expect(toDesktopResourceDownloadUrl(
+      "edgeever-resource://resource/resource-1",
+      "资料包.zip",
+    )).toBe("edgeever-resource://resource/resource-1?download=%E8%B5%84%E6%96%99%E5%8C%85.zip");
+    expect(toDesktopResourceDownloadUrl(
+      "edgeever-staged://stage-1",
+      "offline.zip",
+    )).toBe("edgeever-staged://stage-1?download=offline.zip");
+    expect(toDesktopResourceDownloadUrl("/api/v1/resources/resource-1/blob", "archive.zip"))
+      .toBe("/api/v1/resources/resource-1/blob");
   });
 
   test("restores portable API URLs before a memo is saved", () => {
@@ -56,5 +71,27 @@ describe("desktop resource URLs", () => {
       url: "edgeever-staged://stage-1",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
+  });
+
+  test("stages offline attachments in bounded chunks", async () => {
+    const parts = [];
+    window.edgeeverDesktop.beginStagedResource = async (metadata) => {
+      expect(metadata).toMatchObject({ memoId: "memo-1", name: "archive.bin", size: 18 });
+      return { id: "stage-streamed", partSize: 8 };
+    };
+    window.edgeeverDesktop.appendStagedResource = async (_id, bytes) => {
+      parts.push(Array.from(new Uint8Array(bytes)));
+      return { receivedBytes: parts.reduce((total, part) => total + part.length, 0) };
+    };
+    window.edgeeverDesktop.completeStagedResource = async (id) => ({ id });
+    window.edgeeverDesktop.abortStagedResource = async () => {};
+
+    const staged = await stageDesktopResource(
+      "memo-1",
+      new File(["abcdefghijklmnopqr"], "archive.bin", { type: "application/octet-stream" }),
+    );
+
+    expect(staged).toEqual({ id: "stage-streamed" });
+    expect(parts.map((part) => part.length)).toEqual([8, 8, 2]);
   });
 });

@@ -36,7 +36,7 @@ describe("native release planning", () => {
       "package.json",
       "bun.lock",
       "apps/mobile/app.json",
-      "patches/expo-sharing@57.0.8.patch",
+      "patches/expo-sharing@57.0.16.patch",
       "scripts/plan-native-release.mjs",
       "scripts/plan-native-release.test.mjs",
     ];
@@ -46,7 +46,7 @@ describe("native release planning", () => {
       relevantChanges: [
         "bun.lock",
         "apps/mobile/app.json",
-        "patches/expo-sharing@57.0.8.patch",
+        "patches/expo-sharing@57.0.16.patch",
       ],
     });
     expect(planNativeRelease("desktop", changedFiles)).toEqual({
@@ -79,7 +79,9 @@ describe("native release planning", () => {
       "scripts/run-desktop-builder.mjs",
       "scripts/sign-windows-update-manifest.mjs",
       "scripts/verify-windows-update-release.mjs",
+      "scripts/verify-desktop-cross-version-startup.mjs",
       "scripts/verify-packaged-desktop-startup.mjs",
+      "scripts/verify-renderer-origin-migration.mjs",
     ];
     expect(planNativeRelease("desktop", changedFiles)).toEqual({
       rebuild: true,

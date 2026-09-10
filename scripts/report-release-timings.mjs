@@ -30,6 +30,36 @@ const escapeCell = (value) => String(value ?? "—").replaceAll("|", "\\|");
 
 const runLink = (url) => (url ? `[Run](${url})` : "—");
 
+export function summarizeReleaseAttempts(attempts = []) {
+  const unique = attempts.filter((payload, index, entries) =>
+    entries.findIndex((candidate) => candidate.run.id === payload.run.id) === index
+  );
+  const starts = unique
+    .map(({ run }) => timestamp(run.created_at ?? run.run_started_at))
+    .filter((value) => value !== null);
+  const ends = unique
+    .map(({ run }) => timestamp(run.updated_at))
+    .filter((value) => value !== null);
+  const releaseTargets = new Set(
+    unique.map(({ run }) => run.head_sha).filter(Boolean),
+  );
+  return {
+    workflowRunCount: unique.length,
+    releaseTargetCount: releaseTargets.size,
+    failedRunCount: unique.filter(({ run }) =>
+      ["failure", "cancelled", "timed_out"].includes(run.conclusion)
+    ).length,
+    endToEndDurationMs:
+      starts.length > 0 && ends.length > 0
+        ? Math.max(...ends) - Math.min(...starts)
+        : null,
+    cumulativeWorkflowDurationMs: unique.reduce(
+      (total, { run }) => total + (runDurationMs(run) ?? 0),
+      0,
+    ),
+  };
+}
+
 function componentRow({ target, mode, candidate, duration, detail, url }) {
   return {
     target,
@@ -47,6 +77,7 @@ function nativeRows(payload, platform, requestedMode) {
       { name: "macOS arm64", packageStep: "Package desktop installer", detail: "package + notarize" },
       { name: "macOS x64", packageStep: "Package desktop installer", detail: "package + notarize" },
       { name: "Windows x64 unsigned Preview", packageStep: "Package unsigned Windows installer", detail: "package" },
+      { name: "Linux x64 AppImage Preview", packageStep: "Package Linux AppImage", detail: "package" },
     ]
       .map((target) => ({ target, job: findJob(payload, target.name) }))
       .filter(({ job }) => Boolean(job));
@@ -54,7 +85,9 @@ function nativeRows(payload, platform, requestedMode) {
       return architectureJobs.map(({ target, job }) => {
         const packageStep = findStep(job, target.packageStep);
         return componentRow({
-          target: target.name === "Windows x64 unsigned Preview" ? "Windows x64 Preview" : target.name,
+          target: target.name
+            .replace("Windows x64 unsigned Preview", "Windows x64 Preview")
+            .replace("Linux x64 AppImage Preview", "Linux x64 Preview"),
           mode: "rebuild",
           candidate: job,
           duration: jobDurationMs(job),
@@ -68,7 +101,7 @@ function nativeRows(payload, platform, requestedMode) {
     if (reuseJob) {
       return [
         componentRow({
-          target: "macOS arm64 + x64 + Windows x64",
+          target: "macOS arm64 + x64 + Windows x64 + Linux x64",
           mode: "reuse",
           candidate: reuseJob,
           duration: jobDurationMs(reuseJob),
@@ -81,7 +114,7 @@ function nativeRows(payload, platform, requestedMode) {
     const planJob = findJob(payload, "Plan desktop release asset");
     return [
       componentRow({
-        target: "macOS arm64 + x64 + Windows x64",
+        target: "macOS arm64 + x64 + Windows x64 + Linux x64",
         mode: "already prepared",
         candidate: planJob ?? payload.run,
         duration: jobDurationMs(planJob) ?? runDurationMs(payload.run),
@@ -144,6 +177,8 @@ export function createReleaseTimingReport({
   mobileMode,
   docker,
   store = null,
+  storeMode = "",
+  attempts = [],
   cloudflare,
   tcrSource,
   tcrReadyAt,
@@ -159,6 +194,15 @@ export function createReleaseTimingReport({
     "Build and verify signed Play bundle",
   );
   const storeUploadStep = findStep(storeJob, "Upload bundle to Google Play");
+  const storeDownloadStep = findStep(storeJob, "Download Play-signed universal APK");
+  const resolvedStoreMode = storeMode || (
+    storeJob &&
+    (!storeBuildStep || resultOf(storeBuildStep) === "skipped") &&
+    storeDownloadStep &&
+    resultOf(storeDownloadStep) === "success"
+      ? "recover"
+      : "build + deliver"
+  );
   const tcrSourceJob = findJob(
     tcrSource,
     "Trigger asynchronous Tencent-side image build",
@@ -197,10 +241,12 @@ export function createReleaseTimingReport({
       ? [
           componentRow({
             target: "Google Play signed APK",
-            mode: "build + deliver",
+            mode: resolvedStoreMode,
             candidate: storeJob,
             duration: jobDurationMs(storeJob),
-            detail: `AAB build ${formatDuration(stepDurationMs(storeBuildStep))}; Play upload ${formatDuration(stepDurationMs(storeUploadStep))}`,
+            detail: resolvedStoreMode === "recover"
+              ? `recovered existing Play-signed APK ${formatDuration(stepDurationMs(storeDownloadStep))}`
+              : `AAB build ${formatDuration(stepDurationMs(storeBuildStep))}; Play upload ${formatDuration(stepDurationMs(storeUploadStep))}`,
             url: storeJob.html_url ?? store.run.html_url,
           }),
         ]
@@ -220,9 +266,10 @@ export function createReleaseTimingReport({
     : null;
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     release,
     generatedAt: new Date().toISOString(),
+    preparation: summarizeReleaseAttempts(attempts),
     allEndpointsReady,
     allEndpointsReadyDurationMs:
       publishedAt !== null &&
@@ -243,6 +290,12 @@ export function renderReleaseTimingMarkdown(report) {
     "",
     `${readinessSummary} Client and GHCR assets are prepared in the Draft phase and therefore report their actual preparation jobs rather than time after publication.`,
     "",
+    ...(report.preparation.workflowRunCount > 0
+      ? [
+          `Draft preparation spanned **${formatDuration(report.preparation.endToEndDurationMs)}** across **${report.preparation.workflowRunCount} workflow runs** and **${report.preparation.releaseTargetCount} release target(s)**; ${report.preparation.failedRunCount} run(s) failed or were cancelled. Cumulative workflow duration was ${formatDuration(report.preparation.cumulativeWorkflowDurationMs)}.`,
+          "",
+        ]
+      : []),
     "| Target | Mode | Result | Duration | Detail | Workflow |",
     "| --- | --- | --- | ---: | --- | --- |",
   ];
@@ -306,6 +359,8 @@ if (import.meta.main) {
     mobileMode: options["mobile-mode"],
     docker: readJson(options.docker),
     store: options.store ? readJson(options.store) : null,
+    storeMode: options["store-mode"] ?? "",
+    attempts: options.attempts ? readJson(options.attempts) : [],
     cloudflare: readJson(options.cloudflare),
     tcrSource: readJson(options["tcr-source"]),
     tcrReadyAt: options["tcr-ready-at"] || null,

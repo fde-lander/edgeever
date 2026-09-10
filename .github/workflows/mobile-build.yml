@@ -66,8 +66,6 @@ jobs:
 
       - name: Set up Bun for release validation
         uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Install release validation dependencies
         run: bun install --frozen-lockfile

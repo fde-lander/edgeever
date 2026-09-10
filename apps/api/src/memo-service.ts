@@ -21,6 +21,7 @@ import { auditStatement } from "./audit";
 import type { AppContext, AuditActor, AuthContext, Bindings } from "./api-context";
 import { AppError } from "./app-error";
 import { createId, isoNow, parseJsonArray } from "./entity-utils";
+import { workspaceInboxId } from "./notebook-service";
 import { sha256 } from "./hash-utils";
 import { getRequiredString } from "./mcp-json-rpc";
 import { assertNotebookWritable, assertNotebooksWritable } from "./hiding-guards";
@@ -43,6 +44,13 @@ import { getNotebook } from "./notebook-service";
 import { deleteStoredObjects } from "./object-storage";
 import { getAuditActor, getWorkspaceId } from "./request-auth";
 import type { DatabaseAdapter, PreparedStatementAdapter } from "./storage-contract";
+
+// Internal callers can bind a reviewed operation and its receipt to the same
+// atomic batch as the existing memo mutation. Never populated from HTTP input.
+export type MemoMutationCommit = {
+  before: PreparedStatementAdapter[];
+  after: (memoId: string) => PreparedStatementAdapter[];
+};
 
 const clampNumber = (value: number, min: number, max: number) =>
   Number.isNaN(value) ? min : Math.min(Math.max(value, min), max);
@@ -590,7 +598,13 @@ export const restoreMemosRecord = async (
   const needsInbox = rows.results.some((row) => !activeNotebookIds.has(row.notebook_id));
 
   const inbox = needsInbox
-    ? await db.prepare(`SELECT id FROM notebooks WHERE workspace_id = ? AND slug = 'inbox' AND is_deleted = 0 LIMIT 1`).bind(workspaceId).first<{ id: string }>()
+    ? await db.prepare(
+      `SELECT id FROM notebooks
+       WHERE workspace_id = ? AND is_deleted = 0
+         AND (id = ? OR id = 'nb_inbox' OR slug = 'inbox')
+       ORDER BY CASE WHEN id = ? THEN 0 WHEN id = 'nb_inbox' THEN 1 ELSE 2 END
+       LIMIT 1`,
+    ).bind(workspaceId, workspaceInboxId(workspaceId), workspaceInboxId(workspaceId)).first<{ id: string }>()
     : null;
   if (needsInbox && !inbox) {
     throw new AppError("restore_notebook_missing", "Original notebooks were deleted and the default inbox is unavailable.", 409);
@@ -711,12 +725,12 @@ export const moveMemosToNotebook = async (
   const placeholders = uniqueMemoIds.map(() => "?").join(", ");
   const rows = await db
     .prepare(
-      `SELECT id, notebook_id
+      `SELECT id, notebook_id, tags_json
        FROM memos
        WHERE workspace_id = ? AND is_deleted = 0 AND id IN (${placeholders})`
     )
     .bind(workspaceId, ...uniqueMemoIds)
-    .all<{ id: string; notebook_id: string }>();
+    .all<{ id: string; notebook_id: string; tags_json: string }>();
 
   if (rows.results.length !== uniqueMemoIds.length) {
     throw new AppError("missing_memos", "One or more memos cannot be moved.", 400);
@@ -738,6 +752,8 @@ export const moveMemosToNotebook = async (
       auditStatement(db, actor.actorType, actor.actorId, "memo.move", "memo", row.id, {
         fromNotebookId: row.notebook_id,
         toNotebookId: notebookId,
+        learning: { version: 1, workspaceId, fromNotebookId: row.notebook_id, toNotebookId: notebookId,
+          beforeTags: JSON.parse(row.tags_json), afterTags: JSON.parse(row.tags_json) },
       })
     );
   }
@@ -765,7 +781,8 @@ export const mergeMemosRecord = async (
   workspaceId: string,
   input: { memoIds: string[]; notebookId?: string; title?: string },
   actor: { actorType: "user" | "agent"; actorId: string | null },
-  actorLabel: string
+  actorLabel: string,
+  commit?: MemoMutationCommit,
 ) => {
   // Hiding write guard: if target notebook specified, check it's not hidden
   if (input.notebookId) {
@@ -808,7 +825,7 @@ export const mergeMemosRecord = async (
         .filter((row) => row.is_deleted && row.merged_into_memo_id)
         .map((row) => row.merged_into_memo_id as string),
     );
-    if (activeRows.length === 0 && mergedTargetIds.size === 1) {
+    if (!commit && activeRows.length === 0 && mergedTargetIds.size === 1) {
       const [mergedTargetId] = mergedTargetIds;
       const completedMerge = await getMemoDetail(db, workspaceId, mergedTargetId);
       const completedSourceIds = new Set(completedMerge?.sourceMemoIds ?? []);
@@ -850,6 +867,7 @@ export const mergeMemosRecord = async (
   const now = isoNow();
 
   await db.batch([
+    ...(commit?.before ?? []),
     db
       .prepare(
         `INSERT INTO memos (
@@ -900,6 +918,7 @@ export const mergeMemosRecord = async (
     auditStatement(db, actor.actorType, actor.actorId, "memo.merge", "memo", newMemoId, {
       sourceMemoIds: uniqueMemoIds,
     }),
+    ...(commit?.after(newMemoId) ?? []),
   ]);
 
   const memo = await getMemoDetail(db, workspaceId, newMemoId);
@@ -914,7 +933,7 @@ export const mergeMemosRecord = async (
 export const createMemoRecord = async (
   db: DatabaseAdapter,
   workspaceId: string,
-  input: { notebookId: string; title?: string; contentMarkdown?: string; tags?: string[]; createdAt?: string; updatedAt?: string },
+  input: { notebookId: string; title?: string; contentJson?: unknown; contentMarkdown?: string; tags?: string[]; createdAt?: string; updatedAt?: string },
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string
 ): Promise<MemoDetail> => {
@@ -923,7 +942,9 @@ export const createMemoRecord = async (
 
   const tags = normalizeTags(input.tags);
   const contentMarkdown = input.contentMarkdown ?? "";
-  const contentJson = markdownToDoc(contentMarkdown);
+  const contentJson = input.contentJson && typeof input.contentJson === "object"
+    ? input.contentJson as TiptapDoc
+    : markdownToDoc(contentMarkdown);
   const contentText = docToText(contentJson);
   const title = normalizeMemoTitle(input.title);
   const excerpt = createExcerpt(contentText);
@@ -1159,6 +1180,7 @@ export const updateMemoRecord = async (
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string,
   requireEditSession = false,
+  commit?: MemoMutationCommit,
 ): Promise<
   | { memo: MemoDetail; error?: never; message?: never; status?: never; details?: never }
   | { error: string; message: string; status?: number; details?: Record<string, unknown> }
@@ -1254,6 +1276,7 @@ export const updateMemoRecord = async (
 
   if (!hasContentUpdate) {
     if (input.isPinned === undefined || isPinned === Boolean(current.is_pinned)) {
+      if (commit) await db.batch([...commit.before, ...commit.after(id)]);
       const memo = await getMemoDetail(db, workspaceId, id);
 
       if (!memo) {
@@ -1264,6 +1287,7 @@ export const updateMemoRecord = async (
     }
 
     await db.batch([
+      ...(commit?.before ?? []),
       db
         .prepare(
           `UPDATE memos
@@ -1272,6 +1296,7 @@ export const updateMemoRecord = async (
         )
         .bind(isPinned ? 1 : 0, actorLabel, updatedAt, input.createdAt ?? null, id, workspaceId),
       auditStatement(db, actor.actorType, actor.actorId, isPinned ? "memo.pin" : "memo.unpin", "memo", id, {}),
+      ...(commit?.after(id) ?? []),
     ]);
 
     const memo = await getMemoDetail(db, workspaceId, id);
@@ -1322,6 +1347,7 @@ export const updateMemoRecord = async (
     && input.updatedAt === undefined;
 
   if (unchanged) {
+    if (commit) await db.batch([...commit.before, ...commit.after(id)]);
     return { memo: mapMemoDetail(current) };
   }
 
@@ -1359,6 +1385,7 @@ export const updateMemoRecord = async (
       : [];
 
   await db.batch([
+    ...(commit?.before ?? []),
     ...revisionStatements,
     db
       .prepare(
@@ -1380,7 +1407,10 @@ export const updateMemoRecord = async (
     ...editSessionStatements,
     auditStatement(db, actor.actorType, actor.actorId, "memo.update", "memo", id, {
       revision: nextRevision,
+      learning: { version: 1, workspaceId, fromNotebookId: current.notebook_id, toNotebookId: notebookId,
+        beforeTags: JSON.parse(current.tags_json), afterTags: tags },
     }),
+    ...(commit?.after(id) ?? []),
   ]);
 
   const memo = await getMemoDetail(db, workspaceId, id);

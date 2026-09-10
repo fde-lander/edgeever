@@ -30,7 +30,7 @@ const environment = {
     },
     resources: {},
   },
-  EDGE_EVER_STORAGE_ENCRYPTION_KEY: "x".repeat(32),
+  EDGE_EVER_AUTH_PASSWORD: "x".repeat(32),
 };
 
 class SqliteD1PreparedStatement {
@@ -84,7 +84,7 @@ const createDatabaseEnvironment = () => {
     sqlite,
     environment: {
       storage: { db: new SqliteD1Database(sqlite), resources: {} },
-      EDGE_EVER_STORAGE_ENCRYPTION_KEY: "x".repeat(32),
+      EDGE_EVER_AUTH_PASSWORD: "x".repeat(32),
     },
   };
 };
@@ -127,6 +127,44 @@ describe("AI route contracts", () => {
     const input = { action: "summarize", title: "Note", contentMarkdown: "Body" };
     expect(AiGenerateSchema.parse(input).stream).toBe(false);
     expect(AiGenerateSchema.parse({ ...input, stream: true }).stream).toBe(true);
+  });
+
+  test("allows custom generation from an empty note while source-based actions still require content", async () => {
+    expect(AiGenerateSchema.safeParse({
+      action: "custom",
+      title: "",
+      contentMarkdown: "",
+      instruction: "Write a friendly greeting email.",
+    }).success).toBe(true);
+    expect(AiGenerateSchema.safeParse({
+      action: "custom",
+      promptId: "aiprompt_blank_note_generator",
+      title: "",
+      contentMarkdown: "",
+    }).success).toBe(true);
+    expect(AiGenerateSchema.safeParse({
+      action: "summarize",
+      title: "",
+      contentMarkdown: "",
+    }).success).toBe(false);
+
+    const app = createApp();
+    const response = await app.request(
+      "/api/v1/ai/generate",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "summarize", title: "", contentMarkdown: "" }),
+      },
+      environment,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "ai_source_required",
+        message: "Note content is required for this AI action.",
+      },
+    });
   });
 
   test("validates AI tag suggestion inputs without requiring saved note content", () => {

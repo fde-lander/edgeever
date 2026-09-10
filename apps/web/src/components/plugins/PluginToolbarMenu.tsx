@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Clock3, LoaderCircle, PanelRightOpen, Play, Puzzle, Settings2 } from "lucide-react";
+import { LoaderCircle, PanelRightOpen, Play, Puzzle, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +13,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { PluginPanelDialog } from "@/components/plugins/PluginPanelDialog";
 import { cn } from "@/lib/utils";
+import { getPluginToolbarGroups } from "@/lib/plugins/plugin-navigation";
 import type {
   EdgeEverPluginHost,
   RegisteredPluginAction,
@@ -36,16 +37,8 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
   const activePanelPluginId = activePanel?.pluginId ?? null;
   const activePanelId = activePanel?.id ?? null;
 
-  const groups = snapshot.extensions.flatMap((extension) => {
-    if (!extension.enabled || extension.manifest.type !== "plugin") return [];
-    const actions: RegisteredPluginAction[] = [
-      ...snapshot.commands.filter((command) => command.pluginId === extension.manifest.id).map((command) => ({ ...command, type: "command" as const })),
-      ...snapshot.panels.filter((panel) => panel.pluginId === extension.manifest.id).map((panel) => ({ ...panel, type: "panel" as const })),
-    ];
-    return actions.length ? [{ pluginId: extension.manifest.id, name: extension.manifest.name, actions }] : [];
-  });
-  const hasActions = groups.length > 0;
-  const pluginNames = new Map(snapshot.extensions.map((extension) => [extension.manifest.id, extension.manifest.name]));
+  const groups = getPluginToolbarGroups(snapshot);
+  const hasActions = groups.some((group) => group.actions.length > 0);
   const activePanelRegistered = Boolean(activePanelPluginId && activePanelId && snapshot.panels.some(
     (panel) => panel.pluginId === activePanelPluginId && panel.id === activePanelId
   ));
@@ -79,7 +72,7 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
     }
   };
 
-  const renderAction = (action: RegisteredPluginAction, prefix: string, pluginName?: string) => {
+  const renderAction = (action: RegisteredPluginAction, prefix: string) => {
     const key = actionKey(action);
     return (
       <DropdownMenuItem
@@ -99,7 +92,6 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
           <Play className="h-4 w-4 text-slate-500" />
         )}
         <span className="min-w-0 flex-1 truncate">{action.title}</span>
-        {pluginName ? <span className="max-w-24 truncate text-[10px] text-slate-400">{pluginName}</span> : null}
       </DropdownMenuItem>
     );
   };
@@ -126,18 +118,7 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
           </Tooltip>
         </TooltipProvider>
         <DropdownMenuContent align={align} className="w-72">
-          {snapshot.recentActions.length ? (
-            <>
-              <DropdownMenuLabel className="flex items-center gap-2 text-xs text-slate-500">
-                <Clock3 className="h-3.5 w-3.5" />
-                {t("plugins.toolbar.recent")}
-              </DropdownMenuLabel>
-              {snapshot.recentActions.map((action) => renderAction(action, "recent", pluginNames.get(action.pluginId)))}
-              <DropdownMenuSeparator />
-            </>
-          ) : null}
-
-          {hasActions ? groups.map((group, index) => (
+          {groups.length > 0 ? groups.map((group, index) => (
             <div key={group.pluginId}>
               {index > 0 ? <DropdownMenuSeparator /> : null}
               <DropdownMenuLabel className="truncate text-xs text-slate-500">{group.name}</DropdownMenuLabel>

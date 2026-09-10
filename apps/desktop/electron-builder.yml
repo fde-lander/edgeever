@@ -69,9 +69,12 @@ win:
   target:
     - nsis
   artifactName: EdgeEver-${version}-windows-${arch}.${ext}
+nsis:
+  oneClick: true
+  perMachine: false
 linux:
   category: Utility
   syncDesktopName: true
   target:
     - AppImage
-  artifactName: EdgeEver-${version}-linux-${arch}.${ext}
+  artifactName: EdgeEver-${version}-linux-x64.${ext}

@@ -27,6 +27,17 @@ export const toDesktopResourceUrl = (url: string) => {
   return resourceId ? `edgeever-resource://resource/${encodeURIComponent(resourceId)}` : url;
 };
 
+export const toDesktopResourceDownloadUrl = (url: string, filename: string) => {
+  if (!isDesktopResourceRuntime() || (!url.startsWith("edgeever-resource://") && !url.startsWith("edgeever-staged://"))) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("download", filename);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
+
 export const toApiResourceUrl = (url: string) => {
   if (!url.startsWith("edgeever-resource://")) return url;
   const resourceId = getResourceId(url);
@@ -53,7 +64,23 @@ export const mapMarkdownResourceUrls = (markdown: string | undefined, mapper: (u
 
 export const stageDesktopResource = async (memoId: string, file: File) => {
   if (!isDesktopResourceRuntime()) return null;
-  return window.edgeeverDesktop!.stageResource({ memoId, name: file.name, type: file.type, bytes: await file.arrayBuffer() });
+  const bridge = window.edgeeverDesktop!;
+  const staged = await bridge.beginStagedResource({
+    memoId,
+    name: file.name,
+    type: file.type,
+    size: file.size,
+  });
+  try {
+    for (let start = 0; start < file.size; start += staged.partSize) {
+      const bytes = await file.slice(start, Math.min(start + staged.partSize, file.size)).arrayBuffer();
+      await bridge.appendStagedResource(staged.id, bytes);
+    }
+    return await bridge.completeStagedResource(staged.id);
+  } catch (error) {
+    await bridge.abortStagedResource(staged.id).catch(() => undefined);
+    throw error;
+  }
 };
 
 export const createStagedResourceListItem = (

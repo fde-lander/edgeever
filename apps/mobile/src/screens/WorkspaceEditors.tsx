@@ -209,7 +209,7 @@ export const CreateMemoModal = ({
   const [submitStarted, setSubmitStarted] = useState(false);
   const [resourceTarget, setResourceTarget] = useState<MobileResourceTarget | null>(null);
   const editorStartup = useMobileEditorStartupGuard({ active: draftLoaded && Boolean(baseUrl), ready: editorReady });
-  const { pickUploadAsset, uploadSourcePicker } = useMobileEditorUploadAsset();
+  const { pickUploadAssets, uploadSourcePicker } = useMobileEditorUploadAsset();
   const targetNotebookId = notebookId || fallbackNotebookId;
   const selectedNotebookName = notebooks.find((notebook) => notebook.id === targetNotebookId)?.name ?? "选择笔记本";
   const titleRef = useRef(title);
@@ -518,7 +518,7 @@ export const CreateMemoModal = ({
     return response.memo;
   };
 
-  const uploadImageAsset = async (asset: MobileImageUploadAsset | null) => {
+  const uploadImageAsset = async (asset: MobileImageUploadAsset | null, keepBusy = false) => {
     let uploadId: string | null = null;
     try {
       if (!asset) {
@@ -533,21 +533,35 @@ export const CreateMemoModal = ({
       const memo = await materializeMemoForImage();
       setImageOperation("uploading");
       const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
-      const form = new FormData();
-      form.append("file", new ExpoFile(uploadAsset.uri));
-      const { resource } = await client!.uploadMemoResource(memo.id, form);
+      const { resource } = await client!.uploadMemoResource(memo.id, new ExpoFile(uploadAsset.uri));
       applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
+      if (resource.kind === "image" && !keepBusy) {
+        safeDomCall(() => editorRef.current?.finishImageBatch([resource.url]));
+      }
+      return resource.kind === "image" ? resource.url : null;
     } catch (error) {
       cancelMobileEditorUpload(editorRef, uploadId);
       Alert.alert("附件上传失败", error instanceof Error ? error.message : "请检查网络连接后重试");
     } finally {
-      setImageOperation("idle");
+      if (!keepBusy) setImageOperation("idle");
     }
   };
 
   const pickAndUploadImage = async () => {
-    const asset = await pickUploadAsset();
-    await uploadImageAsset(asset);
+    const assets = await pickUploadAssets();
+    if (!assets.length) return;
+    const sources: string[] = [];
+    setImageOperation("uploading");
+    try {
+      for (const asset of assets) {
+        const source = await uploadImageAsset(asset, true);
+        if (source === undefined) break;
+        if (source) sources.push(source);
+      }
+      safeDomCall(() => editorRef.current?.finishImageBatch(sources));
+    } finally {
+      setImageOperation("idle");
+    }
   };
 
   useEffect(() => {
@@ -791,6 +805,7 @@ export const CreateMemoModal = ({
 export const RichEditorModal = ({
   baseUrl,
   initialDraft,
+  initialFocus = "body",
   imageCompressionEnabled,
   memo,
   notebooks,
@@ -799,6 +814,7 @@ export const RichEditorModal = ({
 }: {
   baseUrl: string;
   initialDraft: MobileMemoDraft | null;
+  initialFocus?: "body" | "title";
   imageCompressionEnabled: boolean;
   memo: MemoDetail | null;
   notebooks: Notebook[];
@@ -844,7 +860,7 @@ export const RichEditorModal = ({
   const [startupMs, setStartupMs] = useState<number | null>(null);
   const [resourceTarget, setResourceTarget] = useState<MobileResourceTarget | null>(null);
   const editorStartup = useMobileEditorStartupGuard({ active: Boolean(memo && baseUrl), ready });
-  const { pickUploadAsset, uploadSourcePicker } = useMobileEditorUploadAsset();
+  const { pickUploadAssets, uploadSourcePicker } = useMobileEditorUploadAsset();
   const notebookLabel = notebooks.find((notebook) => notebook.id === notebookId)?.name ?? "未分类";
   const saveLabel = error ? "保存失败" : saving ? "保存中" : uploading ? "上传中" : dirty ? (draftRestored ? "本地草稿" : "未保存") : ready ? "已保存" : "加载中";
   const titleRef = useRef(title);
@@ -988,30 +1004,35 @@ export const RichEditorModal = ({
       Alert.alert("正在同步新笔记", "首次同步完成后即可上传本地图片；图片链接现在就可以直接粘贴到正文。");
       return;
     }
-    const asset = await pickUploadAsset();
-    if (!asset) {
+    const assets = await pickUploadAssets();
+    if (!assets.length) {
       return;
     }
 
-    const isImage = asset.mimeType?.startsWith("image/") ?? false;
-    const uploadId = isImage ? createMobileImageUploadId() : null;
+    let uploadId: string | null = null;
+    const sources: string[] = [];
     uploadingRef.current = true;
     setUploading(true);
     setError(null);
     try {
-      if (isImage && uploadId) {
-        const previewDataUrl = await createLocalImagePreviewDataUrl(asset);
-        safeDomCall(() => editorRef.current?.beginImageUpload(uploadId, previewDataUrl));
+      for (const asset of assets) {
+        const isImage = asset.mimeType?.startsWith("image/") ?? false;
+        uploadId = isImage ? createMobileImageUploadId() : null;
+        if (isImage && uploadId) {
+          const previewDataUrl = await createLocalImagePreviewDataUrl(asset);
+          safeDomCall(() => editorRef.current?.beginImageUpload(uploadId, previewDataUrl));
+        }
+        const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
+        const { resource } = await client.uploadMemoResource(memo.id, new ExpoFile(uploadAsset.uri));
+        applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
+        if (resource.kind === "image") sources.push(resource.url);
+        uploadId = null;
       }
-      const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
-      const form = new FormData();
-      form.append("file", new ExpoFile(uploadAsset.uri));
-      const { resource } = await client.uploadMemoResource(memo.id, form);
-      applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
     } catch (uploadError) {
       cancelMobileEditorUpload(editorRef, uploadId);
       setError(uploadError instanceof Error ? uploadError.message : "附件上传失败");
     } finally {
+      safeDomCall(() => editorRef.current?.finishImageBatch(sources));
       uploadingRef.current = false;
       setUploading(false);
     }
@@ -1041,7 +1062,7 @@ export const RichEditorModal = ({
   const editorElement = useMemo(
     () => memo && baseUrl ? (
       <LocalTiptapEditor
-        autoFocus
+        autoFocus={initialFocus === "body"}
         aiPromptsJson={aiPromptsJson}
         baseUrl={baseUrl}
         content={contentJsonRef.current}
@@ -1068,7 +1089,7 @@ export const RichEditorModal = ({
           }
           // The DOM editor performs its own bounded focus retry. Reveal the Android
           // keyboard only after that retry instead of issuing another competing focus.
-          if (Platform.OS === "android") {
+          if (Platform.OS === "android" && initialFocus === "body") {
             initialFocusTimerRef.current = setTimeout(() => {
               initialFocusTimerRef.current = null;
               showEdgeEverKeyboard();
@@ -1081,7 +1102,7 @@ export const RichEditorModal = ({
         theme={resolvedTheme}
       />
     ) : null,
-    [aiPromptsJson, baseUrl, cancelSelectionAi, editorStartup.attempt, loadEditorResource, memo?.id, requestSelectionAi, resolvedLocale, resolvedTheme, selectResource]
+    [aiPromptsJson, baseUrl, cancelSelectionAi, editorStartup.attempt, initialFocus, loadEditorResource, memo?.id, requestSelectionAi, resolvedLocale, resolvedTheme, selectResource]
   );
 
   useEffect(() => {
@@ -1141,6 +1162,7 @@ export const RichEditorModal = ({
         {memo && baseUrl ? (
           <View style={styles.richEditorContainer}>
             <TextInput
+              autoFocus={initialFocus === "title"}
               onChangeText={(value) => {
                 setTitle(value);
                 dirtyRef.current = true;
@@ -1148,6 +1170,7 @@ export const RichEditorModal = ({
               }}
               placeholder={DEFAULT_MEMO_TITLE}
               placeholderTextColor="#94a3b8"
+              selectTextOnFocus={initialFocus === "title"}
               style={styles.createMemoTitleInput}
               value={title}
             />

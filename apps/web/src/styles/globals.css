@@ -1,5 +1,6 @@
 @import "highlight.js/styles/github.css";
 @import "./editor-themes/index.css";
+@import "./code-highlight-dark.css";
 
 @tailwind base;
 @tailwind components;
@@ -475,6 +476,104 @@ html[data-edgeever-extension-theme] .edgeever-memo-divider {
   background: var(--workspace-selection) !important;
 }
 
+/* X6 ships blue/orange interaction chrome. Keep the engine behavior while
+ * making selection and keyboard focus belong to EdgeEver's visual system. */
+.edgeever-diagram-canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px rgb(var(--brand-green-rgb) / 0.5);
+}
+
+/* X6 owns the scroll extent so oversized diagrams remain reachable in both
+ * directions while the editor chrome stays fixed around the viewport. */
+.edgeever-diagram-scroller {
+  position: absolute !important;
+  inset: 0;
+  width: auto !important;
+  height: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.edgeever-diagram-scroller .edgeever-diagram-canvas {
+  cursor: default;
+}
+
+.edgeever-diagram-canvas[data-space-pan="active"]:not([data-architecture-placement="active"]) {
+  cursor: grab;
+}
+
+.edgeever-diagram-canvas[data-shift-select="active"]:not([data-architecture-placement="active"]) {
+  cursor: crosshair;
+}
+
+.edgeever-diagram-scroller[data-panning="true"] .edgeever-diagram-canvas,
+.edgeever-diagram-canvas[data-space-pan="active"][data-panning="true"] {
+  cursor: grabbing !important;
+}
+
+.edgeever-diagram-canvas .x6-widget-selection-rubberband {
+  border-color: var(--brand-green) !important;
+  background-color: var(--brand-green-muted) !important;
+}
+
+.edgeever-diagram-canvas .x6-widget-selection-box,
+.edgeever-diagram-canvas .x6-widget-selection-inner {
+  border-color: var(--brand-green) !important;
+  box-shadow: 0 2px 8px rgb(var(--brand-green-rgb) / 0.18) !important;
+}
+
+.edgeever-diagram-canvas[data-diagram-theme="ink"] .x6-widget-selection-box,
+.edgeever-diagram-canvas[data-diagram-theme="ink"] .x6-widget-selection-inner {
+  border-color: #68d6b0 !important;
+  box-shadow: 0 2px 10px rgb(104 214 176 / 0.22) !important;
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .x6-widget-selection-box-node,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .x6-widget-selection-box-node {
+  pointer-events: none !important;
+}
+
+.edgeever-diagram-canvas .x6-port-body {
+  opacity: 0;
+  transition: opacity 120ms ease, filter 120ms ease;
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .x6-port-body,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .x6-port-body {
+  cursor: crosshair;
+  pointer-events: none;
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .edgeever-flow-port-hit-area,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .edgeever-flow-port-hit-area {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .edgeever-flow-port-dot,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .edgeever-flow-port-dot {
+  pointer-events: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .x6-node.edgeever-flow-node-active .edgeever-flow-port-dot,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .x6-node.edgeever-flow-node-active .edgeever-flow-port-dot {
+  fill: var(--brand-green) !important;
+  stroke: var(--workspace-editor) !important;
+  stroke-width: 2px !important;
+  filter: drop-shadow(0 1px 3px rgb(var(--brand-green-rgb) / 0.3));
+}
+
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .x6-port-body:hover .edgeever-flow-port-dot,
+.edgeever-diagram-canvas[data-diagram-kind="flowchart"] .x6-available-magnet + .edgeever-flow-port-dot,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .x6-port-body:hover .edgeever-flow-port-dot,
+.edgeever-diagram-canvas[data-diagram-kind="architecture"] .x6-available-magnet + .edgeever-flow-port-dot {
+  filter: drop-shadow(0 1px 3px rgb(var(--brand-green-rgb) / 0.28));
+  transform: scale(1.12);
+}
+
 /* Curated reading themes should feel like part of the note canvas in dark
  * mode. Custom themes keep their explicit background as an intentional user
  * choice, while bundled themes contribute typography and semantic colors. */
@@ -600,13 +699,20 @@ textarea {
   padding: 0;
 }
 
-/* Do not rely on the browser's relative `bolder` mapping here. Linux Chrome
- * can render CJK fallback fonts with too little contrast between regular and
- * bold, especially when the installed family has no matching bold face. */
+/* The root deliberately disables synthetic font faces for the application UI,
+ * but rich-text emphasis must remain visible when a platform fallback font has
+ * no matching bold or italic face. Allow both forms here so nested bold-italic
+ * marks work regardless of their DOM order. */
 .ProseMirror strong,
 .ProseMirror b {
-  font-synthesis: weight;
+  font-synthesis: weight style;
   font-weight: 800;
+}
+
+.ProseMirror em,
+.ProseMirror i {
+  font-synthesis: weight style;
+  font-style: italic;
 }
 
 /* External hyperlinks (default theme).
@@ -1232,9 +1338,132 @@ textarea {
 }
 
 .ProseMirror .edgeever-image-node:hover .edgeever-image-preview-control,
+.ProseMirror .edgeever-image-node.is-selected .edgeever-image-preview-control,
 .ProseMirror .edgeever-image-preview-control:focus-within {
   opacity: 1;
   pointer-events: auto;
+}
+
+.ProseMirror [data-edgeever-image-gallery] {
+  position: relative;
+  margin: 1rem 0;
+}
+
+.ProseMirror [data-edgeever-image-gallery]:not(.edgeever-image-gallery),
+.ProseMirror .edgeever-image-gallery__content > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  align-items: stretch;
+  gap: 0.65rem;
+}
+
+.ProseMirror [data-edgeever-image-gallery][data-image-count="4"]:not(.edgeever-image-gallery),
+.ProseMirror [data-edgeever-image-gallery][data-image-count="4"] .edgeever-image-gallery__content > div,
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="2"]:not(.edgeever-image-gallery),
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="2"] .edgeever-image-gallery__content > div {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="3"]:not(.edgeever-image-gallery),
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="3"] .edgeever-image-gallery__content > div {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="1"]:not(.edgeever-image-gallery),
+.ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="1"] .edgeever-image-gallery__content > div {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ProseMirror [data-edgeever-image-gallery] > img,
+.ProseMirror .edgeever-image-gallery__content > img,
+.ProseMirror .edgeever-image-gallery__content > .edgeever-image-node,
+.ProseMirror .edgeever-image-gallery__content > div > div {
+  width: 100% !important;
+  min-width: 0;
+  height: 100%;
+  min-height: 8rem;
+  max-height: none;
+  margin: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.ProseMirror .edgeever-image-gallery__content > div > div > .edgeever-image-node {
+  width: 100% !important;
+  min-width: 0;
+  height: 100%;
+  max-height: none;
+  margin: 0 !important;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.ProseMirror [data-edgeever-image-gallery] > img,
+.ProseMirror .edgeever-image-gallery__content > img,
+.ProseMirror .edgeever-image-gallery__content > .edgeever-image-node > img,
+.ProseMirror .edgeever-image-gallery__content > div > div > .edgeever-image-node > img {
+  display: block;
+  width: 100% !important;
+  height: 100%;
+  min-height: 8rem;
+  max-height: 18rem;
+  margin: 0;
+  object-fit: cover;
+}
+
+.ProseMirror .edgeever-image-gallery__toolbar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 0.5rem;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid rgba(var(--brand-green-200-rgb), 0.95);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 0.3rem;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+}
+
+.ProseMirror .edgeever-image-gallery__button {
+  min-width: 2rem;
+  height: 2rem;
+  border-radius: 6px;
+  padding: 0 0.5rem;
+  color: #475569;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.ProseMirror .edgeever-image-gallery__button:hover,
+.ProseMirror .edgeever-image-gallery__button:focus-visible,
+.ProseMirror .edgeever-image-gallery__button.is-active {
+  background: var(--brand-green-muted);
+  color: var(--brand-green-text);
+}
+
+.ProseMirror .edgeever-image-gallery__button:focus-visible {
+  outline: 2px solid var(--brand-green);
+  outline-offset: 1px;
+}
+
+@media (max-width: 520px) {
+  .ProseMirror [data-edgeever-image-gallery]:not(.edgeever-image-gallery),
+  .ProseMirror .edgeever-image-gallery__content > div,
+  .ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="3"]:not(.edgeever-image-gallery),
+  .ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="3"] .edgeever-image-gallery__content > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="1"]:not(.edgeever-image-gallery),
+  .ProseMirror [data-edgeever-image-gallery][data-image-gallery-layout="1"] .edgeever-image-gallery__content > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .ProseMirror .edgeever-image-preview-button {

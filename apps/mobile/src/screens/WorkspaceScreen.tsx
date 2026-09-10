@@ -19,7 +19,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Alert, Pressable, Text } from "../components/LocalizedText";
 import { ApiRequestError } from "@edgeever/client";
-import { DEFAULT_MEMO_TITLE, getNotebookDescendantIds, markdownToDoc, type MemoDetail } from "@edgeever/shared";
+import { DEFAULT_MEMO_TITLE, getNotebookDescendantIds, hasDiagramDocumentMarker, markdownToDoc, type MemoDetail } from "@edgeever/shared";
 import { MOBILE_UI_METRICS, toggleMobileMemoFilterMode } from "@edgeever/shared/mobile-ui";
 import { clearMobileMemoDraft, readMobileMemoDraft, type MobileMemoDraft } from "../lib/mobile-drafts";
 import {
@@ -102,6 +102,7 @@ import { MemoDetailModal } from "./WorkspaceMemoDetail";
 import {
   MoveSelectionModal,
   NotebookPickerModal,
+  TagPickerModal,
 } from "./WorkspacePickers";
 import { RevisionHistoryModal } from "./WorkspaceRevisionHistory";
 import { CreateMemoModal, RichEditorModal } from "./WorkspaceEditors";
@@ -122,6 +123,7 @@ type MobileView = "notes" | "settings";
 type MemoView = "notebook" | "trash";
 type RichEditingSession = {
   draft: MobileMemoDraft | null;
+  initialFocus: "body" | "title";
   memo: MemoDetail;
 };
 type MobileMemoListCacheSnapshot = Array<[QueryKey, InfiniteData<ListMemosResponse> | undefined]>;
@@ -151,6 +153,7 @@ export const WorkspaceScreen = ({
   const autoSelectedDemoNotebookRef = useRef(false);
   const [memoView, setMemoView] = useState<MemoView>("notebook");
   const [memoFilterMode, setMemoFilterMode] = useState<MemoFilterMode>("all");
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [memoSortMode, setMemoSortMode] = useState<MemoSortMode>("updated-desc");
   const [memoListDensity, setMemoListDensity] = useState<MobileMemoListDensity>("preview");
   const [imageCompressionEnabled, setImageCompressionEnabled] = useState(true);
@@ -166,6 +169,7 @@ export const WorkspaceScreen = ({
   const [isImportingShare, setIsImportingShare] = useState(false);
   const [notesActionsOpen, setNotesActionsOpen] = useState(false);
   const [notebookPickerOpen, setNotebookPickerOpen] = useState(false);
+  const [tagFilterPickerOpen, setTagFilterPickerOpen] = useState(false);
   const [richEditingSession, setRichEditingSession] = useState<RichEditingSession | null>(null);
   const [revisionMemo, setRevisionMemo] = useState<MemoDetail | null>(null);
   const {
@@ -233,7 +237,7 @@ export const WorkspaceScreen = ({
       return;
     }
 
-    if (!autoSelectedDemoNotebookRef.current && activeNotebookId === ALL_NOTES_ID) {
+    if (!autoSelectedDemoNotebookRef.current && activeNotebookId === ALL_NOTES_ID && !selectedTag) {
       autoSelectedDemoNotebookRef.current = true;
       setActiveNotebookId(preferredNotebookId);
       return;
@@ -242,16 +246,16 @@ export const WorkspaceScreen = ({
     if (activeNotebookId === alternateNotebookId) {
       setActiveNotebookId(preferredNotebookId);
     }
-  }, [activeNotebookId, localePreference, notebooks]);
+  }, [activeNotebookId, localePreference, notebooks, selectedTag]);
 
   const activeNotebook = notebooks.find((notebook) => notebook.id === activeNotebookId) ?? null;
   const activeNotebookDescendantIds = useMemo(
-    () => (activeNotebookId === ALL_NOTES_ID ? [] : getNotebookDescendantIds(notebooks, activeNotebookId)),
-    [activeNotebookId, notebooks]
+    () => (activeNotebookId === ALL_NOTES_ID || selectedTag ? [] : getNotebookDescendantIds(notebooks, activeNotebookId)),
+    [activeNotebookId, notebooks, selectedTag]
   );
 
   const memosQuery = useInfiniteQuery({
-    queryKey: ["mobile", "memos", memoView, activeNotebookId, memoFilterMode, memoSortMode, activeNotebookDescendantIds, "paged-v2"],
+    queryKey: ["mobile", "memos", memoView, activeNotebookId, memoFilterMode, memoSortMode, activeNotebookDescendantIds, selectedTag, "paged-v3"],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       if (!client) {
@@ -261,6 +265,7 @@ export const WorkspaceScreen = ({
       return listLocalMemos(dataScope, {
         notebookIds: activeNotebookDescendantIds,
         filter: memoFilterMode,
+        tag: memoView === "notebook" ? selectedTag ?? undefined : undefined,
         limit: 50,
         offset: pageParam,
         sort: memoSortMode,
@@ -273,7 +278,7 @@ export const WorkspaceScreen = ({
   });
 
   const searchQuery = useInfiniteQuery({
-    queryKey: ["mobile", "search", memoView, debouncedSearchText, activeNotebookId, memoFilterMode, memoSortMode, activeNotebookDescendantIds, "paged-v4"],
+    queryKey: ["mobile", "search", memoView, debouncedSearchText, activeNotebookId, memoFilterMode, memoSortMode, activeNotebookDescendantIds, selectedTag, "paged-v5"],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       if (!client) {
@@ -284,6 +289,7 @@ export const WorkspaceScreen = ({
         q: debouncedSearchText,
         notebookIds: activeNotebookDescendantIds,
         filter: memoFilterMode,
+        tag: memoView === "notebook" ? selectedTag ?? undefined : undefined,
         limit: 50,
         offset: pageParam,
         sort: memoSortMode,
@@ -341,6 +347,11 @@ export const WorkspaceScreen = ({
         }
         return true;
       }
+      if (selectedTag) {
+        setSelectedTag(null);
+        setMemoFilterMode("all");
+        return true;
+      }
       if (memoView === "trash") {
         setMemoView("notebook");
         return true;
@@ -348,7 +359,7 @@ export const WorkspaceScreen = ({
       return false;
     });
     return () => subscription.remove();
-  }, [activeView, clearSelection, memoView, searchText, selectedMemoId, selectionMode]);
+  }, [activeView, clearSelection, memoView, searchText, selectedMemoId, selectedTag, selectionMode]);
 
   useEffect(() => {
     if (notebooksQuery.data && memosQuery.data) {
@@ -385,13 +396,28 @@ export const WorkspaceScreen = ({
     setActiveView("notes");
     setMemoView("notebook");
     setActiveNotebookId(ALL_NOTES_ID);
+    setSelectedTag(null);
     setSearchText("");
     clearSelection();
+  };
+
+  const clearTagFilter = () => {
+    setSelectedTag(null);
+    setMemoFilterMode("all");
+    clearSelection();
+  };
+
+  const handleMemoFilterModeChange = (nextFilterMode: MemoFilterMode) => {
+    if (nextFilterMode !== "all") {
+      setSelectedTag(null);
+    }
+    setMemoFilterMode(nextFilterMode);
   };
 
   const showTrash = () => {
     setMemoView("trash");
     setActiveNotebookId(ALL_NOTES_ID);
+    setSelectedTag(null);
     setSearchText("");
     clearSelection();
   };
@@ -433,7 +459,16 @@ export const WorkspaceScreen = ({
     return pending;
   }, []);
 
-  const openRichEditor = useCallback(async (memo: MemoDetail) => {
+  const openRichEditor = useCallback(async (memo: MemoDetail, initialFocus: "body" | "title" = "body") => {
+    if (hasDiagramDocumentMarker(memo.contentMarkdown)) {
+      Alert.alert(
+        resolvedLocale === "en-US" ? "View-only diagram" : "图表暂为只读",
+        resolvedLocale === "en-US"
+          ? "Visual diagram editing is currently available on Web and desktop."
+          : "可视化图表目前请在 Web 或桌面端编辑。"
+      );
+      return;
+    }
     // Unmount detail DomWebView before the editable instance mounts (Android IME).
     beginEditorStartup();
     let editingMemo = memo;
@@ -454,8 +489,8 @@ export const WorkspaceScreen = ({
     const draft = await loadMemoDraft(editingMemo.id);
     memoDraftPrefetchRef.current.delete(memo.id);
     setSelectedMemoId(null);
-    setRichEditingSession({ draft, memo: editingMemo });
-  }, [client, dataScope, loadMemoDraft, queryClient, syncQueueScope]);
+    setRichEditingSession({ draft, initialFocus, memo: editingMemo });
+  }, [client, dataScope, loadMemoDraft, queryClient, resolvedLocale, syncQueueScope]);
 
   const memos = useMemo(() => memosQuery.data?.pages.flatMap((page) => page.memos) ?? [], [memosQuery.data]);
   const searchResults = useMemo(() => searchQuery.data?.pages.flatMap((page) => page.memos) ?? [], [searchQuery.data]);
@@ -661,7 +696,7 @@ export const WorkspaceScreen = ({
 
   useEffect(() => {
     clearSelection();
-  }, [activeNotebookId, clearSelection, memoFilterMode, memoSortMode, memoView]);
+  }, [activeNotebookId, clearSelection, memoFilterMode, memoSortMode, memoView, selectedTag]);
 
   useEffect(() => {
     let mounted = true;
@@ -1140,6 +1175,7 @@ export const WorkspaceScreen = ({
     return <RichEditorModal
       baseUrl={session?.baseUrl ?? ""}
       initialDraft={richEditingSession.draft}
+      initialFocus={richEditingSession.initialFocus}
       imageCompressionEnabled={imageCompressionEnabled}
       memo={richEditingSession.memo}
       notebooks={notebooks}
@@ -1194,14 +1230,17 @@ export const WorkspaceScreen = ({
           isRefreshing={isRefreshing}
           memoFilterMode={memoFilterMode}
           memoListDensity={memoListDensity}
+          memoSortMode={memoSortMode}
           memoView={memoView}
           memos={visibleMemos}
           notebooks={notebooks}
           onCreate={() => openCreateMemo()}
           onCreateFromTemplate={canCreateMemo ? openCreateFromTemplate : undefined}
+          onClearTag={clearTagFilter}
           onClearSelection={clearSelection}
-          onFilterModeChange={setMemoFilterMode}
+          onFilterModeChange={handleMemoFilterModeChange}
           onOpenActions={() => setNotesActionsOpen(true)}
+          onOpenTagFilter={() => setTagFilterPickerOpen(true)}
           onOpenNotebookPicker={() => setNotebookPickerOpen(true)}
           onMemoPress={handleMemoPress}
           onMemoLongPress={(memo) => {
@@ -1221,6 +1260,7 @@ export const WorkspaceScreen = ({
           }}
           onSetMemoView={(nextMemoView) => nextMemoView === "trash" ? showTrash() : showAllNotes()}
           searchText={searchText}
+          selectedTag={selectedTag}
           totalMemoCount={searchActive
             ? searchQuery.data?.pages[0]?.totalCount ?? searchResults.length
             : memosQuery.data?.pages[0]?.totalCount ?? memos.length}
@@ -1256,7 +1296,7 @@ export const WorkspaceScreen = ({
         onClose={closeDetail}
         onDelete={handleDeleteMemo}
         onDeleteResource={handleDeleteResource}
-        onRichEdit={(memo) => void openRichEditor(memo)}
+        onRichEdit={(memo, initialFocus) => void openRichEditor(memo, initialFocus)}
         onOpenRevisions={setRevisionMemo}
         onRenameResource={handleRenameResource}
         onAdoptCloudVersion={(memo) => void handleAdoptCloudVersion(memo)}
@@ -1278,9 +1318,30 @@ export const WorkspaceScreen = ({
         notebooks={notebooks}
         onClose={() => setNotebookPickerOpen(false)}
         onSelect={(notebookId) => {
+          setSelectedTag(null);
           setActiveNotebookId(notebookId);
           setNotebookPickerOpen(false);
         }}
+        visible
+      /> : null}
+
+      {tagFilterPickerOpen ? <TagPickerModal
+        allowCreate={false}
+        dataScope={dataScope}
+        description="选择一个标签，只查看带有该标签的笔记"
+        maxSelections={1}
+        onChange={(tags) => {
+          setSelectedTag(tags[0] ?? null);
+          setMemoFilterMode("all");
+          setMemoView("notebook");
+          setActiveNotebookId(ALL_NOTES_ID);
+          setSearchText("");
+          clearSelection();
+          setTagFilterPickerOpen(false);
+        }}
+        onClose={() => setTagFilterPickerOpen(false)}
+        selectedTags={selectedTag ? [selectedTag] : []}
+        title="按标签筛选"
         visible
       /> : null}
 
@@ -1354,13 +1415,17 @@ export const WorkspaceScreen = ({
         memoListDensity={memoListDensity}
         memoSortMode={memoSortMode}
         listDescription={`${searchActive ? searchQuery.data?.pages[0]?.totalCount ?? searchResults.length : memosQuery.data?.pages[0]?.totalCount ?? memos.length} 条笔记`}
-        listTitle={memoView === "trash" ? "回收站" : activeNotebook?.name ?? "全部笔记"}
+        listTitle={memoView === "trash" ? "回收站" : selectedTag ? `#${selectedTag}` : activeNotebook?.name ?? "全部笔记"}
         onClose={() => setNotesActionsOpen(false)}
         onEnterSelection={() => {
           setNotesActionsOpen(false);
           enterSelectionMode();
         }}
         onMemoListDensityChange={handleMemoListDensityChange}
+        onOpenTagFilter={() => {
+          setNotesActionsOpen(false);
+          setTagFilterPickerOpen(true);
+        }}
         onSortModeChange={setMemoSortMode}
         selectionMode={selectionMode}
         visible

@@ -31,6 +31,11 @@ on:
         required: true
         default: false
         type: boolean
+      ios_build_number:
+        description: "Existing App Store Connect build number to submit without rebuilding"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -153,8 +158,6 @@ jobs:
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
 
       - name: Set up EAS CLI
         if: ${{ !inputs.recover_play_apk }}
@@ -282,8 +285,6 @@ jobs:
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
 
       - name: Set up EAS CLI
         uses: expo/expo-github-action@v8
@@ -305,6 +306,7 @@ jobs:
           --cache-dir "$RUNNER_TEMP/edgeever-bun-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
       - name: Build the iOS archive on EAS
+        if: ${{ inputs.ios_build_number == '' }}
         id: build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -332,6 +334,7 @@ jobs:
         working-directory: apps/mobile
 
       - name: Upload archive to App Store Connect and TestFlight
+        if: ${{ inputs.ios_build_number == '' }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -345,14 +348,29 @@ jobs:
 
       - name: Submit the uploaded build to App Review
         env:
-          APP_STORE_BUILD_NUMBER: ${{ steps.build.outputs.build_number }}
-          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          APP_STORE_BUILD_NUMBER: ${{ inputs.ios_build_number || steps.build.outputs.build_number }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.EDGEEVER_APPLE_API_ISSUER }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.EDGEEVER_APPLE_API_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.EDGEEVER_APPLE_API_KEY_BASE64 }}
           APP_STORE_VERSION: ${{ needs.plan.outputs.version }}
+          PRECHECK_INCLUDE_IN_APP_PURCHASES: "false"
         run: |
           test -n "$APP_STORE_CONNECT_API_ISSUER_ID"
           test -n "$APP_STORE_CONNECT_API_KEY_ID"
           test -n "$APP_STORE_CONNECT_API_KEY_P8_BASE64"
-          bundle exec fastlane ios submit_review
+          log_file="$RUNNER_TEMP/edgeever-app-store-review.log"
+          for attempt in {1..20}; do
+            set +e
+            bundle exec fastlane ios submit_review 2>&1 | tee "$log_file"
+            status="${PIPESTATUS[0]}"
+            set -e
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+            if ! grep -Fq "Build number: ${APP_STORE_BUILD_NUMBER} does not exist" "$log_file" || [[ "$attempt" -eq 20 ]]; then
+              exit "$status"
+            fi
+            echo "App Store Connect has not exposed build ${APP_STORE_BUILD_NUMBER} yet; retrying in 60 seconds (${attempt}/20)."
+            sleep 60
+          done
         working-directory: apps/mobile

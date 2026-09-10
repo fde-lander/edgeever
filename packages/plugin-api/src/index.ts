@@ -1,4 +1,4 @@
-export const PLUGIN_API_VERSION = "1" as const;
+export const PLUGIN_API_VERSION = "2" as const;
 export const THEME_API_VERSION = "1" as const;
 
 export const PLUGIN_PERMISSIONS = [
@@ -7,14 +7,23 @@ export const PLUGIN_PERMISSIONS = [
   "notes:delete",
   "metadata:read",
   "metadata:write",
+  "resources:read",
+  "resources:write",
+  "templates:read",
+  "templates:write",
   "network",
+  "network:public",
+  "ai:generate",
   "storage",
   "secrets",
+  "schedules",
   "editor:read",
   "editor:write",
   "ui:commands",
+  "ui:navigation",
   "ui:notices",
   "ui:panels",
+  "ui:embeds",
 ] as const;
 
 export type PluginPermission = (typeof PLUGIN_PERMISSIONS)[number];
@@ -26,12 +35,59 @@ export interface PluginManifest {
   name: string;
   version: string;
   apiVersion: typeof PLUGIN_API_VERSION;
+  /** Plugins must delegate ordinary persistent configuration to EdgeEver. */
+  settingsUi: "host";
   description?: string;
   author?: string;
   entry: string;
   platforms?: ExtensionPlatform[];
   permissions: PluginPermission[];
   networkHosts?: string[];
+  settings?: PluginSettingsSchema;
+}
+
+export interface PluginSettingListItem {
+  title: string;
+  description?: string;
+}
+
+export interface PluginSettingList {
+  title?: string;
+  actionLabel?: string;
+  items: PluginSettingListItem[];
+}
+
+/**
+ * Declarative setting metadata. EdgeEver owns the layout, controls, validation,
+ * state feedback, and responsive behavior; plugins cannot supply presentation code or styles.
+ */
+interface PluginSettingBase {
+  key: string;
+  label: string;
+  description?: string;
+  required?: boolean;
+  /** Host-rendered read-only items, opened from a small entry next to the field. */
+  list?: PluginSettingList;
+}
+
+export type PluginSettingField =
+  | (PluginSettingBase & { type: "text"; default?: string; placeholder?: string })
+  | (PluginSettingBase & { type: "secret"; placeholder?: string })
+  | (PluginSettingBase & { type: "number"; default?: number; min?: number; max?: number; step?: number })
+  | (PluginSettingBase & { type: "boolean"; default?: boolean })
+  | (PluginSettingBase & { type: "select"; default?: string; options: Array<{ value: string; label: string }> });
+
+export interface PluginSettingsSchema {
+  /** Host-rendered fields in display order. Arbitrary UI markup and styling are intentionally unsupported. */
+  fields: PluginSettingField[];
+}
+
+export type PluginSettingValue = string | number | boolean;
+
+export const PLUGIN_API_ERROR_CODES = ["NOTE_CONFLICT", "RESOURCE_CONFLICT", "INVALID_MARKDOWN_EDIT"] as const;
+export type PluginApiErrorCode = (typeof PLUGIN_API_ERROR_CODES)[number];
+export interface PluginApiError extends Error {
+  code: PluginApiErrorCode;
 }
 
 export const THEME_TOKEN_NAMES = [
@@ -80,6 +136,7 @@ export interface MarketplaceEntry {
   name: string;
   description: string;
   author: string;
+  publisher?: "edgeever";
   category: string;
   repositoryUrl: string;
   distribution:
@@ -113,8 +170,26 @@ export interface PluginNoteSummary {
 }
 
 export interface PluginNote extends PluginNoteSummary {
+  revision: number;
   contentMarkdown: string;
   contentText: string;
+  contentHash: string;
+}
+
+/**
+ * A replacement range in a note's Markdown source. Offsets use JavaScript
+ * UTF-16 string indices and ranges are half-open: [from, to).
+ */
+export interface PluginMarkdownEdit {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+export interface PluginMarkdownEditInput {
+  expectedRevision: number;
+  expectedContentHash: string;
+  edits: PluginMarkdownEdit[];
 }
 
 export interface PluginNoteQuery {
@@ -145,6 +220,12 @@ export interface PluginNoteQueryResult {
   nextOffset: number | null;
 }
 
+export interface PluginNoteContentQueryResult {
+  notes: PluginNote[];
+  totalCount: number;
+  nextOffset: number | null;
+}
+
 export interface PluginNotebook {
   id: string;
   parentId: string | null;
@@ -152,23 +233,95 @@ export interface PluginNotebook {
   memoCount: number;
 }
 
+export interface PluginNoteRevision {
+  id: string;
+  noteId: string;
+  revision: number;
+  title: string | null;
+  tags: string[];
+  contentMarkdown: string;
+  contentText: string;
+  createdAt: string;
+}
+
+export interface PluginResource {
+  id: string;
+  noteId: string;
+  kind: "image" | "attachment";
+  mimeType: string | null;
+  filename: string | null;
+  byteSize: number;
+  contentHash: string | null;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
+
 export interface PluginTag {
   name: string;
   noteCount: number;
 }
 
+export interface PluginTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  title: string | null;
+  contentMarkdown: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type PluginEventMap = {
+  "settings.changed": { key: string };
   "note.created": { note: PluginNote };
   "note.updated": { note: PluginNote };
   "note.deleted": { noteId: string };
   "tag.changed": { previousName?: string; name?: string; deleted?: boolean };
+  "template.created": { template: PluginTemplate };
+  "template.updated": { template: PluginTemplate };
+  "template.deleted": { templateId: string };
+  "resource.created": { resource: PluginResource };
+  "resource.updated": { resource: PluginResource };
+  "resource.deleted": { resourceId: string };
   "workspace.sync-queue-changed": Record<string, never>;
+  "workspace.synced": { bootstrapped: boolean; changed: number };
 };
 
 export interface PluginCommand {
   id: string;
   title: string;
   run: () => void | Promise<void>;
+}
+
+export type PluginScheduleMissedRunPolicy = "run-once" | "skip";
+
+export interface PluginScheduleInput {
+  /** Stable plugin-local identifier. Reusing it updates the same persistent schedule. */
+  key: string;
+  name: string;
+  commandId: string;
+  cronExpression: string;
+  timezone?: string;
+  missedRunPolicy?: PluginScheduleMissedRunPolicy;
+  isEnabled?: boolean;
+}
+
+export interface PluginSchedule extends Required<Omit<PluginScheduleInput, "timezone" | "missedRunPolicy" | "isEnabled">> {
+  timezone: string;
+  missedRunPolicy: PluginScheduleMissedRunPolicy;
+  isEnabled: boolean;
+  runsOnThisDevice: boolean;
+  lastRun: {
+    status: "running" | "succeeded" | "failed";
+    scheduledFor: string;
+    startedAt: string;
+    finishedAt: string | null;
+    errorMessage: string | null;
+  } | null;
 }
 
 export interface PluginEditorSelection {
@@ -180,31 +333,164 @@ export interface PluginEditorSelection {
   contentMarkdown: string;
 }
 
+export interface PluginEditorDocument {
+  noteId: string;
+  contentMarkdown: string;
+  hasUnsavedChanges: boolean;
+}
+
+export interface PluginOpenNoteOptions {
+  /** Opens in-note search and reveals the first exact text match. */
+  search?: string;
+}
+
+export type PluginJsonValue = null | boolean | number | string | PluginJsonValue[] | { [key: string]: PluginJsonValue };
+export type PluginPanelPresentation = "dialog" | "fullscreen";
+export type PluginPanelPurpose = "workflow" | "dashboard" | "preview" | "onboarding";
+
+export interface PluginPanelOpenOptions {
+  state?: PluginJsonValue;
+}
+
+export type PluginPanelActionVariant = "default" | "primary" | "ghost";
+
+export interface PluginPanelAction {
+  id: string;
+  label: string;
+  variant?: PluginPanelActionVariant;
+  disabled?: boolean;
+}
+
+export interface PluginPanelSelectOption {
+  value: string;
+  label: string;
+}
+
+export type PluginPanelToolbarItem =
+  | { type: "search"; key: string; placeholder?: string; value?: string }
+  | { type: "tabs"; key: string; value?: string; options: PluginPanelSelectOption[] }
+  | { type: "select"; key: string; label?: string; value?: string; options: PluginPanelSelectOption[] }
+  | { type: "button"; key: string; label: string; variant?: PluginPanelActionVariant; disabled?: boolean };
+
+export interface PluginPanelEmptyState {
+  title: string;
+  description?: string;
+  action?: PluginPanelAction;
+}
+
+/**
+ * Host-rendered panel chrome. Plugins describe intent; EdgeEver owns layout and controls.
+ * Callbacks stay in-memory and are not serialized with panel open state.
+ */
+export interface PluginPanelChrome {
+  header?: {
+    title?: string;
+    /** Pass `null` to hide the host's default panel description. */
+    description?: string | null;
+    actions?: PluginPanelAction[];
+  };
+  toolbar?: PluginPanelToolbarItem[];
+  empty?: PluginPanelEmptyState | null;
+  onAction?: (id: string) => void;
+  onChange?: (key: string, value: string) => void;
+}
+
+export interface PluginPanelShell {
+  set(chrome: PluginPanelChrome): void;
+}
+
+export interface PluginPanelMountContext {
+  state: PluginJsonValue | null;
+  requestClose(): Promise<void>;
+  /** Host-rendered header, toolbar, and empty state. `set` is a no-op when the host has no chrome adapter. */
+  shell: PluginPanelShell;
+}
+
+export type PluginPanelCloseDecision = boolean | {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+};
+
+export interface PluginEmbedInput {
+  type: string;
+  resourceId: string;
+  previewResourceId?: string;
+  title?: string;
+  data?: PluginJsonValue;
+}
+
+export interface PluginEmbedInstance extends PluginEmbedInput {
+  id: string;
+  pluginId: string;
+  previewResourceId: string;
+  title: string;
+  data: PluginJsonValue;
+}
+
+export interface PluginEmbedRenderer {
+  type: string;
+  mount(container: HTMLElement, embed: PluginEmbedInstance): void | (() => void) | Promise<void | (() => void)>;
+}
+
 export interface PluginPanel {
   id: string;
   title: string;
-  mount(container: HTMLElement): void | (() => void) | Promise<void | (() => void)>;
+  /** Business purpose of this panel. Custom settings pages are intentionally unsupported. */
+  purpose: PluginPanelPurpose;
+  presentation?: PluginPanelPresentation;
+  mount(container: HTMLElement, context: PluginPanelMountContext): void | (() => void) | Promise<void | (() => void)>;
+  beforeClose?(): PluginPanelCloseDecision | Promise<PluginPanelCloseDecision>;
 }
 
 export interface PluginContext {
   pluginId: string;
+  ai: {
+    status(): Promise<{ configured: boolean; modelName?: string }>;
+    generate(input: { system: string; prompt: string; maxOutputTokens?: number; signal?: AbortSignal }): Promise<{ text: string }>;
+  };
   notes: {
     query(input?: PluginNoteQuery): Promise<PluginNoteQueryResult>;
+    queryContent(input?: PluginNoteQuery): Promise<PluginNoteContentQueryResult>;
     get(noteId: string): Promise<PluginNote>;
+    editMarkdown(noteId: string, input: PluginMarkdownEditInput): Promise<PluginNote>;
     create(input: PluginNoteCreateInput): Promise<PluginNote>;
     update(noteId: string, input: PluginNoteUpdateInput): Promise<PluginNote>;
     delete(noteId: string, options?: { permanent?: boolean }): Promise<void>;
+    move(noteIds: string[], notebookId: string): Promise<number>;
+    pin(noteIds: string[], isPinned: boolean): Promise<number>;
+    restore(noteId: string): Promise<PluginNote>;
+    revisions: {
+      list(noteId: string): Promise<PluginNoteRevision[]>;
+      restore(noteId: string, revisionId: string): Promise<PluginNote>;
+    };
   };
   notebooks: {
     list(): Promise<PluginNotebook[]>;
+    create(input: { name: string; parentId?: string | null }): Promise<PluginNotebook>;
+    update(notebookId: string, input: { name?: string; parentId?: string | null; sortOrder?: number }): Promise<PluginNotebook>;
+    delete(notebookId: string): Promise<void>;
   };
   tags: {
     list(): Promise<PluginTag[]>;
     rename(name: string, nextName: string): Promise<number>;
     delete(name: string): Promise<number>;
   };
+  templates: {
+    list(): Promise<PluginTemplate[]>;
+    create(input: { name: string; description?: string | null; noteId?: string; title?: string | null; contentMarkdown?: string; tags?: string[] }): Promise<PluginTemplate>;
+    update(templateId: string, input: { name?: string; description?: string | null; title?: string | null; contentMarkdown?: string; tags?: string[] }): Promise<PluginTemplate>;
+    delete(templateId: string): Promise<void>;
+    use(templateId: string, notebookId: string): Promise<PluginNote>;
+  };
   commands: {
     register(command: PluginCommand): () => void;
+  };
+  schedules: {
+    /** Creates or updates one persistent schedule owned by this plugin. Desktop only. */
+    upsert(input: PluginScheduleInput): Promise<PluginSchedule>;
+    list(): Promise<PluginSchedule[]>;
+    remove(key: string): Promise<void>;
   };
   events: {
     on<K extends keyof PluginEventMap>(event: K, listener: (payload: PluginEventMap[K]) => void): () => void;
@@ -221,16 +507,38 @@ export interface PluginContext {
   };
   editor: {
     getSelection(): Promise<PluginEditorSelection | null>;
+    getDocument(): Promise<PluginEditorDocument | null>;
+    editMarkdown(edits: PluginMarkdownEdit[]): Promise<PluginEditorDocument>;
+    insertEmbed(input: PluginEmbedInput): Promise<PluginEmbedInstance>;
+    embeds: {
+      register(renderer: PluginEmbedRenderer): () => void;
+    };
     replaceSelection(contentMarkdown: string): Promise<void>;
     insertAtCursor(contentMarkdown: string): Promise<void>;
   };
+  resources: {
+    list(noteId?: string): Promise<PluginResource[]>;
+    read(resourceId: string): Promise<Blob>;
+    upload(noteId: string, file: File): Promise<PluginResource>;
+    update(resourceId: string, input: { file: File; expectedContentHash: string }): Promise<PluginResource>;
+    rename(resourceId: string, filename: string): Promise<PluginResource>;
+    delete(resourceId: string): Promise<void>;
+  };
+  settings: {
+    get(key: string): Promise<PluginSettingValue | null>;
+    set(key: string, value: PluginSettingValue): Promise<void>;
+    remove(key: string): Promise<void>;
+  };
   network: {
-    fetch(input: string, init?: RequestInit): Promise<Response>;
+    /** direct preserves browser fetch. public uses authenticated, bounded HTTPS GET/HEAD transport. */
+    fetch(input: string, init?: RequestInit & { transport?: "direct" | "public" }): Promise<Response>;
   };
   ui: {
     showNotice(message: string): void;
+    openNote(noteId: string, options?: PluginOpenNoteOptions): Promise<void>;
     panels: {
       register(panel: PluginPanel): () => void;
+      open(panelId: string, options?: PluginPanelOpenOptions): Promise<void>;
     };
   };
 }
@@ -248,6 +556,97 @@ const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const PANEL_CHROME_ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+const PANEL_ACTION_VARIANTS = new Set<PluginPanelActionVariant>(["default", "primary", "ghost"]);
+
+const clipChromeText = (value: unknown, fallback = "", max = 200) => {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+};
+
+const normalizePanelAction = (value: unknown): PluginPanelAction | null => {
+  if (!isRecord(value) || typeof value.id !== "string" || !PANEL_CHROME_ID.test(value.id)) return null;
+  const label = clipChromeText(value.label);
+  if (!label) return null;
+  const variant = PANEL_ACTION_VARIANTS.has(value.variant as PluginPanelActionVariant) ? value.variant as PluginPanelActionVariant : undefined;
+  return { id: value.id, label, ...(variant ? { variant } : {}), ...(value.disabled === true ? { disabled: true } : {}) };
+};
+
+const normalizePanelOptions = (value: unknown): PluginPanelSelectOption[] => {
+  if (!Array.isArray(value)) return [];
+  const options: PluginPanelSelectOption[] = [];
+  for (const item of value.slice(0, 24)) {
+    if (!isRecord(item) || typeof item.value !== "string" || !item.value || item.value.length > 64) continue;
+    const label = clipChromeText(item.label, item.value);
+    options.push({ value: item.value, label });
+  }
+  return options;
+};
+
+const normalizeToolbarItem = (value: unknown): PluginPanelToolbarItem | null => {
+  if (!isRecord(value) || typeof value.key !== "string" || !PANEL_CHROME_ID.test(value.key)) return null;
+  if (value.type === "search") {
+    return {
+      type: "search",
+      key: value.key,
+      ...(typeof value.placeholder === "string" ? { placeholder: clipChromeText(value.placeholder, "", 80) } : {}),
+      ...(typeof value.value === "string" ? { value: value.value.slice(0, 200) } : {}),
+    };
+  }
+  if (value.type === "tabs" || value.type === "select") {
+    const options = normalizePanelOptions(value.options);
+    if (!options.length) return null;
+    const selected = typeof value.value === "string" && options.some((option) => option.value === value.value) ? value.value : options[0].value;
+    return {
+      type: value.type,
+      key: value.key,
+      value: selected,
+      options,
+      ...(value.type === "select" && typeof value.label === "string" ? { label: clipChromeText(value.label, "", 40) } : {}),
+    };
+  }
+  if (value.type === "button") {
+    const action = normalizePanelAction({ ...value, id: value.key });
+    if (!action) return null;
+    return { type: "button", key: value.key, label: action.label, ...(action.variant ? { variant: action.variant } : {}), ...(action.disabled ? { disabled: true } : {}) };
+  }
+  return null;
+};
+
+/** Strips unknown fields and clamps sizes so host chrome rendering stays bounded. */
+export const normalizePluginPanelChrome = (value: PluginPanelChrome | null | undefined): PluginPanelChrome => {
+  if (!isRecord(value)) return {};
+  const chrome: PluginPanelChrome = {};
+  if (isRecord(value.header)) {
+    const actions = Array.isArray(value.header.actions)
+      ? value.header.actions.map(normalizePanelAction).filter((action): action is PluginPanelAction => Boolean(action)).slice(0, 8)
+      : [];
+    chrome.header = {
+      ...(typeof value.header.title === "string" ? { title: clipChromeText(value.header.title, "", 80) } : {}),
+      ...(value.header.description === null ? { description: null } : typeof value.header.description === "string" ? { description: clipChromeText(value.header.description, "", 200) } : {}),
+      ...(actions.length ? { actions } : {}),
+    };
+  }
+  if (Array.isArray(value.toolbar)) {
+    chrome.toolbar = value.toolbar.map(normalizeToolbarItem).filter((item): item is PluginPanelToolbarItem => Boolean(item)).slice(0, 16);
+  }
+  if (value.empty === null) chrome.empty = null;
+  else if (isRecord(value.empty)) {
+    const title = clipChromeText(value.empty.title, "", 80);
+    if (title) {
+      chrome.empty = {
+        title,
+        ...(typeof value.empty.description === "string" ? { description: clipChromeText(value.empty.description) } : {}),
+        ...(normalizePanelAction(value.empty.action) ? { action: normalizePanelAction(value.empty.action)! } : {}),
+      };
+    }
+  }
+  if (typeof value.onAction === "function") chrome.onAction = value.onAction as PluginPanelChrome["onAction"];
+  if (typeof value.onChange === "function") chrome.onChange = value.onChange as PluginPanelChrome["onChange"];
+  return chrome;
+};
 
 const COLOR_THEME_TOKENS = new Set<ThemeTokenName>([
   "color.background", "color.surface", "color.surfaceMuted", "color.text", "color.textMuted",
@@ -300,16 +699,118 @@ const normalizeThemeTokens = (value: unknown): ThemeTokens => {
   return tokens;
 };
 
+const SETTING_KEY_PATTERN = /^[a-z][a-z0-9._-]*$/;
+
+const normalizeSettingList = (field: Record<string, unknown>, key: string): PluginSettingList | undefined => {
+  if (field.list === undefined) return undefined;
+  if (!isRecord(field.list) || !Array.isArray(field.list.items) || field.list.items.length === 0 || field.list.items.length > 100) {
+    throw new Error(`Plugin setting ${key} list requires between 1 and 100 items.`);
+  }
+  if (field.list.title !== undefined && (typeof field.list.title !== "string" || !field.list.title.trim() || field.list.title.length > 200)) {
+    throw new Error(`Plugin setting ${key} list title must be at most 200 characters.`);
+  }
+  if (field.list.actionLabel !== undefined && (typeof field.list.actionLabel !== "string" || !field.list.actionLabel.trim() || field.list.actionLabel.length > 40)) {
+    throw new Error(`Plugin setting ${key} list action label must be at most 40 characters.`);
+  }
+  const items = field.list.items.map((item, index): PluginSettingListItem => {
+    if (!isRecord(item) || typeof item.title !== "string" || !item.title.trim() || item.title.length > 200) {
+      throw new Error(`Plugin setting ${key} list item ${index + 1} requires a title of at most 200 characters.`);
+    }
+    if (item.description !== undefined && (typeof item.description !== "string" || item.description.length > 200)) {
+      throw new Error(`Plugin setting ${key} list item ${index + 1} description is too long.`);
+    }
+    return {
+      title: item.title.trim(),
+      ...(typeof item.description === "string" && item.description.trim() ? { description: item.description.trim() } : {}),
+    };
+  });
+  return {
+    items,
+    ...(typeof field.list.title === "string" ? { title: field.list.title.trim() } : {}),
+    ...(typeof field.list.actionLabel === "string" ? { actionLabel: field.list.actionLabel.trim() } : {}),
+  };
+};
+
+const normalizePluginSettings = (value: unknown): PluginSettingsSchema => {
+  if (!isRecord(value) || !Array.isArray(value.fields)) throw new Error("Plugin settings must contain a fields array.");
+  if (value.fields.length > 50) throw new Error("Plugin settings cannot contain more than 50 fields.");
+  const keys = new Set<string>();
+  const fields = value.fields.map((field): PluginSettingField => {
+    if (!isRecord(field) || typeof field.key !== "string" || !SETTING_KEY_PATTERN.test(field.key)) {
+      throw new Error("Plugin setting keys must start with a lowercase letter and contain only lowercase letters, numbers, dots, dashes, or underscores.");
+    }
+    if (keys.has(field.key)) throw new Error(`Duplicate plugin setting key: ${field.key}`);
+    keys.add(field.key);
+    if (typeof field.label !== "string" || !field.label.trim() || field.label.length > 200) throw new Error(`Plugin setting ${field.key} requires a label of at most 200 characters.`);
+    if (typeof field.description === "string" && field.description.length > 1000) throw new Error(`Plugin setting ${field.key} description is too long.`);
+    const list = normalizeSettingList(field, field.key);
+    const common = {
+      key: field.key,
+      label: field.label.trim(),
+      ...(typeof field.description === "string" && field.description.trim() ? { description: field.description.trim() } : {}),
+      ...(field.required === true ? { required: true } : {}),
+      ...(list ? { list } : {}),
+    };
+    if (field.type === "text" || field.type === "secret") {
+      if (field.type === "secret" && field.default !== undefined) throw new Error(`Secret setting ${field.key} cannot declare a default value.`);
+      if (field.default !== undefined && typeof field.default !== "string") throw new Error(`Plugin setting ${field.key} default must be a string.`);
+      if (field.placeholder !== undefined && typeof field.placeholder !== "string") throw new Error(`Plugin setting ${field.key} placeholder must be a string.`);
+      return {
+        ...common,
+        type: field.type,
+        ...(typeof field.default === "string" ? { default: field.default } : {}),
+        ...(typeof field.placeholder === "string" ? { placeholder: field.placeholder } : {}),
+      } as PluginSettingField;
+    }
+    if (field.type === "number") {
+      for (const key of ["default", "min", "max", "step"] as const) {
+        if (field[key] !== undefined && (typeof field[key] !== "number" || !Number.isFinite(field[key]))) {
+          throw new Error(`Plugin setting ${field.key} ${key} must be a finite number.`);
+        }
+      }
+      if (typeof field.min === "number" && typeof field.max === "number" && field.min > field.max) throw new Error(`Plugin setting ${field.key} min cannot exceed max.`);
+      if (typeof field.step === "number" && field.step <= 0) throw new Error(`Plugin setting ${field.key} step must be positive.`);
+      if (typeof field.default === "number" && ((typeof field.min === "number" && field.default < field.min) || (typeof field.max === "number" && field.default > field.max))) {
+        throw new Error(`Plugin setting ${field.key} default is outside its allowed range.`);
+      }
+      return { ...common, type: "number", ...Object.fromEntries(["default", "min", "max", "step"].flatMap((key) => typeof field[key] === "number" ? [[key, field[key]]] : [])) } as PluginSettingField;
+    }
+    if (field.type === "boolean") {
+      if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin setting ${field.key} default must be a boolean.`);
+      return { ...common, type: "boolean", ...(typeof field.default === "boolean" ? { default: field.default } : {}) };
+    }
+    if (field.type === "select") {
+      if (!Array.isArray(field.options) || field.options.length === 0 || field.options.length > 100) throw new Error(`Plugin setting ${field.key} requires between 1 and 100 select options.`);
+      const optionValues = new Set<string>();
+      const options = field.options.map((option) => {
+        if (!isRecord(option) || typeof option.value !== "string" || !option.value || typeof option.label !== "string" || !option.label.trim()) {
+          throw new Error(`Plugin setting ${field.key} has an invalid select option.`);
+        }
+        if (optionValues.has(option.value)) throw new Error(`Plugin setting ${field.key} has a duplicate select value.`);
+        optionValues.add(option.value);
+        return { value: option.value, label: option.label.trim() };
+      });
+      if (field.default !== undefined && (typeof field.default !== "string" || !optionValues.has(field.default))) throw new Error(`Plugin setting ${field.key} default must match a select option.`);
+      return { ...common, type: "select", options, ...(typeof field.default === "string" ? { default: field.default } : {}) };
+    }
+    throw new Error(`Plugin setting ${field.key} has an unsupported type.`);
+  });
+  return { fields };
+};
+
 export const parseExtensionManifest = (value: unknown): ExtensionManifest => {
   if (!isRecord(value)) throw new Error("Extension manifest must be an object.");
   assertCommonManifest(value);
 
   if (value.type === "plugin") {
     if (value.apiVersion !== PLUGIN_API_VERSION) throw new Error(`Unsupported plugin API version: ${String(value.apiVersion)}`);
+    if (value.settingsUi !== "host") {
+      throw new Error('Plugin API v2 requires settingsUi to be "host".');
+    }
     if (typeof value.entry !== "string" || !value.entry.trim()) throw new Error("Plugin entry is required.");
-    if (!Array.isArray(value.permissions)) throw new Error("Plugin permissions must be an array.");
+    if (value.permissions !== undefined && !Array.isArray(value.permissions)) throw new Error("Plugin permissions must be an array.");
     const allowedPermissions = new Set<string>(PLUGIN_PERMISSIONS);
-    const permissions = [...new Set(value.permissions.map(String))];
+    const permissions = [...new Set((value.permissions ?? []).map(String))];
     const unsupported = permissions.find((permission) => !allowedPermissions.has(permission));
     if (unsupported) throw new Error(`Unsupported plugin permission: ${unsupported}`);
     const networkHosts = value.networkHosts === undefined
@@ -320,15 +821,13 @@ export const parseExtensionManifest = (value: unknown): ExtensionManifest => {
     if (networkHosts?.some((host) => !/^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host))) {
       throw new Error("networkHosts entries must be hostnames without a scheme, port, or path.");
     }
-    if (permissions.includes("network") && !networkHosts?.length) {
-      throw new Error("Plugins requesting network permission must declare networkHosts.");
-    }
     const platforms = value.platforms === undefined
       ? undefined
       : Array.isArray(value.platforms) && value.platforms.every((platform) => ["web", "desktop", "android", "ios"].includes(String(platform)))
         ? [...new Set(value.platforms.map(String))] as ExtensionPlatform[]
         : (() => { throw new Error("Plugin platforms contains an unsupported platform."); })();
-    return { ...value, type: "plugin", permissions, networkHosts, platforms } as PluginManifest;
+    const settings = value.settings === undefined ? undefined : normalizePluginSettings(value.settings);
+    return { ...value, type: "plugin", permissions, networkHosts, platforms, settings } as PluginManifest;
   }
 
   if (value.type === "theme") {
@@ -372,6 +871,9 @@ export const parseMarketplaceRegistry = (value: unknown): MarketplaceRegistry =>
     const name = item.name as string;
     const description = item.description as string;
     const author = item.author as string;
+    if (item.publisher !== undefined && item.publisher !== "edgeever") {
+      throw new Error(`Marketplace entry ${item.id} has an invalid publisher.`);
+    }
     const category = item.category as string;
     const repositoryUrl = item.repositoryUrl as string;
     if (!GITHUB_REPOSITORY_PATTERN.test(repositoryUrl)) throw new Error(`Marketplace entry ${item.id} repositoryUrl must be a GitHub repository.`);
@@ -402,6 +904,7 @@ export const parseMarketplaceRegistry = (value: unknown): MarketplaceRegistry =>
       name: name.trim(),
       description: description.trim(),
       author: author.trim(),
+      ...(item.publisher === "edgeever" ? { publisher: "edgeever" as const } : {}),
       category: category.trim(),
       repositoryUrl: repositoryUrl.trim(),
       distribution,

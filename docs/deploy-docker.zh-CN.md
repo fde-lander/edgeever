@@ -9,6 +9,10 @@ Cloudflare 使用 Workers + D1 + R2。
 
 - Docker Engine 24 或更高版本，包含 Docker Compose v2。
 - `amd64` 或 `arm64` Linux 主机。
+- Linux 5.6 或更高版本内核。更旧的内核不属于正式支持的 Docker 环境，因为 Bun
+  在这些环境中可能无法解析容器依赖。安装器会发出警告但不会阻止安装；如果启动
+  日志出现 `EISDIR reading .../node_modules/...`，应先升级宿主机系统或内核，
+  不要先修改 `/data` 权限或替换应用数据。
 - 实例离开可信局域网时，必须使用带 HTTPS 的反向代理。
 
 ## 一键安装
@@ -65,8 +69,9 @@ docker compose ps
 Compose 会创建一个命名卷。所有需要在容器替换后保留的数据都位于 `/data`：
 
 ```text
-/data/edgeever.sqlite       SQLite 数据库
-/data/resources/            本地图片与附件
+/data/edgeever.sqlite            SQLite 数据库
+/data/edgeever-secrets.json      凭据加密根密钥
+/data/resources/                 本地图片与附件
 ```
 
 镜像以非 root 的 `bun` 用户运行（UID/GID 均为 `1000`）。如果 NAS 必须使用主机
@@ -86,12 +91,11 @@ Compose 会创建一个命名卷。所有需要在容器替换后保留的数据
 | `EDGE_EVER_AUTH_PASSWORD_HASH`         | 无       | 可替代明文引导密码的 PBKDF2 hash          |
 | `EDGE_EVER_SESSION_TTL_DAYS`           | `400`    | 登录会话有效期                            |
 | `EDGE_EVER_IDLE_TIMEOUT_SECONDS`       | `120`    | Bun 流式响应空闲超时，可设为 10 到 255 秒 |
-| `EDGE_EVER_STORAGE_ENCRYPTION_KEY`     | 无       | 加密保存的外部对象存储凭据                |
-| `EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` | 自动派生 | 可选的独立 AI 凭据加密密钥                |
+| `EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` | 写入 `/data` | 可选的独立 AI 凭据加密密钥。未设置时，Docker 会把认证 Secret 或自动生成的密钥写入 `/data/edgeever-secrets.json`。 |
 
 Secret 可在受支持的变量名后追加 `_FILE`，并指向 Docker secret，例如
-`EDGE_EVER_AUTH_PASSWORD_FILE=/run/secrets/auth_password`。密码/hash、存储加密
-密钥和 S3 访问凭据均支持这种形式。同一个 Secret 不得同时设置直接变量与
+`EDGE_EVER_AUTH_PASSWORD_FILE=/run/secrets/auth_password`。密码/hash 和 S3
+访问凭据均支持这种形式。同一个 Secret 不得同时设置直接变量与
 对应的 `_FILE` 变量。
 
 `EDGE_EVER_ALLOW_UNAUTHENTICATED=true` 仅用于隔离的开发环境，严禁将未鉴权
@@ -128,15 +132,17 @@ HTTPS，并转发原始 Host 和客户端地址。严禁公开 SQLite、`/data` 
 
 1. 执行 `docker compose stop edgeever`，等待日志出现 shutdown complete。
    EdgeEver 会在优雅停机时 checkpoint SQLite WAL。
-2. 完整复制或快照命名卷，包括 SQLite 文件与 `resources` 目录。
+2. 完整复制或快照命名卷，包括 SQLite 文件、`edgeever-secrets.json` 与
+   `resources` 目录。
 3. 执行 `docker compose start edgeever` 恢复服务。
 
-请单独备份 `EDGE_EVER_STORAGE_ENCRYPTION_KEY`，以及显式配置的
-`EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY`。缺少这些密钥时，卷备份无法解密已保存
-的凭据。使用 S3 时还需独立备份存储桶。
+Docker 会把凭据加密根密钥保存在 `/data/edgeever-secrets.json`，因此完整的
+`/data` 卷备份在容器重建后仍可解密已保存的 AI 与对象存储凭据。如果你在数据卷
+之外单独管理密钥，请继续备份显式配置的
+`EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY`。Cloudflare 部署仍使用 Worker Secret，
+不会读写该文件。使用 S3 时还需独立备份存储桶。
 
-只能在 EdgeEver 停止时恢复到空卷，并同时恢复匹配的 Secret。应定期在独立
-实例中验证备份。
+只能在 EdgeEver 停止时恢复到空卷。应定期在独立实例中验证备份。
 
 ## 升级与回滚
 

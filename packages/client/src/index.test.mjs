@@ -8,6 +8,25 @@ const jsonResponse = (body, init = {}) => new Response(JSON.stringify(body), {
 });
 
 describe("EdgeEver client HTTP contract", () => {
+  test("companion streaming handles split UTF-8 frames, authenticates and does not retry", async () => {
+    const expected = [{ type: "start", id: "request" }, { type: "text-delta", text: "你好" }, { type: "error", code: "failed" }];
+    const bytes = new TextEncoder().encode(expected.map(event => `data: ${JSON.stringify(event)}`).join("\n\n"));
+    let calls = 0;
+    const client = createEdgeEverClient({ baseUrl: "https://notes.example", token: "test-token", fetch: async (url, init) => {
+      calls++;
+      expect(url).toBe("https://notes.example/api/v1/companion/turns");
+      expect(new Headers(init.headers).get("Authorization")).toBe("Bearer test-token");
+      return new Response(new ReadableStream({ start(controller) {
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      } }));
+    } });
+    const actual = [];
+    await client.streamCompanion({ id: "request", message: "hi" }, { onEvent: event => actual.push(event) });
+    expect(actual).toEqual(expected);
+    expect(calls).toBe(1);
+  });
+
   test("reads public instance diagnostics through the configured base URL", async () => {
     const calls = [];
     const client = createEdgeEverClient({
@@ -106,12 +125,125 @@ describe("EdgeEver client HTTP contract", () => {
     expect(call.headers.get("Content-Type")).toBeNull();
   });
 
-  test("keeps multipart restore bodies free of a synthetic JSON content type", async () => {
-    let headers;
+  test("exposes an authenticated resource response without forcing Blob buffering", async () => {
+    let authorization;
     const client = createEdgeEverClient({
+      baseUrl: "https://notes.example",
+      token: "secret",
       fetch: async (_input, init) => {
-        headers = new Headers(init.headers);
-        return jsonResponse({ ok: true });
+        authorization = new Headers(init.headers).get("Authorization");
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2]));
+            controller.enqueue(new Uint8Array([3]));
+            controller.close();
+          },
+        }), { headers: { "Content-Length": "3" } });
+      },
+    });
+
+    const response = await client.getResourceResponse("/api/v1/resources/res/blob");
+    expect(authorization).toBe("Bearer secret");
+    expect(response).toBeInstanceOf(Response);
+    expect(response.headers.get("Content-Length")).toBe("3");
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([1, 2, 3]);
+  });
+
+  test("downloads GitHub plugin assets through the release-tag route", async () => {
+    let requestUrl;
+    const client = createEdgeEverClient({
+      fetch: async (input) => {
+        requestUrl = String(input);
+        return new Response(new Uint8Array([1, 2, 3]));
+      },
+    });
+
+    const buffer = await client.downloadGithubPluginAsset(
+      "example-owner",
+      "example-plugin",
+      "v1.2.3-preview.1",
+      "main.js",
+    );
+
+    expect(requestUrl).toBe(
+      "/api/v1/plugins/github/example-owner/example-plugin/releases/v1.2.3-preview.1/assets/main.js",
+    );
+    expect(Array.from(new Uint8Array(buffer))).toEqual([1, 2, 3]);
+  });
+
+  test("downloads GitHub plugin assets through the release-asset id route", async () => {
+    let requestUrl;
+    const client = createEdgeEverClient({
+      fetch: async (input) => {
+        requestUrl = String(input);
+        return new Response(new Uint8Array([4, 5]));
+      },
+    });
+
+    const buffer = await client.downloadGithubPluginAssetById(
+      "example-owner",
+      "example-plugin",
+      "42",
+      "styles.css",
+    );
+
+    expect(requestUrl).toBe(
+      "/api/v1/plugins/github/example-owner/example-plugin/assets/42/styles.css",
+    );
+    expect(Array.from(new Uint8Array(buffer))).toEqual([4, 5]);
+  });
+
+  test("reads GitHub plugin metadata through the instance proxy", async () => {
+    const calls = [];
+    const client = createEdgeEverClient({
+      fetch: async (input) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith("/latest-manifest")) return new Response("{\"id\":\"plugin\",\"version\":\"1.2.3\"}");
+        if (url.endsWith("/manifest")) return new Response("{\"id\":\"plugin\"}");
+        if (url.includes("/releases/tags/missing")) return new Response(null, { status: 404 });
+        return Response.json({ tag_name: "v1.2.3", draft: false, assets: [] });
+      },
+    });
+
+    expect(await client.getGithubPluginLatestManifest("example-owner", "example-plugin")).toBe("{\"id\":\"plugin\",\"version\":\"1.2.3\"}");
+    expect(await client.getGithubPluginRepositoryManifest("example-owner", "example-plugin")).toBe("{\"id\":\"plugin\"}");
+    expect(await client.getGithubPluginRelease("example-owner", "example-plugin", "missing")).toBeNull();
+    expect(await client.getGithubPluginRelease("example-owner", "example-plugin", "v1.2.3")).toEqual({
+      tag_name: "v1.2.3",
+      draft: false,
+      assets: [],
+    });
+    expect(calls).toEqual([
+      "/api/v1/plugins/github/example-owner/example-plugin/latest-manifest",
+      "/api/v1/plugins/github/example-owner/example-plugin/manifest",
+      "/api/v1/plugins/github/example-owner/example-plugin/releases/tags/missing",
+      "/api/v1/plugins/github/example-owner/example-plugin/releases/tags/v1.2.3",
+    ]);
+  });
+
+  test("streams restored resources through bounded multipart requests", async () => {
+    const calls = [];
+    const client = createEdgeEverClient({
+      fetch: async (input, init) => {
+        const path = String(input);
+        calls.push({ path, headers: new Headers(init.headers), body: init.body });
+        if (path.endsWith("/uploads")) {
+          return jsonResponse({
+            upload: {
+              id: "restore_upload",
+              resourceId: "resource/id",
+              partSize: 4,
+              partCount: 2,
+              byteSize: 5,
+              expiresAt: "2026-09-01T00:00:00.000Z",
+            },
+          }, { status: 201 });
+        }
+        if (path.includes("/parts/")) {
+          return jsonResponse({ part: { partNumber: Number(path.split("/").at(-1)), byteSize: init.body.size } });
+        }
+        return jsonResponse({ resource: { id: "resource/id" } }, { status: 201 });
       },
     });
 
@@ -123,14 +255,155 @@ describe("EdgeEver client HTTP contract", () => {
         filename: "file.bin",
         mimeType: "application/octet-stream",
         kind: "attachment",
-        size: 1,
-        url: "/blob",
-        createdAt: "",
-        updatedAt: "",
+        byteSize: 5,
+        sha256: null,
+        width: null,
+        height: null,
+        originalMemoId: null,
+        archivePath: "resources/file.bin",
+        createdAt: "2026-08-31T00:00:00.000Z",
+        updatedAt: "2026-08-31T00:00:00.000Z",
       },
-      new Blob(["x"]),
+      new Blob(["abcde"]),
     );
-    expect(headers.has("Content-Type")).toBe(false);
+    expect(calls.map((call) => call.path)).toEqual([
+      "/api/v1/restores/json/resources/resource%2Fid/uploads",
+      "/api/v1/resource-uploads/restore_upload/parts/1",
+      "/api/v1/resource-uploads/restore_upload/parts/2",
+      "/api/v1/resource-uploads/restore_upload/complete",
+    ]);
+    expect(await calls[1].body.text()).toBe("abcd");
+    expect(await calls[2].body.text()).toBe("e");
+    expect(calls[1].headers.get("Content-Type")).toBe("application/octet-stream");
+  });
+
+  test("uploads memo resources as ordered resumable parts", async () => {
+    const calls = [];
+    const file = new File(["abcdefghij", new Uint8Array(5 * 1024 * 1024 - 9)], "archive.bin", { type: "application/octet-stream" });
+    const client = createEdgeEverClient({
+      fetch: async (input, init) => {
+        const path = String(input);
+        calls.push({ path, method: init.method, body: init.body });
+        if (path.endsWith("/resource-uploads")) {
+          expect(JSON.parse(init.body)).toEqual({
+            filename: "archive.bin",
+            mimeType: "application/octet-stream",
+            byteSize: file.size,
+          });
+          return jsonResponse({
+            upload: {
+              id: "upload_1",
+              resourceId: "res_1",
+              partSize: 2 * 1024 * 1024,
+              partCount: 3,
+              byteSize: file.size,
+              expiresAt: "2026-09-01T00:00:00.000Z",
+            },
+          }, { status: 201 });
+        }
+        if (path.includes("/parts/")) {
+          const partNumber = Number(path.split("/").at(-1));
+          return jsonResponse({ part: { partNumber, byteSize: init.body.size } });
+        }
+        return jsonResponse({ resource: { id: "res_1", url: "/api/v1/resources/res_1/blob" } }, { status: 201 });
+      },
+    });
+
+    const result = await client.uploadMemoResource("memo/1", file);
+
+    expect(result.resource.id).toBe("res_1");
+    expect(calls.map(({ path }) => path)).toEqual([
+      "/api/v1/memos/memo%2F1/resource-uploads",
+      "/api/v1/resource-uploads/upload_1/parts/1",
+      "/api/v1/resource-uploads/upload_1/parts/2",
+      "/api/v1/resource-uploads/upload_1/parts/3",
+      "/api/v1/resource-uploads/upload_1/complete",
+    ]);
+    expect(await calls[1].body.slice(0, 10).text()).toBe("abcdefghij");
+    expect(calls.slice(1, 4).map((call) => call.body.size)).toEqual([
+      2 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024 + 1,
+    ]);
+  });
+
+  test("uploads small images in one request and preserves file metadata", async () => {
+    const calls = [];
+    const client = createEdgeEverClient({
+      fetch: async (input, init) => {
+        calls.push({ path: String(input), init });
+        return jsonResponse({ resource: { id: "image_1" } }, { status: 201 });
+      },
+    });
+    const file = new File(["webp bytes"], "截图.webp", { type: "image/webp" });
+    expect((await client.uploadMemoResource("memo/1", file)).resource.id).toBe("image_1");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe("/api/v1/memos/memo%2F1/resources");
+    const uploaded = calls[0].init.body.get("file");
+    expect(uploaded.name).toBe(file.name);
+    expect(uploaded.type).toBe(file.type);
+    expect(await uploaded.text()).toBe(await file.text());
+    expect(calls[0].init.headers.get("Content-Type")).toBeNull();
+  });
+
+  test("replaces resource content with a multipart concurrency baseline", async () => {
+    let request;
+    const client = createEdgeEverClient({
+      fetch: async (input, init) => {
+        request = { path: String(input), init };
+        return jsonResponse({ resource: { id: "res_1", sha256: "next" } });
+      },
+    });
+    const file = new File(["scene"], "drawing.excalidraw", { type: "application/vnd.excalidraw+json" });
+
+    await client.updateResourceContent("res/1", file, "previous");
+
+    expect(request.path).toBe("/api/v1/resources/res%2F1/blob");
+    expect(request.init.method).toBe("PUT");
+    expect(request.init.body).toBeInstanceOf(FormData);
+    expect(request.init.body.get("file")).toBeInstanceOf(File);
+    expect(await request.init.body.get("file").text()).toBe("scene");
+    expect(request.init.body.get("expectedContentHash")).toBe("previous");
+    expect(request.init.body.get("mimeType")).toBe("application/vnd.excalidraw+json");
+    expect(request.init.body.get("filename")).toBe("drawing.excalidraw");
+  });
+
+  test("uploads a file-backed source without requesting more than one part at a time", async () => {
+    const ranges = [];
+    const bodies = [];
+    const client = createEdgeEverClient({
+      fetch: async (input, init) => {
+        const path = String(input);
+        if (path.endsWith("/resource-uploads")) {
+          return jsonResponse({
+            upload: {
+              id: "upload_staged",
+              resourceId: "res_staged",
+              partSize: 4,
+              partCount: 3,
+              byteSize: 9,
+              expiresAt: "2026-09-01T00:00:00.000Z",
+            },
+          }, { status: 201 });
+        }
+        if (path.includes("/parts/")) {
+          bodies.push(await init.body.text());
+          return jsonResponse({ part: { partNumber: Number(path.split("/").at(-1)), byteSize: init.body.size } });
+        }
+        return jsonResponse({ resource: { id: "res_staged" } }, { status: 201 });
+      },
+    });
+
+    await client.uploadMemoResourceParts("memo_1", {
+      filename: "offline.bin",
+      mimeType: "application/octet-stream",
+      byteSize: 9,
+      readPart: async (start, end) => {
+        ranges.push([start, end]);
+        return new Blob(["abcdefghi".slice(start, end)]);
+      },
+    });
+
+    expect(ranges).toEqual([[0, 4], [4, 8], [8, 9]]);
+    expect(bodies).toEqual(["abcd", "efgh", "i"]);
   });
 
   test("sends unsaved note content to the AI tag suggestion endpoint", async () => {

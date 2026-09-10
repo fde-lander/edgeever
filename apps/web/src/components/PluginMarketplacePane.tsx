@@ -1,6 +1,6 @@
 import { ChevronLeft, Store } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import * as m from "motion/react-m";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -8,17 +8,22 @@ import { PluginManagerCard } from "@/components/settings/PluginManagerCard";
 import type { EdgeEverPluginHost } from "@/lib/plugins/plugin-host";
 import { contentEnterMotion } from "@/lib/motion";
 import { WORKSPACE_PAGE_TITLE_CLASSNAME } from "@/lib/workspace-ui";
+import { ExecutionCenterButton } from "@/components/execution/ExecutionCenterButton";
+import { getPluginDetailPath } from "@/lib/plugins/plugin-navigation";
 
 export const PluginMarketplacePane = ({
   host,
   onClose,
+  onOpenExecutionCenter,
 }: {
   host: EdgeEverPluginHost;
   onClose: () => void;
+  onOpenExecutionCenter: () => void;
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { pluginId = null } = useParams<{ pluginId: string }>();
+  const [searchParams] = useSearchParams();
   const close = () => {
     if (pluginId) {
       navigate("/plugins");
@@ -45,7 +50,10 @@ export const PluginMarketplacePane = ({
             <span className="truncate text-slate-900">{t("plugins.marketplace.title")}</span>
           </h1>
         </div>
-        <ThemeToggle className="inline-flex" showLabel />
+        <div className="flex items-center gap-1">
+          <ExecutionCenterButton onClick={onOpenExecutionCenter} />
+          <ThemeToggle className="inline-flex" showLabel />
+        </div>
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:py-7">
@@ -53,7 +61,8 @@ export const PluginMarketplacePane = ({
           <PluginManagerCard
             host={host}
             selectedPluginId={pluginId}
-            onOpenPlugin={(id) => navigate(`/plugins/${encodeURIComponent(id)}`)}
+            requestedPage={searchParams.get("view")}
+            onOpenPlugin={(id) => navigate(getPluginDetailPath(id))}
             onClosePlugin={() => navigate("/plugins")}
           />
         </m.div>

@@ -1,6 +1,6 @@
 import { memo, useRef, type ReactNode } from "react";
-import type { MemoFilterMode } from "@edgeever/client";
-import { DEFAULT_MEMO_TITLE, type MemoSummary, type Notebook } from "@edgeever/shared";
+import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
+import { DEFAULT_MEMO_TITLE, getMemoListTimestamp, type MemoSummary, type Notebook } from "@edgeever/shared";
 import { MOBILE_UI_METRICS, toggleMobileMemoFilterMode } from "@edgeever/shared/mobile-ui";
 import { FlatList, Platform, RefreshControl, View } from "react-native";
 import Animated, { FadeInDown, FadeOutUp, LinearTransition, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
@@ -25,14 +25,17 @@ export const NotesView = ({
   isRefreshing,
   memoFilterMode,
   memoListDensity,
+  memoSortMode,
   memoView,
   memos,
   notebooks,
   onCreate,
   onCreateFromTemplate,
+  onClearTag,
   onClearSelection,
   onFilterModeChange,
   onOpenActions,
+  onOpenTagFilter,
   onOpenNotebookPicker,
   onMemoLongPress,
   onMemoPress,
@@ -42,6 +45,7 @@ export const NotesView = ({
   onSearchTextChange,
   onSetMemoView,
   searchText,
+  selectedTag,
   totalMemoCount,
   selectedMemoIds,
   selectionMode,
@@ -55,14 +59,17 @@ export const NotesView = ({
   isRefreshing: boolean;
   memoFilterMode: MemoFilterMode;
   memoListDensity: MobileMemoListDensity;
+  memoSortMode: MemoSortMode;
   memoView: MemoView;
   memos: MemoSummary[];
   notebooks: Notebook[];
   onCreate: () => void;
   onCreateFromTemplate?: () => void;
+  onClearTag: () => void;
   onClearSelection: () => void;
   onFilterModeChange: (filterMode: MemoFilterMode) => void;
   onOpenActions: () => void;
+  onOpenTagFilter: () => void;
   onOpenNotebookPicker: () => void;
   onMemoLongPress: (memo: MemoSummary) => void;
   onMemoPress: (memoId: string) => void;
@@ -72,6 +79,7 @@ export const NotesView = ({
   onSearchTextChange: (value: string) => void;
   onSetMemoView: (memoView: MemoView) => void;
   searchText: string;
+  selectedTag: string | null;
   totalMemoCount: number;
   selectionMode: boolean;
   selectedMemoIds: Set<string>;
@@ -79,15 +87,17 @@ export const NotesView = ({
   const { resolvedTheme } = useMobileTheme();
   const { preference: localePreference, translate } = useMobileLocale();
   const searchActive = searchText.trim().length > 0;
-  const filterActive = memoFilterMode !== "all";
+  const filterActive = memoFilterMode !== "all" || Boolean(selectedTag);
   const searchStatusLabel = translate("正在搜索");
   const searchResultLabel = translate(`${totalMemoCount} 条结果`);
   const exitSearchLabel = translate("退出搜索");
-  const activeFilterLabel = memoFilterMode === "pinned"
-    ? translate("置顶")
-    : memoFilterMode === "tagged"
-      ? translate("有标签")
-      : translate("无标签");
+  const activeFilterLabel = selectedTag
+    ? `#${selectedTag}`
+    : memoFilterMode === "pinned"
+      ? translate("置顶")
+      : memoFilterMode === "tagged"
+        ? translate("有标签")
+        : translate("无标签");
   const filterResultLabel = translate(`筛选：${activeFilterLabel} · ${totalMemoCount} 条`);
   const resetFilterLabel = translate("重置");
 
@@ -105,16 +115,16 @@ export const NotesView = ({
         ) : null}
         <View style={styles.mobileListTitleRow}>
           <Pressable
-            accessibilityLabel={memoView === "trash" ? "返回笔记列表" : "切换笔记本"}
+            accessibilityLabel={memoView === "trash" || selectedTag ? "返回笔记列表" : "切换笔记本"}
             accessibilityRole="button"
-            onPress={memoView === "trash" ? () => onSetMemoView("notebook") : onOpenNotebookPicker}
+            onPress={memoView === "trash" ? () => onSetMemoView("notebook") : selectedTag ? onClearTag : onOpenNotebookPicker}
             style={styles.mobileNotebookTitleButton}
           >
-            {memoView === "trash" ? <ChevronLeft color="#475569" size={18} /> : null}
+            {memoView === "trash" || selectedTag ? <ChevronLeft color="#475569" size={18} /> : null}
             <Text numberOfLines={1} style={styles.mobileNotebookTitle}>
-              {memoView === "trash" ? "回收站" : activeNotebook?.name ?? "全部笔记"}
+              {memoView === "trash" ? "回收站" : selectedTag ? `#${selectedTag}` : activeNotebook?.name ?? "全部笔记"}
             </Text>
-            {memoView === "notebook" ? <ChevronDown color="#64748b" size={16} /> : null}
+            {memoView === "notebook" && !selectedTag ? <ChevronDown color="#64748b" size={16} /> : null}
           </Pressable>
           <Pressable accessibilityLabel={selectionMode ? "批量操作" : "列表选项"} accessibilityRole="button" onPress={onOpenActions} style={styles.mobileMoreButton}>
             <MoreHorizontal color="#475569" size={20} />
@@ -149,16 +159,10 @@ export const NotesView = ({
                 onPress={() => onFilterModeChange(toggleMobileMemoFilterMode(memoFilterMode, "pinned"))}
               />
               <MobileFilterButton
-                active={memoFilterMode === "tagged"}
-                icon={<Tag color={memoFilterMode === "tagged" ? "#ffffff" : "#475569"} size={18} />}
-                label="有标签"
-                onPress={() => onFilterModeChange(toggleMobileMemoFilterMode(memoFilterMode, "tagged"))}
-              />
-              <MobileFilterButton
-                active={memoFilterMode === "untagged"}
-                icon={<Tag color={memoFilterMode === "untagged" ? "#ffffff" : "#475569"} size={18} />}
-                label="无标签"
-                onPress={() => onFilterModeChange(toggleMobileMemoFilterMode(memoFilterMode, "untagged"))}
+                active={Boolean(selectedTag)}
+                icon={<Tag color={selectedTag ? "#ffffff" : "#475569"} size={18} />}
+                label={selectedTag ? `#${selectedTag}` : "按标签筛选"}
+                onPress={onOpenTagFilter}
               />
           </View>
           {searchActive || filterActive ? (
@@ -175,7 +179,7 @@ export const NotesView = ({
               <Pressable
                 accessibilityLabel={searchActive ? exitSearchLabel : resetFilterLabel}
                 accessibilityRole="button"
-                onPress={searchActive ? () => onSearchTextChange("") : () => onFilterModeChange("all")}
+                onPress={searchActive ? () => onSearchTextChange("") : selectedTag ? onClearTag : () => onFilterModeChange("all")}
               >
                 <Text style={[styles.mobileListConstraintAction, !searchActive && styles.mobileListConstraintActionFilter]}>
                   {searchActive ? exitSearchLabel : resetFilterLabel}
@@ -187,7 +191,7 @@ export const NotesView = ({
       </View>
 
     <MemoList
-      emptyActions={memoView === "notebook" && notebooks.length > 0 && !searchActive && memoFilterMode === "all"
+      emptyActions={memoView === "notebook" && notebooks.length > 0 && !searchActive && !filterActive
         ? [
           { label: "新建笔记", onPress: onCreate, variant: "primary" as const },
           ...(onCreateFromTemplate
@@ -195,8 +199,8 @@ export const NotesView = ({
             : []),
         ]
         : undefined}
-      emptyDescription={searchActive ? "换个关键词再试" : memoFilterMode !== "all" ? "试试切换筛选条件，或调整搜索关键词。" : memoView === "trash" ? "删除的笔记会显示在这里。" : "先创建一条笔记，之后可以在这里快速预览、搜索和批量整理。"}
-      emptyTitle={searchActive ? "没有找到匹配笔记" : memoFilterMode !== "all" ? "没有符合筛选的笔记" : memoView === "trash" ? "回收站为空" : "暂无笔记"}
+      emptyDescription={searchActive ? "换个关键词再试" : filterActive ? "试试切换筛选条件，或调整搜索关键词。" : memoView === "trash" ? "删除的笔记会显示在这里。" : "先创建一条笔记，之后可以在这里快速预览、搜索和批量整理。"}
+      emptyTitle={searchActive ? "没有找到匹配笔记" : filterActive ? "没有符合筛选的笔记" : memoView === "trash" ? "回收站为空" : "暂无笔记"}
       error={error}
       initialSyncProgress={initialSyncProgress}
       isError={isError}
@@ -204,6 +208,7 @@ export const NotesView = ({
       isLoadingMore={isLoadingMore}
       isRefreshing={isRefreshing}
       listDensity={memoListDensity}
+      sortMode={memoView === "trash" ? "updated-desc" : memoSortMode}
       memos={memos}
       onMemoLongPress={onMemoLongPress}
       onMemoPress={onMemoPress}
@@ -229,6 +234,7 @@ const MemoList = ({
   isLoadingMore = false,
   isRefreshing,
   listDensity,
+  sortMode,
   memos,
   onMemoLongPress,
   onMemoPress,
@@ -248,6 +254,7 @@ const MemoList = ({
   isLoadingMore?: boolean;
   isRefreshing: boolean;
   listDensity: MobileMemoListDensity;
+  sortMode: MemoSortMode;
   memos: MemoSummary[];
   onMemoLongPress?: (memo: MemoSummary) => void;
   onMemoPress: (memoId: string) => void;
@@ -321,6 +328,7 @@ const MemoList = ({
         <MemoCard
           memo={item}
           listDensity={listDensity}
+          sortMode={sortMode}
           onLongPress={!selectionMode && onMemoLongPress ? () => onMemoLongPress(item) : undefined}
           onPress={() => onMemoPress(item.id)}
           selected={selectedMemoIds.has(item.id)}
@@ -405,6 +413,7 @@ const MobileFilterButton = ({ active, icon, label, onPress }: { active: boolean;
 const MemoCard = memo(function MemoCard({
   listDensity,
   memo,
+  sortMode,
   onLongPress,
   onPress,
   selected = false,
@@ -412,13 +421,19 @@ const MemoCard = memo(function MemoCard({
 }: {
   listDensity: MobileMemoListDensity;
   memo: MemoSummary;
+  sortMode: MemoSortMode;
   onLongPress?: () => void;
   onPress: () => void;
   selected?: boolean;
   selectionMode?: boolean;
 }) {
-  const localePreference = useMobileLocale().preference;
+  const { preference: localePreference, resolvedLocale } = useMobileLocale();
   const memoTitle = memo.title?.trim() || DEFAULT_MEMO_TITLE;
+  const listTimestamp = getMemoListTimestamp(memo, sortMode);
+  const listTimestampLabel = formatMemoPreviewDate(listTimestamp.value, localePreference);
+  const listTimestampKind = listTimestamp.field === "createdAt"
+    ? (resolvedLocale === "en-US" ? "Created" : "创建")
+    : (resolvedLocale === "en-US" ? "Updated" : "更新");
   const handledLongPressRef = useRef(false);
   const pressScale = useSharedValue(1);
   const pressAnimatedStyle = useAnimatedStyle(() => ({
@@ -487,7 +502,7 @@ const MemoCard = memo(function MemoCard({
           </Text>
         ) : null}
         <View style={[styles.memoMeta, listDensity === "compact" && styles.memoMetaCompact]}>
-          <Text style={styles.memoDate}>{formatMemoPreviewDate(memo.updatedAt, localePreference)}</Text>
+          <Text style={styles.memoDate}>{listTimestampKind} {listTimestampLabel}</Text>
           {memo.tags.slice(0, 3).map((tag) => (
             <Text key={tag} style={styles.tag}>
               #{tag}
@@ -500,6 +515,7 @@ const MemoCard = memo(function MemoCard({
 }, (previous, next) =>
   previous.memo === next.memo &&
   previous.listDensity === next.listDensity &&
+  previous.sortMode === next.sortMode &&
   previous.selected === next.selected &&
   previous.selectionMode === next.selectionMode
 );

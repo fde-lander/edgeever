@@ -1,4 +1,5 @@
 export * from "./content";
+export * from "./companion";
 export * from "./public-demo";
 export * from "./ai-assistant";
 export * from "./ai-prompt-seeds";
@@ -11,11 +12,13 @@ export * from "./native-attachment-content";
 export * from "./backup";
 export * from "./github-feedback";
 export * from "./image-display";
+export * from "./image-gallery";
 export * from "./image-referrer";
 export * from "./markdown-image";
 export * from "./memo-safety";
 export * from "./memo-conflict";
 export * from "./memo-content-style";
+export * from "./memo-timestamps";
 export * from "./memo-template-seeds";
 export * from "./note-links";
 export * from "./notebooks";
@@ -25,7 +28,24 @@ export * from "./schemas";
 export * from "./sharing";
 export * from "./sync";
 export * from "./desktop-rpc";
+export * from "./deployment-metadata";
+export * from "./diagram";
+export * from "./diagram-palette";
+export * from "./diagram-flowchart-style";
+export * from "./diagram-architecture-style";
+export * from "./diagram-mindmap-style";
+export * from "./diagram-view";
 export * from "./file-attachment";
 export * from "./note-image-card";
 export * from "./pdf-attachment";
 export * from "./types";
+export * from './plugin-capabilities';
+
+export {
+  attachDiagramReader,
+  DIAGRAM_READER_MIN_SCALE,
+  diagramReaderFocusNode,
+  diagramReaderOpeningMode,
+} from "./diagram-reader";
+
+export { attachDiagramScroll } from "./diagram-scroll";

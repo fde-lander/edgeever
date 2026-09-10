@@ -4,6 +4,7 @@ import {
   Database,
   Info,
   LayoutTemplate,
+  PawPrint,
   Shield,
   SlidersHorizontal,
   Sparkles,
@@ -16,28 +17,36 @@ import { useTranslation } from "react-i18next";
 import * as m from "motion/react-m";
 import { SystemInfoDialog } from "@/components/SystemInfoDialog";
 import { Button } from "@/components/ui/button";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  SETTINGS_CARD_DESCRIPTION_CLASSNAME,
+  SETTINGS_CARD_HEADER_CLASSNAME,
+  SETTINGS_CARD_ICON_CLASSNAME,
+  SETTINGS_CARD_TITLE_CLASSNAME,
+} from "./settings/settings-ui";
 import type { EditorContentAlignment, ShortcutSettings } from "@/lib/app-helpers";
 import { WORKSPACE_PAGE_TITLE_CLASSNAME } from "@/lib/workspace-ui";
 import { cn } from "@/lib/utils";
-import { AdvancedPlayCard } from "./settings/AdvancedPlayCard";
 import { AccountInfoCard } from "./settings/AccountInfoCard";
 import { DataExportCard } from "./settings/DataExportCard";
 import { DesktopLocalDataCard } from "./settings/DesktopLocalDataCard";
 import { LoginDevicesCard } from "./settings/LoginDevicesCard";
 import { EvernoteImportGuideCard } from "./settings/EvernoteImportGuideCard";
 import { FeedbackLink } from "./settings/FeedbackLink";
+import { ProductHuntLink } from "./settings/ProductHuntLink";
 import { McpConfigCard } from "./settings/McpConfigCard";
 import { PreferenceCard } from "./settings/PreferenceCard";
 import { PasswordCard } from "./settings/PasswordCard";
 import { UserManagementCard } from "./settings/UserManagementCard";
 import { ObjectStorageCard } from "./settings/ObjectStorageCard";
 import { AiModelCard } from "./settings/AiModelCard";
-import { AiPromptsCard } from "./settings/AiPromptsCard";
 import { AiTagSuggestionPromptCard } from "./settings/AiTagSuggestionPromptCard";
 import { ThemeToggle } from "./ThemeToggle";
 import type { AuthUser } from "@edgeever/shared";
+import { CompanionDiscoverySettingsCard } from "./settings/CompanionDiscoverySettingsCard";
 import { contentEnterMotion } from "@/lib/motion";
 import { useDeployedUpdateNotice } from "@/hooks/useDeployedUpdateNotice";
+import { ExecutionCenterButton } from "@/components/execution/ExecutionCenterButton";
 
 interface SettingsPaneProps {
   onClose: () => void;
@@ -56,6 +65,9 @@ interface SettingsPaneProps {
   isOwner: boolean;
   user: AuthUser | null;
   refreshWorkspaceAfterImport: () => Promise<void>;
+  onOpenExecutionCenter: () => void;
+  companionScope: string;
+  onOpenCompanion: () => void;
 }
 
 // Slate and brand color variables already switch values with the root theme.
@@ -66,11 +78,12 @@ const SettingsGroup = ({ children }: { children: ReactNode }) => (
   </div>
 );
 
-type TabKey = "general" | "users" | "data" | "ai" | "advanced" | "account";
+type TabKey = "general" | "paw" | "users" | "data" | "ai" | "advanced" | "account";
 
 interface TabItem {
   key: TabKey;
   label: string;
+  badge?: string;
   icon: React.ComponentType<{ className?: string }>;
   colorClass: string;
   bgColorClass: string;
@@ -95,6 +108,9 @@ export const SettingsPane = ({
   isOwner,
   user,
   refreshWorkspaceAfterImport,
+  onOpenExecutionCenter,
+  companionScope,
+  onOpenCompanion,
 }: SettingsPaneProps) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabKey>("general");
@@ -144,6 +160,16 @@ export const SettingsPane = ({
           },
         ]
       : []),
+    {
+      key: "paw",
+      label: t("settings.tabs.paw"),
+      badge: "Beta",
+      icon: PawPrint,
+      colorClass: "text-emerald-700",
+      bgColorClass: "bg-emerald-50/80",
+      hoverColorClass: "hover:bg-emerald-50/40",
+      iconColorClass: "text-emerald-600",
+    },
     {
       key: "advanced",
       label: t("settings.tabs.advanced"),
@@ -210,6 +236,28 @@ export const SettingsPane = ({
               onEditorContentAlignmentChange={onEditorContentAlignmentChange}
             />
             <FeedbackLink className="hidden lg:flex" />
+            <ProductHuntLink className="hidden lg:flex" />
+          </SettingsGroup>
+        );
+      case "paw":
+        return (
+          <SettingsGroup>
+            {authRequired && user && !demoMode ? (
+              <CompanionDiscoverySettingsCard scope={companionScope} onOpenCompanion={onOpenCompanion}
+                onOpenAiSettings={() => setActiveTab("ai")} />
+            ) : (
+              <Card className="shadow-none">
+                <CardHeader className={SETTINGS_CARD_HEADER_CLASSNAME}>
+                  <CardTitle className={SETTINGS_CARD_TITLE_CLASSNAME}>
+                    <PawPrint className={SETTINGS_CARD_ICON_CLASSNAME} />
+                    {t("companion.discovery.settingsTitle")}
+                  </CardTitle>
+                  <CardDescription className={SETTINGS_CARD_DESCRIPTION_CLASSNAME}>
+                    {t("companion.unavailableHelp")}
+                  </CardDescription>
+                </CardHeader>
+              </Card>
+            )}
           </SettingsGroup>
         );
       case "users":
@@ -230,8 +278,6 @@ export const SettingsPane = ({
           <SettingsGroup>
             <AiModelCard />
             <McpConfigCard />
-            <AiPromptsCard onOpenLibrary={onOpenAiPrompts} />
-            <AdvancedPlayCard />
           </SettingsGroup>
         );
       case "advanced":
@@ -283,6 +329,7 @@ export const SettingsPane = ({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <ExecutionCenterButton onClick={onOpenExecutionCenter} />
           <ThemeToggle className="inline-flex" showLabel />
         </div>
       </header>
@@ -308,7 +355,19 @@ export const SettingsPane = ({
                   )}
                 >
                   <Icon className={cn("h-4 w-4 shrink-0 transition-colors", isSelected ? item.colorClass : "text-slate-400")} />
-                  {item.label}
+                  <span className="flex-1 truncate">{item.label}</span>
+                  {item.badge ? (
+                    <span
+                      className={cn(
+                        "rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none",
+                        isSelected
+                          ? "bg-emerald-600/15 text-emerald-800"
+                          : "bg-slate-200/80 text-slate-600"
+                      )}
+                    >
+                      {item.badge}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -370,6 +429,11 @@ export const SettingsPane = ({
                           <Icon className={cn("h-4 w-4", item.iconColorClass)} />
                         </div>
                         <span className="text-sm font-semibold text-slate-800">{item.label}</span>
+                        {item.badge ? (
+                          <span className="rounded-full border border-emerald-200/80 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            {item.badge}
+                          </span>
+                        ) : null}
                       </div>
                       <ChevronRight className="h-4 w-4 text-slate-400" />
                     </button>
@@ -395,6 +459,7 @@ export const SettingsPane = ({
                   <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />
                 </button>
                 <FeedbackLink />
+                <ProductHuntLink />
               </div>
             </div>
           ) : (

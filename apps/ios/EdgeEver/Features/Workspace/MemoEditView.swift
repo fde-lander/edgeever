@@ -15,6 +15,11 @@ enum MemoEditMode: Equatable {
     case edit(memoId: String)
 }
 
+enum MemoEditInitialFocus: Hashable {
+    case body
+    case title
+}
+
 /// Android CreateMemoModal / rich-edit shell parity (createMemo* tokens).
 struct MemoEditView: View {
     @Environment(AppEnvironment.self) private var env
@@ -22,6 +27,7 @@ struct MemoEditView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     let mode: MemoEditMode
+    var initialFocus: MemoEditInitialFocus = .body
     var initialSharedImages: [ShareHandoffStore.SharedImage] = []
     /// When set (edit-from-detail), close by popping to the list under the cover first —
     /// never `dismiss()` onto a still-pushed detail page.
@@ -39,6 +45,7 @@ struct MemoEditView: View {
     @State private var showTagPicker = false
     @State private var showImageSourcePicker = false
     @State private var imagePickerRoute: ImagePickerRoute?
+    @State private var isImportingImageBatch = false
     @State private var showCameraAccessAlert = false
     @State private var cameraAccessCanOpenSettings = false
     @State private var cameraAccessMessage = ""
@@ -57,6 +64,8 @@ struct MemoEditView: View {
     @State private var smartTagAlertTitle = ""
     @State private var smartTagAlertMessage = ""
     @State private var smartTagTask: Task<Void, Never>?
+    @State private var didApplyInitialTitleFocus = false
+    @FocusState private var titleFocused: Bool
 
     private var title: String { get { viewModel.title } nonmutating set { viewModel.title = newValue } }
     private var tagsText: String { get { viewModel.tagsText } nonmutating set { viewModel.tagsText = newValue } }
@@ -72,7 +81,7 @@ struct MemoEditView: View {
     private var isDirty: Bool { get { viewModel.isDirty } nonmutating set { viewModel.isDirty = newValue } }
     private var isSaving: Bool { get { viewModel.isSaving } nonmutating set { viewModel.isSaving = newValue } }
     private var isCreating: Bool { get { viewModel.isCreating } nonmutating set { viewModel.isCreating = newValue } }
-    private var isUploading: Bool { get { viewModel.isUploading } nonmutating set { viewModel.isUploading = newValue } }
+    private var isUploading: Bool { get { viewModel.isUploading || isImportingImageBatch } nonmutating set { viewModel.isUploading = newValue } }
     private var editorReady: Bool { get { viewModel.editorReady } nonmutating set { viewModel.editorReady = newValue } }
     private var suppressPersistence: Bool { get { viewModel.suppressPersistence } nonmutating set { viewModel.suppressPersistence = newValue } }
     private var contentHydrated: Bool { get { viewModel.contentHydrated } nonmutating set { viewModel.contentHydrated = newValue } }
@@ -294,8 +303,12 @@ struct MemoEditView: View {
             try? await Task.sleep(nanoseconds: 800_000_000)
             if !Task.isCancelled, !editorReady {
                 editorReady = true
-                // One open-edit focus only (SharedTipTapRuntime also focuses once per document).
-                SharedTipTapRuntime.editor.focusEnd()
+                if initialFocus == .title {
+                    focusTitleOnce()
+                } else {
+                    // One open-edit focus only (SharedTipTapRuntime also focuses once per document).
+                    SharedTipTapRuntime.editor.focusEnd()
+                }
             }
             await importInitialSharedImagesIfNeeded()
         }
@@ -434,6 +447,7 @@ struct MemoEditView: View {
             .font(.system(size: 28, weight: .heavy))
             .foregroundStyle(AppTheme.title)
             .textFieldStyle(.plain)
+            .focused($titleFocused)
             .padding(.top, 14)
             .padding(.bottom, 8)
             .onChange(of: title) { _, _ in markDirtyAndScheduleSave() }
@@ -563,6 +577,9 @@ struct MemoEditView: View {
                             // Do not focusEnd here — bodyReady also fires on typing re-binds.
                             // Open-edit focus is owned by SharedTipTapRuntime (once per document).
                             editorReady = true
+                            if initialFocus == .title {
+                                focusTitleOnce()
+                            }
                         }
                     )
                     .opacity(1)
@@ -677,6 +694,8 @@ struct MemoEditView: View {
             showUploadError = true
         case .picked(let data, let filename):
             Task { _ = await insertImageData(data, filename: filename) }
+        case .pickedImages(let images):
+            Task { await insertImageBatch(images) }
         }
     }
 
@@ -947,6 +966,12 @@ struct MemoEditView: View {
         }
     }
 
+    private func focusTitleOnce() {
+        guard !didApplyInitialTitleFocus else { return }
+        didApplyInitialTitleFocus = true
+        titleFocused = true
+    }
+
     /// After server-side rename/delete, pull the latest memo body into the editor.
     private func reloadAfterResourceChange() async {
         guard case .edit(let id) = mode, let scope = env.session.dataScope else { return }
@@ -1190,7 +1215,27 @@ struct MemoEditView: View {
     }
 
     /// Upload bytes from the system PHPicker and insert into TipTap.
-    private func insertImageData(_ data: Data, filename: String) async -> Bool {
+    private func insertImageBatch(_ images: [(data: Data, filename: String)]) async {
+        guard !isUploading, !images.isEmpty else { return }
+        isImportingImageBatch = true
+        var sources: [String] = []
+        for image in images {
+            let succeeded = await insertImageData(image.data, filename: image.filename) { sources.append($0) }
+            if !succeeded { break }
+        }
+        if !sources.isEmpty {
+            _ = await SharedTipTapRuntime.editor.groupImages(sources: sources)
+            await pullEditorSnapshotIfPossible()
+        }
+        isImportingImageBatch = false
+        if !sources.isEmpty {
+            editGeneration &+= 1
+            isDirty = true
+            await drainPendingSave()
+        }
+    }
+
+    private func insertImageData(_ data: Data, filename: String, onInserted: ((String) -> Void)? = nil) async -> Bool {
         let succeeded = await viewModel.performUpload {
             NSLog("MemoEditView insertImageData: start bytes=%d name=%@", data.count, filename)
             let compress = env.preferences.useCompression
@@ -1241,6 +1286,10 @@ struct MemoEditView: View {
                         en: "Upload succeeded but insert into editor failed. Please try again."
                     )
                 )
+            }
+            onInserted?(imageSrc)
+            if !isImportingImageBatch {
+                _ = await SharedTipTapRuntime.editor.groupImages(sources: [imageSrc])
             }
             // Snapshot TipTap JSON (order is authoritative). Only inject if the resource
             // is truly missing — never append a second image node at document end.
@@ -1308,20 +1357,35 @@ struct MemoEditView: View {
     }
 }
 
-private struct MemoTagPickerSheet: View {
+struct MemoTagPickerSheet: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
     @State private var selection: [String]
     @State private var query = ""
     @State private var availableTags: [TagSummary] = []
     @State private var error: String?
+    let allowCreate: Bool
+    let maxSelections: Int
+    let closeOnSelection: Bool
+    let title: String
+    let titleEN: String
     let onChange: ([String]) -> Void
 
     init(
         selectedTags: [String],
+        allowCreate: Bool = true,
+        maxSelections: Int = 24,
+        closeOnSelection: Bool = false,
+        title: String = "选择标签",
+        titleEN: String = "Choose tags",
         onChange: @escaping ([String]) -> Void
     ) {
         _selection = State(initialValue: selectedTags)
+        self.allowCreate = allowCreate
+        self.maxSelections = maxSelections
+        self.closeOnSelection = closeOnSelection
+        self.title = title
+        self.titleEN = titleEN
         self.onChange = onChange
     }
 
@@ -1370,11 +1434,18 @@ private struct MemoTagPickerSheet: View {
 
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(AppTheme.muted)
-                    TextField(env.preferences.t("搜索或输入新标签", en: "Search or enter a new tag"), text: $query)
+                    TextField(
+                        allowCreate
+                            ? env.preferences.t("搜索或输入新标签", en: "Search or enter a new tag")
+                            : env.preferences.t("搜索标签", en: "Search tags"),
+                        text: $query
+                    )
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .onSubmit(createTag)
-                    if !normalizedQuery.isEmpty && !hasExactMatch && selection.count < 24 {
+                        .onSubmit {
+                            if allowCreate { createTag() }
+                        }
+                    if allowCreate && !normalizedQuery.isEmpty && !hasExactMatch && selection.count < maxSelections {
                         Button(env.preferences.t("新建", en: "Create"), action: createTag)
                             .font(.system(size: 13, weight: .bold))
                     }
@@ -1412,13 +1483,15 @@ private struct MemoTagPickerSheet: View {
                         ContentUnavailableView(
                             env.preferences.t("暂无匹配标签", en: "No matching tags"),
                             systemImage: "tag",
-                            description: Text(env.preferences.t("可以输入名称创建新标签。", en: "Enter a name to create a new tag."))
+                            description: allowCreate
+                                ? Text(env.preferences.t("可以输入名称创建新标签。", en: "Enter a name to create a new tag."))
+                                : Text(env.preferences.t("换个关键词再试。", en: "Try another keyword."))
                         )
                     }
                 }
             }
             .padding(.top, 12)
-            .navigationTitle(env.preferences.t("选择标签", en: "Choose tags"))
+            .navigationTitle(env.preferences.t(title, en: titleEN))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1439,12 +1512,11 @@ private struct MemoTagPickerSheet: View {
     }
 
     private func toggle(_ tag: String) {
-        if let index = selection.firstIndex(of: tag) {
-            selection.remove(at: index)
-        } else if selection.count < 24 {
-            selection.append(tag)
-        }
+        selection = MobileUI.toggleTagSelection(current: selection, tag: tag, maxSelections: maxSelections)
         onChange(selection)
+        if closeOnSelection {
+            dismiss()
+        }
     }
 
     private func createTag() {
@@ -1452,7 +1524,7 @@ private struct MemoTagPickerSheet: View {
             .split(whereSeparator: { $0 == "," || $0 == "，" || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        for tag in additions where selection.count < 24 && !selection.contains(tag) {
+        for tag in additions where selection.count < maxSelections && !selection.contains(tag) {
             selection.append(tag)
         }
         query = ""

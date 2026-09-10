@@ -4,7 +4,14 @@ import { Bot, ChevronDown, Loader2, RotateCcw, Save } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  SETTINGS_CARD_DESCRIPTION_CLASSNAME,
+  SETTINGS_CARD_HEADER_CLASSNAME,
+  SETTINGS_CARD_ICON_CLASSNAME,
+  SETTINGS_CARD_TITLE_CLASSNAME,
+} from "./settings-ui";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { trimAiText } from "@/components/settings/ai-provider-options";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -20,34 +27,35 @@ export const AiTagSuggestionPromptCard = () => {
   const [prompt, setPrompt] = useState("");
 
   useEffect(() => {
-    if (settingsQuery.data) setPrompt(settingsQuery.data.tagSuggestionPrompt);
+    if (settingsQuery.data) setPrompt(settingsQuery.data.tagSuggestionPrompt ?? "");
   }, [settingsQuery.data]);
 
   const updateMutation = useMutation({
     mutationFn: (nextPrompt: string | null) => api.updateAiTagSuggestionPrompt({ prompt: nextPrompt }, locale),
     onSuccess: async (settings) => {
-      setPrompt(settings.tagSuggestionPrompt);
+      setPrompt(settings.tagSuggestionPrompt ?? "");
       await queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
     },
   });
   const settings = settingsQuery.data;
-  const trimmedPrompt = prompt.trim();
-  const unchanged = Boolean(settings) && trimmedPrompt === settings?.tagSuggestionPrompt;
+  const promptText = prompt ?? "";
+  const trimmedPrompt = trimAiText(promptText);
+  const unchanged = Boolean(settings) && trimmedPrompt === (settings?.tagSuggestionPrompt ?? "");
   const disabled = !settings || settings.readOnly || updateMutation.isPending;
   const error = updateMutation.error ?? settingsQuery.error;
 
   return (
     <Collapsible open={expanded} onOpenChange={setExpanded} asChild>
       <Card className="w-full min-w-0 overflow-hidden shadow-none">
-        <CardHeader className="p-4">
+        <CardHeader className={SETTINGS_CARD_HEADER_CLASSNAME}>
           <CollapsibleTrigger asChild>
             <button className="flex w-full min-w-0 items-start justify-between gap-3 text-left" type="button">
               <span className="min-w-0">
-                <CardTitle className="flex items-center gap-2 text-sm">
-                  <Bot className="h-4 w-4 text-emerald-700" />
+                <CardTitle className={SETTINGS_CARD_TITLE_CLASSNAME}>
+                  <Bot className={SETTINGS_CARD_ICON_CLASSNAME} />
                   {t("settings.aiTagPromptTitle")}
                 </CardTitle>
-                <CardDescription className="mt-1 text-xs leading-5 text-slate-500">
+                <CardDescription className={SETTINGS_CARD_DESCRIPTION_CLASSNAME}>
                   {t("settings.aiTagPromptDescription")}
                 </CardDescription>
               </span>
@@ -69,9 +77,9 @@ export const AiTagSuggestionPromptCard = () => {
                   disabled={disabled}
                   maxLength={4000}
                   onChange={(event) => setPrompt(event.target.value)}
-                  value={prompt}
+                  value={promptText}
                 />
-                <div className="text-right text-xs text-slate-500">{prompt.length}/4000</div>
+                <div className="text-right text-xs text-slate-500">{promptText.length}/4000</div>
                 {error ? <p className="text-xs font-medium text-rose-600" role="alert">{t("settings.aiTagPromptFailed")}</p> : null}
                 {updateMutation.isSuccess ? <p className="text-xs font-medium text-emerald-700" role="status">{t("settings.aiTagPromptSaved")}</p> : null}
                 <div className="flex flex-wrap justify-end gap-2">

@@ -25,6 +25,8 @@ interface EdgeEverDesktopBridge {
   copyHtml(html: string, plainText: string): Promise<boolean>;
   setSessionToken(value: string): Promise<{ stored: boolean }>;
   clearSessionToken(): Promise<{ stored: false }>;
+  publicNetworkFetch(requestId: string, input: import("@edgeever/shared").PluginPublicFetchRequest): Promise<import("@edgeever/shared").PluginPublicFetchResponse>;
+  cancelPublicNetworkFetch(requestId: string): Promise<void>;
   clearLocalData(): Promise<
     { scheduled: true }
     | { scheduled: false; errorCode: DesktopLocalDataResetErrorCode }
@@ -35,6 +37,7 @@ interface EdgeEverDesktopBridge {
   sidecarStatus(): Promise<{ available: boolean; path: string; scope: string }>;
   systemInfo(): Promise<{
     appVersion: string;
+    autoUpdateSupported: boolean;
     platform: string;
     architecture: string;
     osVersion: string;
@@ -49,13 +52,22 @@ interface EdgeEverDesktopBridge {
   installUpdate(): Promise<unknown>;
   onUpdateStatus(callback: (status: DesktopUpdateStatus) => void): () => void;
   sidecarRequest<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
-  stageResource(input: { memoId: string; name: string; type: string; bytes: ArrayBuffer }): Promise<{ id: string }>;
+  beginStagedResource(input: { memoId: string; name: string; type: string; size: number }): Promise<{ id: string; partSize: number }>;
+  appendStagedResource(id: string, bytes: ArrayBuffer): Promise<{ receivedBytes: number }>;
+  completeStagedResource(id: string): Promise<{ id: string }>;
+  abortStagedResource(id: string): Promise<void>;
   listStagedResources(): Promise<Array<{ id: string; memoId: string; name: string; type: string; size: number }>>;
   remapStagedResourceMemoIds?(mappings: Array<[string, string]>): Promise<{ updated: number }>;
   readStagedResource(id: string): Promise<{ name: string; type: string; bytes: Uint8Array }>;
+  readStagedResourcePart(id: string, start: number, length: number): Promise<ArrayBuffer>;
   readResource(id: string): Promise<{ type: string; bytes: Uint8Array }>;
   removeStagedResource(id: string): Promise<void>;
   onCommand(callback: (command: string) => void): () => void;
+  syncScheduledTasks(tasks: import("@edgeever/shared").ScheduledTask[]): Promise<{ scheduled: number }>;
+  onScheduledTask(callback: (payload: {
+    task: import("@edgeever/shared").ScheduledTask;
+    scheduledFor: string;
+  }) => void | Promise<void>): () => void;
   onImportMarkdown(callback: (payload: { name: string; content: string }) => void): () => void;
 }
 

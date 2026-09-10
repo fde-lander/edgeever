@@ -10,6 +10,11 @@ Cloudflare uses Workers with D1 and R2.
 
 - Docker Engine 24 or later with Docker Compose v2.
 - An `amd64` or `arm64` Linux host.
+- Linux kernel 5.6 or later. Older kernels are outside the formally supported
+  Docker environment because Bun may fail to resolve container dependencies
+  there. The installer warns without blocking installation; if startup reports
+  `EISDIR reading .../node_modules/...`, upgrade the host OS or kernel before
+  changing `/data` permissions or replacing application data.
 - A reverse proxy with HTTPS when the instance is reachable outside a trusted
   local network.
 
@@ -70,8 +75,9 @@ Compose creates one named volume. Everything that must survive a container
 replacement is under `/data`:
 
 ```text
-/data/edgeever.sqlite       SQLite database
-/data/resources/            local images and attachments
+/data/edgeever.sqlite            SQLite database
+/data/edgeever-secrets.json      credential encryption secret
+/data/resources/                 local images and attachments
 ```
 
 The image runs as the non-root `bun` user (UID/GID `1000`). If a NAS requires
@@ -94,13 +100,12 @@ Common environment variables:
 | `EDGE_EVER_AUTH_PASSWORD_HASH`         | none    | PBKDF2 hash alternative to the plaintext bootstrap password |
 | `EDGE_EVER_SESSION_TTL_DAYS`           | `400`   | Login session lifetime                                      |
 | `EDGE_EVER_IDLE_TIMEOUT_SECONDS`       | `120`   | Bun streaming idle timeout, from 10 to 255 seconds          |
-| `EDGE_EVER_STORAGE_ENCRYPTION_KEY`     | none    | Encrypts saved external object-storage credentials          |
-| `EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` | derived | Optional independent AI credential encryption key           |
+| `EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` | persisted on `/data` | Optional independent AI credential encryption key. If unset, Docker stores the authentication secret or a generated key in `/data/edgeever-secrets.json`. |
 
 For secrets, append `_FILE` to a supported variable and point it at a Docker
 secret, for example `EDGE_EVER_AUTH_PASSWORD_FILE=/run/secrets/auth_password`.
-The password/hash, storage encryption keys, and S3 access credentials support
-this form. Do not set both the direct variable and its `_FILE` counterpart.
+The password/hash and S3 access credentials support this form. Do not set both
+the direct variable and its `_FILE` counterpart.
 
 `EDGE_EVER_ALLOW_UNAUTHENTICATED=true` is available for isolated development
 only. Do not expose an unauthenticated instance to a network.
@@ -138,18 +143,20 @@ of the `/data` volume for complete instance recovery:
 
 1. Run `docker compose stop edgeever` and wait for the shutdown-complete log.
    EdgeEver checkpoints SQLite's WAL during graceful shutdown.
-2. Copy or snapshot the entire named volume, including the SQLite file and
-   `resources` directory.
+2. Copy or snapshot the entire named volume, including the SQLite file,
+   `edgeever-secrets.json`, and the `resources` directory.
 3. Start the service with `docker compose start edgeever`.
 
-Keep `EDGE_EVER_STORAGE_ENCRYPTION_KEY` and any explicitly configured
-`EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` in a separate secret backup. A volume
-backup cannot decrypt stored credentials without those keys. When S3 storage
-is enabled, back up the bucket separately.
+Docker persists the credential-encryption root in `/data/edgeever-secrets.json`,
+so a complete `/data` volume backup can decrypt saved AI and object-storage
+credentials after a container rebuild. Keep any explicit
+`EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` in a separate secret backup if you
+manage secrets outside the volume. Cloudflare deployments still require the
+Worker authentication secret; they do not use this file. When S3 storage is
+enabled, back up the bucket separately.
 
-Restore only while EdgeEver is stopped, into an empty volume, and restore the
-matching secret keys at the same time. Test backups periodically on a separate
-instance.
+Restore only while EdgeEver is stopped, into an empty volume. Test backups
+periodically on a separate instance.
 
 ## Upgrade and rollback
 

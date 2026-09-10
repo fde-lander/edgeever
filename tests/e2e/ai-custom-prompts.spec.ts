@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 
 type Prompt = {
   id: string;
@@ -65,14 +65,17 @@ const createPrompt = async (
   return (await response.json() as { prompt: Prompt }).prompt;
 };
 
-const openSettingsAiTab = async (page: Page) => {
-  await ensureAuthenticatedPage(page);
-  await page.getByRole("button", { name: "个人中心", exact: true }).click();
+const openPromptLibrary = async (page: Page) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page.request);
+  await page.goto("/");
+  const profileButton = page.getByRole("button", { name: "我的", exact: true });
+  await expect(profileButton).toBeVisible({ timeout: 20_000 });
+  await profileButton.click();
   await expect(page.getByRole("heading", { name: "我的", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "AI集成", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "AI 指令", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "打开指令库", exact: true }).click();
+  await page.getByRole("button", { name: "指令", exact: true }).click();
   await expect(page.getByRole("heading", { name: "指令库", exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 720 });
 };
 
 const openMemoAssistant = async (page: Page, memoId: string, notebookName: string) => {
@@ -89,6 +92,18 @@ const openMemoAssistant = async (page: Page, memoId: string, notebookName: strin
 const selectAction = async (dialog: ReturnType<Page["getByRole"]>, optionName: string) => {
   await dialog.getByRole("combobox", { name: "处理方式" }).click();
   await dialog.page().getByRole("option", { name: optionName, exact: true }).click();
+};
+
+const focusParagraphEnd = async (editor: Locator) => {
+  await editor.locator(":scope > p").last().evaluate((paragraph) => {
+    const range = document.createRange();
+    range.selectNodeContents(paragraph);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    (paragraph.closest("[contenteditable='true']") as HTMLElement | null)?.focus();
+  });
 };
 
 test.describe("AI custom prompts", () => {
@@ -133,6 +148,17 @@ test.describe("AI custom prompts", () => {
     return memo;
   };
 
+  test("keeps secondary content out of AI integration settings", async ({ page }) => {
+    await ensureAuthenticatedPage(page);
+    await page.getByRole("button", { name: "个人中心", exact: true }).click();
+    await page.getByRole("button", { name: "AI集成", exact: true }).click();
+
+    await expect(page.getByRole("heading", { name: "外部 AI 模型", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "API Token 与 MCP 配置", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "AI 指令", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "进阶玩法", exact: true })).toHaveCount(0);
+  });
+
   test("opens the inline composer from /ai and the configurable shortcut", async ({ page }) => {
     const memo = await createMemo(page, `e2e-ai-inline-${Date.now()}`, "用于测试内联 AI 入口。");
     await ensureAuthenticatedPage(page);
@@ -152,6 +178,177 @@ test.describe("AI custom prompts", () => {
 
     await page.keyboard.press("Control+j");
     await expect(composer).toBeVisible();
+  });
+
+  test("drags the AI assistant by its header and keeps it inside the viewport", async ({ page }) => {
+    const memo = await createMemo(page, `e2e-ai-drag-${Date.now()}`, "用于测试 AI 助手拖动。");
+    const assistant = await openMemoAssistant(page, memo.id, notebookName);
+    const dragHandle = assistant.locator('[data-ai-assistant-drag-handle="true"]');
+    const [initialBox, handleBox] = await Promise.all([
+      assistant.boundingBox(),
+      dragHandle.boundingBox(),
+    ]);
+    expect(initialBox).not.toBeNull();
+    expect(handleBox).not.toBeNull();
+    expect(Math.abs(handleBox!.y - initialBox!.y)).toBeLessThanOrEqual(1);
+    expect(handleBox!.height).toBeGreaterThanOrEqual(60);
+    const viewport = page.viewportSize();
+    expect(viewport).not.toBeNull();
+
+    const maxLeft = viewport!.width - initialBox!.width - 12;
+    const maxTop = viewport!.height - initialBox!.height - 12;
+    const targetLeft = initialBox!.x > (12 + maxLeft) / 2
+      ? Math.max(12, initialBox!.x - 140)
+      : Math.min(maxLeft, initialBox!.x + 140);
+    const targetTop = initialBox!.y > (12 + maxTop) / 2
+      ? Math.max(12, initialBox!.y - 80)
+      : Math.min(maxTop, initialBox!.y + 80);
+    const deltaX = targetLeft - initialBox!.x;
+    const deltaY = targetTop - initialBox!.y;
+
+    const startX = handleBox!.x + Math.min(80, handleBox!.width / 2);
+    const startY = handleBox!.y + 6;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + deltaX, startY + deltaY, { steps: 5 });
+    await page.mouse.up();
+
+    const movedBox = await assistant.boundingBox();
+    expect(movedBox).not.toBeNull();
+    expect(movedBox!.x).toBeCloseTo(targetLeft, 0);
+    expect(movedBox!.y).toBeCloseTo(targetTop, 0);
+
+    const movedHandleBox = await dragHandle.boundingBox();
+    expect(movedHandleBox).not.toBeNull();
+    await page.mouse.move(movedHandleBox!.x + 40, movedHandleBox!.y + movedHandleBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(viewport!.width - 1, viewport!.height - 1, { steps: 5 });
+    await page.mouse.up();
+
+    const clampedBox = await assistant.boundingBox();
+    expect(clampedBox).not.toBeNull();
+    expect(clampedBox!.x + clampedBox!.width).toBeLessThanOrEqual(viewport!.width - 11);
+    expect(clampedBox!.y + clampedBox!.height).toBeLessThanOrEqual(viewport!.height - 11);
+  });
+
+  test("generates from a blank note with a custom instruction and explains source requirements", async ({ page }) => {
+    const memo = await createMemo(page, `e2e-ai-blank-${Date.now()}`, "");
+    await ensureAuthenticatedPage(page);
+    await page.getByRole("button", { name: new RegExp(notebookName) }).click();
+    await page.locator(`[data-memo-id="${memo.id}"]`).locator("button").first().click();
+    await expect(page.locator(".ProseMirror[contenteditable='true']")).toBeVisible();
+    await page.getByPlaceholder("无标题笔记", { exact: true }).fill("");
+
+    let customRequest: Record<string, unknown> | null = null;
+    let translatedRequest: Record<string, unknown> | null = null;
+    let refinedRequest: Record<string, unknown> | null = null;
+    await page.route("**/api/v1/ai/generate", async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      if (body.action === "custom" && body.contentMarkdown === "Write a poem.") {
+        refinedRequest = body;
+        await route.fulfill({
+          status: 200,
+          contentType: "text/event-stream; charset=utf-8",
+          body: [
+            `data: ${JSON.stringify({ type: "start" })}`,
+            `data: ${JSON.stringify({ type: "text-delta", text: "Compose a poem." })}`,
+            `data: ${JSON.stringify({ type: "finish", finishReason: "stop" })}`,
+            "",
+          ].join("\n\n"),
+        });
+        return;
+      }
+      if (body.action === "translate") {
+        translatedRequest = body;
+        await route.fulfill({
+          status: 200,
+          contentType: "text/event-stream; charset=utf-8",
+          body: [
+            `data: ${JSON.stringify({ type: "start" })}`,
+            `data: ${JSON.stringify({ type: "text-delta", text: "Write a poem." })}`,
+            `data: ${JSON.stringify({ type: "finish", finishReason: "stop" })}`,
+            "",
+          ].join("\n\n"),
+        });
+        return;
+      }
+      if (body.action !== "custom" || body.promptId) {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: {
+              code: "ai_source_required",
+              message: "Note content is required for this AI action.",
+            },
+          }),
+        });
+        return;
+      }
+      customRequest = body;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream; charset=utf-8",
+        body: [
+          `data: ${JSON.stringify({ type: "start" })}`,
+          `data: ${JSON.stringify({ type: "text-delta", text: "你好！祝你今天一切顺利。" })}`,
+          `data: ${JSON.stringify({ type: "finish", finishReason: "stop" })}`,
+          "",
+        ].join("\n\n"),
+      });
+    });
+
+    await page.getByRole("button", { name: "打开 AI 写作助手", exact: true }).click();
+    const assistant = page.getByRole("dialog", { name: "AI 笔记助手" });
+    await expect(assistant).toBeVisible();
+    await assistant.getByRole("button", { name: "生成", exact: true }).click();
+    const result = assistant.getByTestId("ai-assistant-result");
+    await expect(result.getByRole("alert")).toHaveText("当前处理方式需要笔记内容。请先输入内容，或改用自定义指令从空白开始生成。");
+    await expect(result).not.toContainText("生成结果将显示在这里。");
+    await expect(assistant).not.toContainText("contentMarkdown");
+
+    await assistant.getByRole("button", { name: "自定义指令", exact: true }).click();
+    const instruction = assistant.getByRole("textbox", { name: "告诉 AI 你想怎么处理" });
+    await instruction.fill("写一首诗");
+    await selectAction(assistant, "翻译");
+    await expect(assistant.getByRole("textbox", { name: "输入要处理的内容" })).toHaveValue("写一首诗");
+    await assistant.getByRole("button", { name: "生成", exact: true }).click();
+    await expect(result).toHaveText("Write a poem.");
+    expect(translatedRequest).toMatchObject({
+      action: "translate",
+      title: "",
+      contentMarkdown: "写一首诗",
+      targetLanguage: "en",
+    });
+    expect(translatedRequest).not.toHaveProperty("instruction");
+
+    const refinement = assistant.getByRole("textbox", { name: "继续调整" });
+    await refinement.fill("更自然");
+    await assistant.getByRole("button", { name: "调整", exact: true }).click();
+    await expect(result).toHaveText("Compose a poem.");
+    await expect(refinement).toHaveValue("更自然");
+    expect(refinedRequest).toMatchObject({
+      action: "custom",
+      title: "",
+      contentMarkdown: "Write a poem.",
+      targetLanguage: "en",
+    });
+    expect(refinedRequest?.instruction).toContain("Keep the entire revised result in the target language: en.");
+    expect(refinedRequest?.instruction).toContain("Original processing action:\ntranslate");
+    expect(refinedRequest?.instruction).toContain("Original processing instruction:");
+    expect(refinedRequest?.instruction).toContain("Follow-up request:\n更自然");
+
+    await assistant.getByRole("button", { name: "清除结果", exact: true }).click();
+    await assistant.getByRole("button", { name: "自定义指令", exact: true }).click();
+    await expect(instruction).toHaveValue("写一首诗");
+    await assistant.getByRole("button", { name: "生成", exact: true }).click();
+    await expect(assistant.getByText("你好！祝你今天一切顺利。", { exact: true })).toBeVisible();
+    expect(customRequest).toMatchObject({
+      action: "custom",
+      title: "",
+      contentMarkdown: "",
+      instruction: "写一首诗",
+    });
   });
 
   test("opens the function menu from a bare slash and runs its AI command", async ({ page }) => {
@@ -239,8 +436,7 @@ test.describe("AI custom prompts", () => {
     const editor = page.locator(".ProseMirror[contenteditable='true']");
     await expect(editor).toBeVisible();
 
-    await editor.click();
-    await page.keyboard.press("End");
+    await focusParagraphEnd(editor);
     await page.keyboard.press("Enter");
     const emptyParagraph = editor.locator("p").last();
     await expect(emptyParagraph).toHaveClass(/is-empty/);
@@ -288,8 +484,7 @@ test.describe("AI custom prompts", () => {
     await page.getByRole("button", { name: "返回上一页", exact: true }).click();
     const editor = page.locator(".ProseMirror[contenteditable='true']");
     await expect(editor).toBeVisible();
-    await editor.click();
-    await page.keyboard.press("End");
+    await focusParagraphEnd(editor);
     await page.keyboard.press("Enter");
     const emptyParagraph = editor.locator("p").last();
     await expect(emptyParagraph).toHaveAttribute("data-placeholder", "/ 浏览命令 · @ 引用笔记");
@@ -391,7 +586,7 @@ test.describe("AI custom prompts", () => {
     const promptName = `e2e-设置指令-${Date.now()}`;
     const instruction = "把笔记提炼成三条要点，使用 Markdown 列表。";
 
-    await openSettingsAiTab(page);
+    await openPromptLibrary(page);
     await page.getByRole("button", { name: "新建指令", exact: true }).click();
     const editor = page.locator("form").filter({ has: page.getByRole("heading", { name: "新建指令", exact: true }) });
     await expect(editor).toBeVisible();
@@ -503,7 +698,7 @@ test.describe("AI custom prompts", () => {
     });
     createdPromptIds.push(created.id);
 
-    await openSettingsAiTab(page);
+    await openPromptLibrary(page);
     const row = page.getByRole("article").filter({ has: page.getByRole("heading", { name: originalName, exact: true }) });
     await expect(row.getByText(originalName, { exact: true })).toBeVisible();
     await row.getByRole("button", { name: "编辑指令", exact: true }).click();

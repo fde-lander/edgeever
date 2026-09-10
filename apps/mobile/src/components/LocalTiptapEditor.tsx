@@ -1,6 +1,7 @@
 'use dom';
 
 import "katex/dist/katex.min.css";
+import { Graph } from "@antv/x6";
 import Image from "@tiptap/extension-image";
 import CodeBlock from "@tiptap/extension-code-block";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -8,6 +9,7 @@ import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { EditorContent, Extension, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import { EdgeEverLink } from "@edgeever/shared/editor-link";
 import * as Clipboard from "expo-clipboard";
 import {
   AI_SELECTED_TEXT_ACTIONS,
@@ -30,7 +32,12 @@ import {
   prepareNativeEditorContent,
   restoreNativeEditorContent,
   getImageReferrerPolicy,
+  ImageGallery,
   getResourceIdFromUrl,
+  diagramDocumentToX6Cells,
+  attachDiagramReader,
+  MIND_MAP_CONNECTOR_NAME,
+  mindMapConnector,
   type AiAction,
   type AiPromptParameterKind,
   type AiPromptResultMode,
@@ -39,6 +46,7 @@ import {
   type AiTargetLanguage,
   type AiTone,
   type TiptapDoc,
+  type DiagramDocument,
 } from "@edgeever/shared";
 import { createEdgeEverMathematics } from "@edgeever/shared/mathematics";
 import {
@@ -72,6 +80,7 @@ import {
   generateCardCss,
 } from "@edgeever/shared/note-image-card";
 import { useDOMImperativeHandle, type DOMImperativeFactory, type DOMProps } from "expo/dom";
+import { createImageInsertTransaction, createNativeImageGalleryView, groupUploadedImages, NATIVE_IMAGE_GALLERY_CSS } from "@edgeever/shared/native-image-gallery";
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type Ref, type SetStateAction } from "react";
 import {
   createMobileImageUploadPlaceholderSource,
@@ -102,6 +111,7 @@ export interface LocalTiptapEditorRef extends DOMImperativeFactory {
   beginImageUpload: (uploadId: DOMValue, previewDataUrl: DOMValue) => void;
   cancelImageUpload: (uploadId: DOMValue) => void;
   completeImageUpload: (uploadId: DOMValue, imageUrl: DOMValue, alt: DOMValue) => void;
+  finishImageBatch: (sources: DOMValue) => void;
   appendAttachment: (attachmentUrl: DOMValue, filename: DOMValue, mimeType: DOMValue, byteSize: DOMValue) => void;
   removeResource: (targetJson: DOMValue) => void;
   renameResource: (targetJson: DOMValue, filename: DOMValue) => void;
@@ -147,8 +157,14 @@ type LocalTiptapEditorModeProps = LocalTiptapEditorSharedProps & {
  */
 type LocalTiptapViewerModeProps = LocalTiptapEditorSharedProps & {
   mode: "viewer";
+  /** Parsed visual diagram IR for the native X6 read-only viewer. */
+  visualDiagramJson?: string;
+  /** Hides code affordances when a damaged diagram falls back to Mermaid. */
+  visualDiagramNote?: boolean;
   /** JSON: `{ alt: string; source: string }` for fullscreen image preview. */
   onImagePreview?: (payloadJson: string) => Promise<void>;
+  /** Enter note editing after a deliberate double tap on ordinary body content. */
+  onDoublePress?: () => Promise<void>;
 };
 
 type LocalTiptapEditorProps = LocalTiptapEditorModeProps | LocalTiptapViewerModeProps;
@@ -438,6 +454,72 @@ const MermaidRenderRuntime = (props: MermaidRendererProps) => {
   return null;
 };
 
+Graph.registerConnector(MIND_MAP_CONNECTOR_NAME, mindMapConnector, true);
+
+const ReadOnlyX6Diagram = ({
+  diagram,
+  locale,
+  theme,
+}: {
+  diagram: DiagramDocument;
+  locale: "zh-CN" | "en-US";
+  theme: "light" | "dark";
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const parent = container.parentElement;
+    const measureWidth = () => {
+      if (!parent) return Math.max(1, container.clientWidth);
+      const style = getComputedStyle(parent);
+      const containerStyle = getComputedStyle(container);
+      const horizontalPadding = Number.parseFloat(style.paddingLeft || "0")
+        + Number.parseFloat(style.paddingRight || "0");
+      const horizontalMargin = Number.parseFloat(containerStyle.marginLeft || "0")
+        + Number.parseFloat(containerStyle.marginRight || "0");
+      return Math.max(1, parent.clientWidth - horizontalPadding - horizontalMargin);
+    };
+    const cells = diagramDocumentToX6Cells(diagram, theme);
+    const graph = new Graph({
+      container,
+      // The empty mount node can report 0 before X6 assigns its own inline size.
+      // Measure the stable parent instead so the graph never locks itself to 1px.
+      width: measureWidth(),
+      height: Math.max(1, container.clientHeight),
+      background: { color: cells.canvas },
+      grid: false,
+      interacting: false,
+      panning: { enabled: true },
+      mousewheel: { enabled: true, minScale: 0.1, maxScale: 2.5 },
+    });
+    graph.addNodes(cells.nodes);
+    graph.addEdges(cells.edges);
+
+    const reader = attachDiagramReader(graph, container, { ...diagram, nodes: diagram.nodes.map((node, index) => ({ ...node, width: cells.nodes[index].width, height: cells.nodes[index].height })) }, locale, theme === "dark");
+    const fit = () => reader.resize(measureWidth(), Math.max(1, container.clientHeight));
+    const frame = window.requestAnimationFrame(fit);
+    const observer = new ResizeObserver(fit);
+    observer.observe(parent ?? container);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      reader.dispose();
+      graph.dispose();
+    };
+  }, [diagram, theme, locale]);
+
+  const title = locale === "en-US"
+    ? diagram.kind === "mind-map" ? "Mind map" : diagram.kind === "architecture" ? "Architecture diagram" : "Flowchart"
+    : diagram.kind === "mind-map" ? "思维导图" : diagram.kind === "architecture" ? "架构图" : "流程图";
+  return (
+    <section className="edgeever-x6-document">
+      <div aria-label={title} className="edgeever-x6-diagram" key={diagram.kind} ref={containerRef} role="img" />
+    </section>
+  );
+};
+
 const inlineMermaidSvgStyles = (svg: string) => {
   const container = document.createElement("div");
   container.style.cssText = "position:fixed;left:-10000px;top:-10000px;visibility:hidden;";
@@ -562,6 +644,14 @@ const scrollEditorPositionIntoView = (
 
 function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const isViewer = props.mode === "viewer";
+  const visualDiagram = useMemo(() => {
+    if (props.mode !== "viewer" || !props.visualDiagramJson) return null;
+    try {
+      return JSON.parse(props.visualDiagramJson) as DiagramDocument;
+    } catch {
+      return null;
+    }
+  }, [props.mode, props.mode === "viewer" ? props.visualDiagramJson : undefined]);
   const autoFocus = props.mode === "viewer" ? false : Boolean(props.autoFocus);
   const aiPromptsJson = props.mode === "viewer" ? "[]" : (props.aiPromptsJson ?? "[]");
   const aiPrompts = useMemo(() => {
@@ -586,6 +676,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const onLoadResourceRef = useRef(props.onLoadResource);
   const onResourcePressRef = useRef(props.onResourcePress);
   const onImagePreviewRef = useRef(props.mode === "viewer" ? props.onImagePreview : undefined);
+  const onDoublePressRef = useRef(props.mode === "viewer" ? props.onDoublePress : undefined);
   const onPickImageRef = useRef(props.mode === "viewer" ? undefined : props.onPickImage);
   const onAiRequestRef = useRef(props.mode === "viewer" ? undefined : props.onAiRequest);
   const onAiCancelRef = useRef(props.mode === "viewer" ? undefined : props.onAiCancel);
@@ -642,6 +733,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   onLoadResourceRef.current = props.onLoadResource;
   onResourcePressRef.current = props.onResourcePress;
   onImagePreviewRef.current = props.mode === "viewer" ? props.onImagePreview : undefined;
+  onDoublePressRef.current = props.mode === "viewer" ? props.onDoublePress : undefined;
   onPickImageRef.current = props.mode === "viewer" ? undefined : props.onPickImage;
   onAiRequestRef.current = props.mode === "viewer" ? undefined : props.onAiRequest;
   onAiCancelRef.current = props.mode === "viewer" ? undefined : props.onAiCancel;
@@ -664,8 +756,12 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     [isViewer, props.baseUrl, props.locale]
   );
   const mermaidCodeBlockExtension = useMemo(
-    () => createMobileCodeBlockExtension(props.locale, props.theme),
-    [props.locale, props.theme]
+    () => createMobileCodeBlockExtension(
+      props.locale,
+      props.theme,
+      props.mode === "viewer" && Boolean(props.visualDiagramNote),
+    ),
+    [props.locale, props.mode, props.theme, props.mode === "viewer" ? props.visualDiagramNote : undefined]
   );
   const searchHighlightExtension = useMemo(
     () => Extension.create({
@@ -686,13 +782,17 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     // the Android bridge retry raced each other and could leave the WebView stuck.
     autofocus: false,
     extensions: [
-      StarterKit.configure({ codeBlock: false, link: { openOnClick: false } }),
+      StarterKit.configure({ codeBlock: false, link: false }),
+      EdgeEverLink.configure({ openOnClick: false }),
       NativeAttachmentMetadata,
       TaskList,
       TaskItem.configure({ nested: true }),
       MergeDivider,
       ...createEdgeEverMathematics(),
       mermaidCodeBlockExtension,
+      ImageGallery.extend({
+        addNodeView() { return createNativeImageGalleryView(() => props.locale); },
+      }),
       protectedImageExtension,
       searchHighlightExtension,
       TableKit.configure({
@@ -724,6 +824,17 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
           allowImagePreview: false,
           onImagePreview: onImagePreviewRef.current,
         }),
+        dblclick: (_view, event) => {
+          if (!isViewer || !onDoublePressRef.current) return false;
+          const target = event.target as HTMLElement | null;
+          if (!target || target.closest("a, button, img, input, textarea, select, .edgeever-image-node")) {
+            return false;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          void onDoublePressRef.current();
+          return true;
+        },
       },
     },
     onUpdate: ({ editor: activeEditor, transaction }) => {
@@ -839,6 +950,9 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       previewDataUrlValue,
       pendingImageSelectionRef.current
     );
+    // The initial selection is consumed once; subsequent batch images follow
+    // the previous placeholder instead of replacing it.
+    pendingImageSelectionRef.current = null;
   }, [editor, isViewer, props.locale]);
 
   const cancelImageUpload = useCallback((uploadIdValue: DOMValue) => {
@@ -858,6 +972,12 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       resolveUrl(imageUrlValue, props.baseUrl),
       typeof altValue === "string" ? altValue : ""
     );
+  }, [editor, props.baseUrl]);
+
+  const finishImageBatch = useCallback((sources: DOMValue) => {
+    if (!editor || !Array.isArray(sources)) return;
+    groupUploadedImages(editor, sources.filter((source): source is string => typeof source === "string")
+      .map((source) => resolveUrl(source, props.baseUrl)));
   }, [editor, props.baseUrl]);
 
   const appendAttachment = useCallback((
@@ -1244,6 +1364,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       beginImageUpload,
       cancelImageUpload,
       completeImageUpload,
+      finishImageBatch,
       appendAttachment,
       setContent,
       flush,
@@ -1262,7 +1383,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       pushAiStreamEvent,
       exportImage,
     }),
-    [appendAttachment, beginImageUpload, cancelImageUpload, completeImageUpload, editor, exportImage, flush, isViewer, pushAiStreamEvent, removeResource, renameResource, replaceAll, search, setContent]
+    [appendAttachment, beginImageUpload, cancelImageUpload, completeImageUpload, finishImageBatch, editor, exportImage, flush, isViewer, pushAiStreamEvent, removeResource, renameResource, replaceAll, search, setContent]
   );
 
   useEffect(() => {
@@ -1534,7 +1655,13 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
           ) : null}
         </div>
       ) : null}
-      <EditorContent className="edgeever-editor-scroll" editor={editor} />
+      {isViewer && visualDiagram ? (
+        <div className="edgeever-editor-scroll">
+          <ReadOnlyX6Diagram diagram={visualDiagram} locale={props.locale} theme={props.theme} />
+        </div>
+      ) : (
+        <EditorContent className="edgeever-editor-scroll" editor={editor} />
+      )}
       {aiSelectionTrigger && !aiPanel ? (
         <button
           aria-label={props.locale === "en-US" ? "Use AI on selected text" : "用 AI 处理选中内容"}
@@ -2073,7 +2200,8 @@ const loadMermaid = () => {
 
 const createMobileCodeBlockExtension = (
   locale: "zh-CN" | "en-US",
-  theme: "light" | "dark"
+  theme: "light" | "dark",
+  hideCopyForVisualDiagram = false,
 ) => CodeBlock.extend({
   addNodeView() {
     return ({ node }) => {
@@ -2133,7 +2261,7 @@ const createMobileCodeBlockExtension = (
         });
       });
       pre.append(code);
-      wrapper.append(copyButton, preview, pre);
+      wrapper.append(...(hideCopyForVisualDiagram ? [preview, pre] : [copyButton, preview, pre]));
 
       let currentNode = node;
       let renderTimer: number | null = null;
@@ -2761,19 +2889,14 @@ const insertImageUploadPlaceholder = (
   if (!imageType) {
     return;
   }
-  editor.chain().command(({ tr, dispatch }) => {
-    const from = Math.min(selection?.from ?? tr.selection.from, tr.doc.content.size);
-    const to = Math.min(Math.max(selection?.to ?? tr.selection.to, from), tr.doc.content.size);
-    tr.replaceRangeWith(from, to, imageType.create({
+  const tr = createImageInsertTransaction(editor.state, {
       alt,
       src: source,
       title: previewDataUrl,
       width: DEFAULT_IMAGE_WIDTH_PERCENT,
-    }));
-    tr.setMeta(TRANSIENT_IMAGE_UPLOAD_META, true);
-    dispatch?.(tr);
-    return true;
-  }).run();
+  }, selection ?? editor.state.selection);
+  tr.setMeta(TRANSIENT_IMAGE_UPLOAD_META, true);
+  editor.view.dispatch(tr);
 };
 
 const replaceImageUploadPlaceholder = (
@@ -3059,6 +3182,12 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-code-block, .edgeever-mermaid-code-block { position: relative; margin: 18px 0; overflow: visible; background: transparent; }
   .edgeever-code-copy-button { position: absolute; top: 8px; right: 8px; z-index: 1; border: 1px solid ${theme === "dark" ? "#475569" : "#cbded1"}; border-radius: 6px; padding: 5px 8px; background: ${theme === "dark" ? "rgba(30, 41, 59, 0.94)" : "rgba(247, 251, 248, 0.94)"}; color: ${theme === "dark" ? "#cbd5e1" : "#475569"}; font: inherit; font-size: 12px; line-height: 1.35; }
   .edgeever-code-copy-button:active { border-color: #0f766e; color: ${theme === "dark" ? "#86efac" : "#0f766e"}; }
+  .edgeever-editor-scroll:has(.edgeever-x6-document) { display: flex; flex-direction: column; overflow: hidden; }
+  .edgeever-x6-document, .edgeever-diagram-reader-host { display: flex; flex-direction: column; height: 100%; min-height: 100%; padding: 8px 12px 12px; background: ${theme === "dark" ? "#0f172a" : "#fff"}; }
+  .edgeever-diagram-reader-controls { flex: 0 0 auto; }
+  .edgeever-x6-diagram { flex: 1 1 auto; width: 100%; height: auto; min-height: 240px; overflow: hidden; border: 1px solid ${theme === "dark" ? "#26382f" : "#e3ece7"}; border-radius: 14px; background: ${theme === "dark" ? "#101311" : "#f8faf9"}; touch-action: none; }
+  .edgeever-x6-diagram .x6-graph-svg { overflow: hidden; }
+  .edgeever-x6-diagram .x6-node { cursor: pointer; }
   .edgeever-mermaid-code-block > pre { display: none; margin: 8px 0 0; }
   .edgeever-mermaid-code-block.is-source-visible > pre { display: block; }
   .edgeever-mermaid-preview { display: flex; min-height: 104px; align-items: center; justify-content: center; overflow-x: auto; padding: 16px 4px; background: transparent; }
@@ -3174,6 +3303,12 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-image-loading-label { text-align: center; }
   .edgeever-image-node > img, .edgeever-image-upload-result > img { display: block; width: 100%; margin: 0; border-radius: 10px; }
   .edgeever-image-node > img[hidden] { display: none; }
+  [data-edgeever-image-gallery] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 8px; margin: 14px 0; }
+  [data-edgeever-image-gallery][data-image-gallery-layout="3"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  [data-edgeever-image-gallery][data-image-gallery-layout="1"] { grid-template-columns: minmax(0, 1fr); }
+  [data-edgeever-image-gallery] > .edgeever-image-node, [data-edgeever-image-gallery] > img { width: 100% !important; min-width: 0; height: 100%; min-height: 112px; max-height: 220px; margin: 0 !important; overflow: hidden; border-radius: 10px; background: ${theme === "dark" ? "#1e293b" : "#f1f5f9"}; }
+  [data-edgeever-image-gallery] > .edgeever-image-node > img, [data-edgeever-image-gallery] > img { width: 100%; height: 100%; min-height: 112px; max-height: 220px; object-fit: cover; }
+  ${NATIVE_IMAGE_GALLERY_CSS}
   .edgeever-image-node.is-selected > img, .edgeever-image-upload-result.is-selected > img { outline: 2px solid #0f766e; outline-offset: 3px; }
   .edgeever-image-actions { position: absolute; right: 8px; bottom: 8px; z-index: 3; display: inline-flex; width: 42px; height: 42px; appearance: none; align-items: center; justify-content: center; border: 1px solid ${theme === "dark" ? "#475569" : "#cbd5e1"}; border-radius: 999px; background: ${theme === "dark" ? "rgba(15, 23, 42, 0.9)" : "rgba(255, 255, 255, 0.92)"}; color: ${theme === "dark" ? "#e2e8f0" : "#334155"}; font-size: 24px; font-weight: 700; line-height: 1; box-shadow: 0 3px 12px rgba(15, 23, 42, 0.2); }
   .edgeever-image-actions[hidden] { display: none; }

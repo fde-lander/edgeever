@@ -61,6 +61,21 @@ const providerErrorMessage = (error: unknown) => {
   return error.message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 1000);
 };
 
+const validateAiGeneration = zValidator("json", AiGenerateSchema, (result, context) => {
+  if (result.success) return;
+  const sourceRequired = result.error.issues.some(
+    (issue) => issue.path[0] === "contentMarkdown" && issue.message === "Note content is required.",
+  );
+  return apiError(
+    context,
+    sourceRequired ? "ai_source_required" : "ai_request_invalid",
+    sourceRequired
+      ? "Note content is required for this AI action."
+      : "The AI request is invalid.",
+    400,
+  );
+});
+
 const encryptionConfigured = (context: AppContext) =>
   Boolean(resolvePrimaryAiCredentialEncryptionKey(context.env));
 
@@ -70,6 +85,7 @@ const readSettings = (context: AppContext, dependencies: AiRouteDependencies) =>
   encryptionConfigured(context),
   dependencies.isDemoMode(context.env),
   context.req.query("locale"),
+  context.env,
 );
 
 const denyMutation = (context: AppContext, dependencies: AiRouteDependencies) => {
@@ -540,7 +556,7 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
 
   app.post(
     "/api/v1/ai/generate",
-    zValidator("json", AiGenerateSchema),
+    validateAiGeneration,
     async (context) => {
       const denied = requireUser(context);
       if (denied) return denied;
