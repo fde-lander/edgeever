@@ -186,6 +186,17 @@ export const handleMcpMessage = async (
 
   if (request.method === "notifications/initialized" && isNotification && era === "legacy") return null;
 
+  if (request.method === "ping") {
+    if (isNotification) return null;
+    return {
+      body: jsonRpcResult(
+        request.id ?? null,
+        era === "modern" ? modernResult({}) : {},
+      ),
+      status: 200,
+    };
+  }
+
   if (request.method === "server/discover" && era === "modern") {
     return {
       body: jsonRpcResult(

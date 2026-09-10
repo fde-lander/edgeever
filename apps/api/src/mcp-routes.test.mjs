@@ -290,4 +290,48 @@ describe("MCP HTTP routes", () => {
       },
     });
   });
+
+  test("answers the ping method with an empty result", async () => {
+    const response = await createApp().request(
+      "/mcp",
+      mcpRequest({ jsonrpc: "2.0", id: 5, method: "ping" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ jsonrpc: "2.0", id: 5, result: {} });
+  });
+
+  test("answers the ping method through the modern envelope", async () => {
+    const response = await createApp().request(
+      "/mcp",
+      modernMcpRequest({ jsonrpc: "2.0", id: 6, method: "ping" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 6,
+      result: { resultType: "complete", _meta: { "io.modelcontextprotocol/serverInfo": { name: "edgeever" } } },
+    });
+  });
+
+  test("treats a ping notification as a notification and skips the body", async () => {
+    const response = await createApp().request(
+      "/mcp",
+      mcpRequest({ jsonrpc: "2.0", method: "ping" }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.text()).toBe("");
+  });
+
+  test("still requires authentication for ping", async () => {
+    const response = await createApp({ authenticateRequest: async () => null }).request(
+      "/mcp",
+      mcpRequest({ jsonrpc: "2.0", id: 7, method: "ping" }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toBe('Bearer realm="EdgeEver MCP"');
+  });
 });
