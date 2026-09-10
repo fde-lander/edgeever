@@ -1,6 +1,6 @@
-# EdgeEver 远端 Git Clone + Build 部署教程（V2.5 — 远端 git clone + docker build）
+# EdgeEver 远端 Git Clone + Build 部署教程（V2.6 — 远端 git clone + docker build）
 
-> 📅 2026-09-10 | 本次部署目标：**分支 fde-v1.64.0.1（上游 merge v1.64.0 + MCP ping handler）**
+> 📅 2026-09-11 | 本次部署目标：**分支 fde-v1.65.0.1（上游 merge v1.65.0 + F18-A 修复）**
 > 回滚锚点：**tag fde-v1.50.0.3（33f53658）** 首选 / **tag fde-v1.50.0.2（2dfd30ac）** 次选 | 适用本次及未来所有版本
 
 > 🔄 **交付方式定案（2026-09-04，以后一律照此）**：本地 build → `docker save` → tar.zst → scp 传输**永久废弃**。
@@ -10,6 +10,7 @@
 
 > **版本变更记录**
 >
+> - **V2.6（2026-09-11）**：目标版本 v1.64.0.1 → **v1.65.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**小版本 merge**（v1.64.0 → v1.65.0，上游 10 commits / 118 files），**无新增 migration**（数据库 schema 不变）；新增 F18-A 修复（HiddenNotebookError extends AppError，REST 写隐藏分类 500→403）；TokenHidingEditor bg-white→bg-card 同步上游 dark mode CSS token 重构；上游新功能：Markdown ZIP export + Diagram 布局 4 连 fix + Docker entry path 兼容。
 > - **V2.5（2026-09-10）**：⚠️ **新增 DATA 目录强制备份步骤（MASTER 钦定，升级铁律）**——大架构升级（如 v1.64.0.1 嘅 11 个新 migration）会改数据库结构，升级前必须先备份 `./edgeever-data`，否则新版本有问题时**回滚都救唔返数据**；插入位置 = 日常升级流程第 2.5 步（更新源码之后、build/上线之前）+ 升级铁律段；「回滚特殊注意」补充「DATA 备份先至係真正嘅回滚保障（镜像回滚只救代码，唔救数据）」。
 > - **V2.4（2026-09-10）**：目标版本 v1.50.0.3 → **v1.64.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）；⚠️ 本次为**大版本 merge**（v1.50.0 → v1.64.0，上游 263 commits），首次启动会自动应用 11 个新 migration（上游 0036_resource_multipart_uploads + 0037-0046 十个），`/api/health` 嘅 migration 字段会变为 0046；新增「回滚特殊注意（schema 变化）」章节；新增 .env 可选新变量说明（全部可唔改）。
 > - **V2.3（2026-09-04）**：目标版本 v1.50.0.2 → **v1.50.0.3**（build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）；明确交付方式定案（永久唔再打 tar）；新增「BUG-003 `verified` 字段说明」章节（调用方见到 `verified:false` 应自行重试）；新增本版修复内容与验证重点。
@@ -54,17 +55,20 @@
 
 **版本锚点说明**：
 
-- **本次部署 = fde-v1.64.0.1 分支**（上游 merge v1.64.0 + MCP ping handler）
-- 分支 fde-v1.64.0.1 = tag fde-v1.50.0.3（33f53658，现行稳定版）→ merge upstream v1.64.0（0376d768）→ feat ping handler
+- **本次部署 = fde-v1.65.0.1 分支**（上游 merge v1.65.0 + F18-A 修复 + TokenHidingEditor cosmetic alignment）
+- 分支 fde-v1.65.0.1 = fde-v1.64.0.1（ce044488）→ merge upstream v1.65.0（313ab47a）→ cosmetic + F18-A fix
 - tag fde-v1.50.0.3 = 上一个可用版本（v1.50.0.3 三 BUG 修复版，远端而家跑紧），**首选回滚锚点**
 - tag fde-v1.50.0.2（2dfd30ac）= 次选回滚锚点
 - v1.50.0.3 → v1.64.0.1 **有数据库 schema 变化**：上游带来 11 个新 migration（上游 0036_resource_multipart_uploads + 0037-0046 十个；multipart uploads / scheduled tasks / companion AI / inbox identity）。**首次启动自动应用，无需手动 migrate**；⚠️ migration 撞号（上游 0036_resource_multipart_uploads vs 我哋 0036_mcp_token_hidden）无害——runner 按完整档案名 tracking，两者都会被正确应用一次（我哋嗰条远端已应用过会 skip，上游嗰条会执行）
+- v1.64.0.1 → v1.65.0.1 **无新增 migration**：数据库 schema 不变，/api/health migration 字段仍为 0046
 
-**本版变更内容（v1.64.0.1）**：
+**本版变更内容（v1.65.0.1）**：
 
-1. **上游 merge v1.64.0**：上游 v1.50.0 → v1.64.0 全部更新（263 commits：plugins 生态、diagram 图表、multipart 大附件上传、scheduled tasks、companion AI 预览、编辑器增强等）；MCP 工具 42 → 45（+create_diagram_memo / get_diagram / update_diagram）
-2. **MCP `ping` handler**：EdgeEver 响应 MCP 规范嘅 ping method（空结果 + 200），MCP 客户端 keepalive 由拉全工具表变 ping 轻探针，消 reconnect 时嘅 404/-32601 噪音
-3. **隔离功能全量保留**：per-token 隔离、NULL-safe 修正（BUG-002/002b）、search 修复（BUG-001）、tag verified 字段（BUG-003）全部喺 merge 后实测回归通过（全库 1829 pass / 8 pre-existing fail 与基线一致；泄露矩阵 15/0；BUG 探针全绿）
+1. **上游 merge v1.65.0**：v1.64.0 → v1.65.0（10 commits / 118 files）：Dark mode CSS token 重构（60+ 组件 bg-white→bg-card 统一）+ Markdown ZIP export（选中笔记批量导出含附件）+ Diagram 布局 4 连 fix（architecture 自动布局 / canvas fit / zoom 75%/85% / Tab 导航）+ Docker entry path 兼容（NAS/GUI 旧命令）
+2. **F18-A 修复**：HiddenNotebookError extends AppError（code="restricted", status=403）—— REST 写隐藏分类由 500 internal_error 变 403 restricted（MCP 侧本来就正确，一处改动双侧同时正确）
+3. **TokenHidingEditor cosmetic alignment**：bg-white → bg-card 同步上游 dark mode CSS token 体系
+4. **隔离功能全量保留**：per-token 隔离、NULL-safe 修正（BUG-002/002b）、search 修复（BUG-001）、tag verified 字段（BUG-003）全部喺 merge 后实测回归通过（全库 1858 pass / 0 fail；上游 fix 咗旧 8 个 pre-existing fail）
+5. **无新增 migration**：v1.65.0 无新 migration（数据库 schema 不变，/api/health migration 字段仍为 0046）
 
 
 ---
@@ -78,27 +82,27 @@
 喺既有源码目录（例如 /opt/edgeever-src）逐条执行：
 
     git fetch origin --tags
-    git checkout fde-v1.64.0.1
-    git pull origin fde-v1.64.0.1
+    git checkout fde-v1.65.0.1
+    git pull origin fde-v1.65.0.1
 
 核对（两条都应通过）：
 
     git log --oneline -1
-    # 应显示：docs: DEPLOY_REMOTE_BUILD V2.4 for fde-v1.64.0.1
+    # 应显示：docs: DEPLOY V2.6 for fde-v1.65.0.1（或用 git describe --tags --exact-match 确认输出 fde-v1.65.0.1）
     git describe --tags --exact-match
-    # 应输出：fde-v1.64.0.1
+    # 应输出：fde-v1.65.0.1
 
 **排障**：如果 fetch 报 `! [rejected] ... (would clobber existing tag)` 或 pull 报
 `Need to specify how to reconcile divergent branches` —— 只会喺「之前 fetch 过旧版同名 tag」
 嘅仓库出现（例如 AI 部署通知前曾拉过一次）。恢复法（实测 2026-09-10）：
 
-    git tag -d fde-v1.64.0.1
+    git tag -d fde-v1.65.0.1
     git fetch origin --tags
-    git checkout fde-v1.64.0.1
-    git pull origin fde-v1.64.0.1
-    git describe --tags --exact-match    # 应输出 fde-v1.64.0.1
+    git checkout fde-v1.65.0.1
+    git pull origin fde-v1.65.0.1
+    git describe --tags --exact-match    # 应输出 fde-v1.65.0.1
 
-⚠️ **HEAD detached 说明**：单分支 clone 入面 checkout 新分支名时，git 找不到同远端 tracking 分支但找到同名 tag，会落在「HEAD detached at fde-v1.64.0.1」—— **呢个係正常现象唔係错误**（实测 2026-09-10）：docker build 只需要源码文件树，detached 状态文件齐全、build 无影响。以后升级更新版本时同样三步（checkout 新版本号）即可。
+⚠️ **HEAD detached 说明**：单分支 clone 入面 checkout 新分支名时，git 找不到同远端 tracking 分支但找到同名 tag，会落在「HEAD detached at fde-v1.65.0.1」—— **呢个係正常现象唔係错误**（实测 2026-09-10）：docker build 只需要源码文件树，detached 状态文件齐全、build 无影响。以后升级更新版本时同样三步（checkout 新版本号）即可。
 
 ⚠️ dirty tree 处理：checkout 前先检查
 
@@ -112,13 +116,13 @@
 
 1. 选个目录，例如 /opt/edgeever-src：
 
-       git clone --branch fde-v1.64.0.1 --single-branch https://github.com/fde-lander/edgeever.git /opt/edgeever-src
+       git clone --branch fde-v1.65.0.1 --single-branch https://github.com/fde-lander/edgeever.git /opt/edgeever-src
 
 2. 验证 HEAD commit：
 
        cd /opt/edgeever-src && git log --oneline -1
 
-   应显示：docs: DEPLOY_REMOTE_BUILD V2.4 for fde-v1.64.0.1（可用 git describe --tags --exact-match 确认输出 fde-v1.64.0.1）
+   应显示：docs: DEPLOY V2.6 for fde-v1.65.0.1（可用 git describe --tags --exact-match 确认输出 fde-v1.65.0.1）
 
    注：`--single-branch` clone 默认已带全部 tags（git 默认 --tags 跟 clone 走），无需额外 fetch tag 即可 checkout 旧 tag 回滚。
 
@@ -129,11 +133,11 @@
 
 ## 🏗 第二步：远端 Build 镜像
 
-在源码目录（/opt/edgeever-src）执行（版本号必须与本次部署目标一致 = **v1.64.0.1**）：
+在源码目录（/opt/edgeever-src）执行（版本号必须与本次部署目标一致 = **v1.65.0.1**）：
 
     docker build \
       --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) \
-      -t edgeever-fde:v1.64.0.1 \
+      -t edgeever-fde:v1.65.0.1 \
       .
 
 要点：
@@ -155,13 +159,13 @@
 在 compose 文件同目录建 .env（如果已有就改）：
 
     EDGE_EVER_IMAGE=edgeever-fde
-    EDGE_EVER_VERSION=v1.64.0.1
+    EDGE_EVER_VERSION=v1.65.0.1
     EDGE_EVER_PORT=8787
     EDGE_EVER_AUTH_USERNAME=admin
     EDGE_EVER_AUTH_PASSWORD=你的密码
 
 注意 compose.yaml 用 "image: ${EDGE_EVER_IMAGE}:${EDGE_EVER_VERSION}"，
-所以 EDGE_EVER_IMAGE=edgeever-fde + EDGE_EVER_VERSION=v1.64.0.1 会拼出 edgeever-fde:v1.64.0.1，
+所以 EDGE_EVER_IMAGE=edgeever-fde + EDGE_EVER_VERSION=v1.65.0.1 会拼出 edgeever-fde:v1.65.0.1，
 正好对应第二步的 -t 标签。
 
 **⚙️ .env 可选新变量（v1.64.0 上游新增，全部唔改都照样跑）**：
@@ -191,15 +195,15 @@
 
 ---
 
-## 🔁 日常升级流程（以后每个新版本照此，本次 = v1.50.0.3 → v1.64.0.1）
+## 🔁 日常升级流程（以后每个新版本照此，本次 = v1.64.0.1 → v1.65.0.1）
 
 1. 本地 AI 改完代码 push 到 GitHub 分支，并告知**新 commit hash**（每次升级都用通知嘅 hash 校验，唔好凭记忆拉）
 2. 远端更新源码（同第一步场景 A 嘅三步命令）：
 
        cd /opt/edgeever-src
        git fetch origin --tags
-       git checkout fde-v1.64.0.1
-       git pull origin fde-v1.64.0.1
+       git checkout fde-v1.65.0.1
+       git pull origin fde-v1.65.0.1
        git log --oneline -1     # 应显示 docs: DEPLOY_REMOTE_BUILD V2.4 ...，一致先继续
 
 2.5. ⚠️ **DATA 目录强制备份（升级铁律 —— build / 上线之前必做，跳过 = 裸奔升级）**：
@@ -225,11 +229,11 @@
 
 3. 重新 build（BUILD_ID 自动填当前 HEAD）：
 
-       docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.64.0.1 .
+       docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.65.0.1 .
 
 4. 改 .env 版本号 → 重建容器：
 
-       # .env 入面：EDGE_EVER_VERSION=v1.64.0.1
+       # .env 入面：EDGE_EVER_VERSION=v1.65.0.1
        docker compose up -d
 
 5. 验证（健康端点 + 本次变更重点）：
@@ -237,7 +241,7 @@
        curl -s http://127.0.0.1:8787/api/health
        # 应返回 "ok": true、"migration":"0046_..."（本次有 schema 变化，首次启动后 0036→0046）+ "build":"<hash>…"
 
-**本次升级（v1.50.0.3 → v1.64.0.1）验证重点**：
+**本次升级（v1.64.0.1 → v1.65.0.1）验证重点**：
 
 - MCP `ping` 应返回 200 空结果（新功能；Hermes gateway 观察角度见 Phase 18 验证计划）
 - MCP 工具列表 42 → 45（+create_diagram_memo / get_diagram / update_diagram）
@@ -320,7 +324,7 @@
        git log --oneline -1          # 应显示 33f53658
        docker build --build-arg EDGE_EVER_BUILD_ID=33f53658 -t edgeever-fde:v1.50.0.3 .
        # .env 改 EDGE_EVER_VERSION=v1.50.0.3 → docker compose up -d
-       # 注意：checkout 旧 tag 后源码目录停喺 detached HEAD，回新版本时再 git checkout fde-v1.64.0.1
+       # 注意：checkout 旧 tag 后源码目录停喺 detached HEAD，回新版本时再 git checkout fde-v1.65.0.1
 
 3. **次选更旧锚点**：tag `fde-v1.50.0.2`（2dfd30ac），同样手法（BUILD_ID=2dfd30ac，tag v1.50.0.2）
 4. **回滚到任意更旧版本**：git checkout <该版本 tag 或 commit> → docker build -t edgeever-fde:<自定义tag> . → .env 对应改 → up -d
