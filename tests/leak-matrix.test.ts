@@ -65,6 +65,14 @@ function createTestDb(): Database {
     FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE,
     FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
   )`);
+  db.exec(`CREATE TABLE table_forms (
+    id TEXT PRIMARY KEY, memo_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+    token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    password_hash TEXT, title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+    submit_label TEXT NOT NULL DEFAULT '', fields_json TEXT NOT NULL DEFAULT '[]',
+    submit_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+    UNIQUE (memo_id), UNIQUE (token)
+  )`);
 
   // Seed data
   db.exec(`INSERT INTO workspaces VALUES ('ws1', 'Test')`);
@@ -96,6 +104,11 @@ function createTestDb(): Database {
   // Tags
   db.exec(`INSERT INTO memo_tags VALUES ('memo1', 'ws1', 'secret-tag', 'secret-tag')`);
   db.exec(`INSERT INTO memo_tags VALUES ('memo3', 'ws1', 'public-tag', 'public-tag')`);
+
+  // Table forms (0055): form on public memo3 (visible) + form on hidden memo1 (secret)
+  db.exec(`INSERT INTO table_forms (id, memo_id, workspace_id, token, enabled, title) VALUES
+    ('form_public', 'memo3', 'ws1', 'tok_public', 1, 'Public Form'),
+    ('form_secret', 'memo1', 'ws1', 'tok_secret', 1, 'Secret Form')`);
 
   return db;
 }
@@ -402,6 +415,47 @@ describe("9.9 泄露矩阵 — BUILD 前硬 GATE", () => {
 
     // Write guard still blocks moves INTO hidden notebooks (D4 does not weaken writes)
     expect(() => assertNotebookWritable(hidingDb, "nb_root")).toThrow(HiddenNotebookError);
+  });
+
+  // ── Scenario 10 (Phase 26): table_forms (0055) isolation ──
+  // v1.90.0 新增 table_forms 表（memo_id 关联 memos 嘅表单配置）。
+  // 隐藏 memo 嘅 form（title/description/fields_json）必须对 agent 不可见（Q4: 404）。
+
+  test("S10: agent cannot see table_forms for hidden memos (direct SELECT)", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    const result = await hidingDb.prepare(
+      "SELECT id, memo_id, title FROM table_forms"
+    ).all<{ id: string; memo_id: string }>();
+
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain("form_public"); // form on public memo3 visible
+    expect(ids).not.toContain("form_secret"); // form on hidden memo1 filtered
+  });
+
+  test("S10: loadForm pattern (EXISTS memos) hides secret form (Q4 404 semantics)", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    // Real table-form-routes.ts loadForm SQL (selectFormSql + EXISTS check)
+    const loadFormSql = `
+SELECT id, memo_id, workspace_id, token, enabled, password_hash, title, description,
+       submit_label, fields_json, created_by, submit_count
+FROM table_forms
+WHERE token = ? AND enabled = 1
+  AND EXISTS (
+    SELECT 1 FROM memos m
+    WHERE m.id = table_forms.memo_id AND m.workspace_id = table_forms.workspace_id AND m.is_deleted = 0
+  )`;
+
+    // Secret form on hidden memo1 → 404 (null)
+    const secret = await hidingDb.prepare(loadFormSql).bind("tok_secret").first<{ id: string }>();
+    expect(secret).toBeNull();
+
+    // Public form on memo3 → readable
+    const pub = await hidingDb.prepare(loadFormSql).bind("tok_public").first<{ id: string }>();
+    expect(pub?.id).toBe("form_public");
   });
 
   // ── Full test suite summary ──

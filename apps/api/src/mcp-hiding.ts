@@ -83,6 +83,9 @@ const INJECTION_RULES: InjectionRule[] = [
   { table: "memo_tags", getInjection: MEMO_ID_SUBQUERY },
   // FTS5 virtual table — memo_id is UNINDEXED, supports WHERE
   { table: "memos_fts", getInjection: MEMO_ID_SUBQUERY },
+  // table_forms (0055) — form config linked via memo_id; hidden memo's form
+  // must be invisible to agents (Q4: 404, isolation philosophy)
+  { table: "table_forms", getInjection: MEMO_ID_SUBQUERY },
 ];
 
 const CONTENT_TABLES = new Set(INJECTION_RULES.map((r) => r.table.toLowerCase()));
