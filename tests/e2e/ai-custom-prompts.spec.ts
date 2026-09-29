@@ -303,14 +303,13 @@ test.describe("AI custom prompts", () => {
     await expect(assistant).toBeVisible();
     await assistant.getByRole("button", { name: "生成", exact: true }).click();
     const result = assistant.getByTestId("ai-assistant-result");
-    await expect(result.getByRole("alert")).toHaveText("当前处理方式需要笔记内容。请先输入内容，或改用自定义指令从空白开始生成。");
+    await expect(result.getByRole("alert")).toHaveText("请输入你希望 AI 执行的指令。");
     await expect(result).not.toContainText("生成结果将显示在这里。");
     await expect(assistant).not.toContainText("contentMarkdown");
 
-    await assistant.getByRole("button", { name: "自定义指令", exact: true }).click();
     const instruction = assistant.getByRole("textbox", { name: "告诉 AI 你想怎么处理" });
     await instruction.fill("写一首诗");
-    await selectAction(assistant, "翻译");
+    await selectAction(assistant, "全文翻译");
     await expect(assistant.getByRole("textbox", { name: "输入要处理的内容" })).toHaveValue("写一首诗");
     await assistant.getByRole("button", { name: "生成", exact: true }).click();
     await expect(result).toHaveText("Write a poem.");
@@ -440,7 +439,7 @@ test.describe("AI custom prompts", () => {
     await page.keyboard.press("Enter");
     const emptyParagraph = editor.locator("p").last();
     await expect(emptyParagraph).toHaveClass(/is-empty/);
-    await expect(emptyParagraph).toHaveAttribute("data-placeholder", "Space 唤起 AI · / 浏览命令 · @ 引用笔记");
+    await expect(emptyParagraph).toHaveAttribute("data-placeholder", "空格唤起 AI · / 命令 · @ 引用");
     const renderedPlaceholder = await emptyParagraph.evaluate((element) => {
       const style = getComputedStyle(element, "::before");
       return {
@@ -449,7 +448,7 @@ test.describe("AI custom prompts", () => {
         visibility: style.visibility,
       };
     });
-    expect(renderedPlaceholder.content).toContain("Space 唤起 AI · / 浏览命令 · @ 引用笔记");
+    expect(renderedPlaceholder.content).toContain("空格唤起 AI · / 命令 · @ 引用");
     expect(renderedPlaceholder.display).not.toBe("none");
     expect(renderedPlaceholder.visibility).not.toBe("hidden");
 
@@ -487,7 +486,7 @@ test.describe("AI custom prompts", () => {
     await focusParagraphEnd(editor);
     await page.keyboard.press("Enter");
     const emptyParagraph = editor.locator("p").last();
-    await expect(emptyParagraph).toHaveAttribute("data-placeholder", "/ 浏览命令 · @ 引用笔记");
+    await expect(emptyParagraph).toHaveAttribute("data-placeholder", "/ 命令 · @ 引用");
 
     await page.keyboard.press("Space");
     await expect(page.getByRole("dialog", { name: "AI 笔记助手" })).toBeHidden();
@@ -659,6 +658,7 @@ test.describe("AI custom prompts", () => {
     await page.getByRole("button", { name: "打开 AI 写作助手", exact: true }).click();
 
     const dialog = page.getByRole("dialog", { name: "AI 笔记助手" });
+    await selectAction(dialog, "精简总结");
     await dialog.getByRole("button", { name: "生成", exact: true }).click();
     await expect(dialog.getByText("AI 插入段落", { exact: true })).toBeVisible();
     const copyButton = dialog.getByRole("button", { name: "复制结果", exact: true });
@@ -745,5 +745,21 @@ test.describe("AI custom prompts", () => {
     await dialog.getByRole("button", { name: "替换笔记", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(page.locator(".ProseMirror[contenteditable='true']")).toContainText("进展顺利");
+  });
+
+  test("opens on a custom instruction when nothing is selected", async ({ page }) => {
+    const memo = await createMemo(page, `e2e-ai-last-action-${Date.now()}`, "记住上次处理方式。");
+    await ensureAuthenticatedPage(page);
+    await page.evaluate(() => window.localStorage.removeItem("edgeever.aiAssistant.lastAction"));
+    const dialog = await openMemoAssistant(page, memo.id, notebookName);
+    await expect(dialog.getByRole("combobox", { name: "处理方式" })).toHaveText("自定义指令");
+    await selectAction(dialog, "全文翻译");
+    await expect(dialog.getByRole("combobox", { name: "处理方式" })).toHaveText("全文翻译");
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    await page.getByRole("button", { name: "打开 AI 写作助手", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("combobox", { name: "处理方式" })).toHaveText("自定义指令");
   });
 });

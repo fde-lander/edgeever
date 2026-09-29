@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
-import { Archive, CheckSquare, FileDown, Folder as NotebookIcon, KeyRound, LayoutList, List, Merge, Star, Tags, Trash2, X } from "lucide-react";
+import { CheckSquare, FileDown, Folder as NotebookIcon, KeyRound, LayoutList, List, Merge, Paperclip, Star, Tag, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -142,14 +142,14 @@ export const MobileListActionsSheet = ({
             {memoListDensityOptions.map((option) => (
               <ToggleGroupItem
                 key={option.value}
-                className="h-11 w-full justify-start gap-3 rounded-md px-3 text-left text-sm data-[state=on]:bg-emerald-50 data-[state=on]:text-emerald-700"
+                className="h-11 w-full justify-start gap-3 rounded-md px-3 text-left text-sm data-[state=on]:bg-workspace-selection data-[state=on]:text-slate-950"
                 size="default"
                 value={option.value}
                 aria-label={option.label}
               >
-                <span className={listDensity === option.value ? "text-emerald-500" : "text-slate-500"}>{option.icon}</span>
+                <span className={listDensity === option.value ? "text-slate-950" : "text-slate-500"}>{option.icon}</span>
                 <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                <CheckCircleCheck className={cn("h-4 w-4 shrink-0", listDensity === option.value ? "text-emerald-500" : "text-transparent")} />
+                <CheckCircleCheck className={cn("h-4 w-4 shrink-0", listDensity === option.value ? "text-slate-950" : "text-transparent")} />
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
@@ -161,20 +161,20 @@ export const MobileListActionsSheet = ({
               key={option.value}
               className={cn(
                 "flex h-11 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-medium transition",
-                sortMode === option.value ? "bg-emerald-50 text-emerald-700" : "text-slate-800 hover:bg-slate-50"
+                sortMode === option.value ? "bg-workspace-selection font-semibold text-slate-950" : "text-slate-800 hover:bg-slate-50"
               )}
               type="button"
               aria-pressed={sortMode === option.value}
               onClick={() => onSortModeChange(option.value)}
             >
               <span className="min-w-0 flex-1 truncate">{option.label}</span>
-              <CheckCircleCheck className={cn("h-4 w-4 shrink-0", sortMode === option.value ? "text-emerald-500" : "text-transparent")} />
+              <CheckCircleCheck className={cn("h-4 w-4 shrink-0", sortMode === option.value ? "text-slate-950" : "text-transparent")} />
             </button>
           ))}
 
           <div className="my-2 h-px bg-slate-100" />
-          <MobileListActionButton icon={<Tags className="h-4 w-4" />} label={t("mobileSheets.tags")} onClick={onOpenTags} />
-          <MobileListActionButton icon={<Archive className="h-4 w-4" />} label={t("mobileSheets.assets")} onClick={onOpenAssets} />
+          <MobileListActionButton icon={<Tag className="h-4 w-4" />} label={t("mobileSheets.tags")} onClick={onOpenTags} />
+          <MobileListActionButton icon={<Paperclip className="h-4 w-4" />} label={t("mobileSheets.assets")} onClick={onOpenAssets} />
           {view === "trash" ? (
             <MobileListActionButton icon={<Trash2 className="h-4 w-4" />} label={t("mobileSheets.emptyTrash")} onClick={onEmptyTrash} />
           ) : (
@@ -240,7 +240,7 @@ export const MobileMoveSheet = ({
                     key={option.id}
                     className={cn(
                       "h-11 gap-2 px-3",
-                      selected ? "bg-emerald-50 font-semibold text-emerald-700 data-[selected=true]:bg-emerald-50" : "text-slate-700"
+                      selected ? "bg-workspace-selection font-semibold text-slate-950 data-[selected=true]:bg-workspace-selection" : "text-slate-700"
                     )}
                     style={{ paddingLeft: `${12 + option.depth * 18}px` }}
                     value={option.id}
@@ -251,9 +251,9 @@ export const MobileMoveSheet = ({
                     disabled={isMoving}
                     onSelect={() => onMove(option.id)}
                   >
-                    <NotebookIcon className={cn("h-4 w-4 shrink-0", selected ? "text-emerald-500" : "text-slate-600")} />
+                    <NotebookIcon className={cn("h-4 w-4 shrink-0", selected ? "text-slate-950" : "text-slate-600")} />
                     <span className="min-w-0 flex-1 truncate">{option.name}</span>
-                    {selected ? <CheckCircleCheck className="h-4 w-4 shrink-0 text-emerald-500" /> : null}
+                    {selected ? <CheckCircleCheck className="h-4 w-4 shrink-0 text-slate-950" /> : null}
                   </CommandItem>
                 );
               })}

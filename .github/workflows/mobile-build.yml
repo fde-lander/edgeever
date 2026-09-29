@@ -116,11 +116,11 @@ jobs:
             fi
           fi
 
+          # `gh release view --json assets` stays empty after a draft is published.
+          # The API URL is addressed by release id and still lists the uploads.
+          release_api="$(gh release view "$CURRENT_TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)"
           mapfile -t current_assets < <(
-            gh release view "$CURRENT_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json assets \
-              --jq '.assets[].name'
+            gh api "$release_api" --jq '.assets[].name'
           )
           asset_ready="$(
             printf '%s\n' "${current_assets[@]}" |
@@ -141,10 +141,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/native-assets"
-          gh release download "$CURRENT_TAG" \
+          node scripts/download-release-assets.mjs \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern 'edgeever-android-v*-arm64-v8a.apk' \
-            --dir "$RUNNER_TEMP/native-assets"
+            --tag "$CURRENT_TAG" \
+            --dir "$RUNNER_TEMP/native-assets" \
+            --pattern 'edgeever-android-v*-arm64-v8a.apk'
           apk_path="$(find "$RUNNER_TEMP/native-assets" -type f -name 'edgeever-android-v*-arm64-v8a.apk' -print -quit)"
           test -n "$apk_path"
           test -n "$ANDROID_PLAY_APP_SIGNER_SHA256"

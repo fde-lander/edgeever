@@ -97,7 +97,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
           </div>
         </CardHeader>
         <CardContent className="grid gap-2 p-4 pt-0">
-          {usersQuery.isLoading ? <p className="text-sm text-slate-500">{t("users.loading")}</p> : null}
+          {usersQuery.isLoading ? <p className="text-xs leading-5 text-slate-500">{t("users.loading")}</p> : null}
           {usersQuery.data?.users.map((user) => (
             <div key={user.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-card/40 p-3">
               <div className="min-w-0">
@@ -136,7 +136,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
             <DialogDescription className="leading-6">{t("users.createDescription")}</DialogDescription>
           </DialogHeader>
           <form className="grid gap-5 px-6 py-5" autoComplete="off" onSubmit={handleCreate}>
-            <label className="grid gap-2 text-sm font-medium text-slate-700" htmlFor="edgeever-new-account-username">
+            <label className="grid gap-2 text-xs font-normal leading-5 text-slate-700" htmlFor="edgeever-new-account-username">
               {t("users.username")}
               <Input
                 id="edgeever-new-account-username"
@@ -153,7 +153,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
                 maxLength={80}
               />
             </label>
-            <label className="grid gap-2 text-sm font-medium text-slate-700" htmlFor="edgeever-new-account-display-name">
+            <label className="grid gap-2 text-xs font-normal leading-5 text-slate-700" htmlFor="edgeever-new-account-display-name">
               {t("users.displayName")}
               <Input
                 id="edgeever-new-account-display-name"
@@ -167,7 +167,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
                 maxLength={80}
               />
             </label>
-            <label className="grid gap-2 text-sm font-medium text-slate-700" htmlFor="edgeever-new-account-password">
+            <label className="grid gap-2 text-xs font-normal leading-5 text-slate-700" htmlFor="edgeever-new-account-password">
               {t("users.password")}
               <Input
                 id="edgeever-new-account-password"
@@ -184,7 +184,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
               />
               <span className="text-xs font-normal text-slate-500">{t("users.passwordHint")}</span>
             </label>
-            {createMutation.isError ? <p className="text-sm font-medium text-rose-600" role="alert">{createError}</p> : null}
+            {createMutation.isError ? <p className="text-xs font-medium leading-5 text-rose-600" role="alert">{createError}</p> : null}
             <DialogFooter className="mt-1 gap-2 sm:space-x-0">
               <DialogClose asChild><Button type="button" variant="outline">{t("common.cancel")}</Button></DialogClose>
               <Button type="submit" variant="solid" disabled={createMutation.isPending}>
@@ -199,7 +199,7 @@ export const UserManagementCard = ({ demoMode }: UserManagementCardProps) => {
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t("users.resetTitle", { username: resetUser?.username })}</DialogTitle><DialogDescription>{t("users.resetDescription")}</DialogDescription></DialogHeader>
           <form className="grid gap-4" autoComplete="off" onSubmit={handleReset}>
-            <label className="grid gap-2 text-sm font-medium text-slate-700" htmlFor="edgeever-reset-account-password">
+            <label className="grid gap-2 text-xs font-normal leading-5 text-slate-700" htmlFor="edgeever-reset-account-password">
               {t("users.newPassword")}
               <Input id="edgeever-reset-account-password" name="edgeever-reset-account-password" type="password" autoComplete="new-password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} placeholder={t("users.passwordPlaceholder")} minLength={8} required />
             </label>

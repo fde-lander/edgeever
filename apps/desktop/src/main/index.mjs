@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, session, net, protocol, shell, dialog, safeStorage, clipboard, powerMonitor } from "electron";
+import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, session, net, protocol, shell, dialog, safeStorage, clipboard, ClipboardItem, powerMonitor, desktopCapturer, screen } from "electron";
 import { createReadStream, existsSync } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -10,6 +10,9 @@ import { SidecarRpcClient } from "./rpc.mjs";
 import { resourceRequestHeaders } from "./resource-request.mjs";
 import { downloadContentDispositionFromRequest, isSafeResourceId, parseByteRangeHeader, resourceIdFromRequest } from "./resource-url.mjs";
 import { isSupportedAssociatedFile } from "./file-association.mjs";
+import { createWeChatShareController } from "./wechat-share-import.mjs";
+import { enableMacShareExtension } from "./share-extension-registration.mjs";
+import { registerWindowsShareMenu, shareFilePathsFromCommandLine } from "./windows-share-menu.mjs";
 import { accountDataDirectory, accountScopeKey } from "./account-scope.mjs";
 import { rotateDiagnosticLog } from "./diagnostic-log.mjs";
 import { restrictDirectory, restrictFile } from "./file-permissions.mjs";
@@ -19,6 +22,7 @@ import {
   normalizeStagedResourcePart,
   remapStagedResourceMetadata,
 } from "./staged-resource.mjs";
+import { cacheStagedResourceBytes, listPendingStagedResources, listStagedResourceMetadata, readStagedResourceMetadata, recordStagedResourceAlias } from "./staged-resource-alias.mjs";
 import {
   isMountedDiskImageVolume,
   isMountedInstallerPath,
@@ -28,9 +32,11 @@ import { userDataDirectoryFromArguments } from "./user-data-directory.mjs";
 import { isAllowedPrintPreviewUrl } from "./window-open-policy.mjs";
 import { showWindow } from "./window-visibility.mjs";
 import { trayIconPath } from "./tray-icon.mjs";
-import { writeRichClipboard } from "./clipboard-write.mjs";
+import { writeImageClipboard, writeRichClipboard, writeTextClipboard } from "./clipboard-write.mjs";
+import { captureScreenToNote, createScreenshotCaptureGuard, screenshotImportIpcPayload, writeScreenshotTempPath } from "./screenshot-capture.mjs";
 import { LocalDataResetError, scheduleMacLocalDataReset } from "./local-data-reset.mjs";
 import { buildDesktopDiagnosticIssueUrl, normalizeDesktopDiagnostic } from "./desktop-diagnostics.mjs";
+import { readDesktopDeviceModel } from "./desktop-device-model.mjs";
 import { createRendererStartupGuard } from "./renderer-startup-guard.mjs";
 import { waitForChildProcessSpawn } from "./child-process-start.mjs";
 import { ScheduledTaskScheduler } from "./scheduled-task-scheduler.mjs";
@@ -39,10 +45,15 @@ import {
   fetchTrustedWindowsUpdate,
   verifyDownloadedWindowsUpdate,
 } from "./windows-update-trust.mjs";
-import { instanceReleaseVersionFromPayload, shouldHoldAutoRestartUpdate } from "./instance-update-gate.mjs";
 import electronUpdater from "electron-updater";
 import { createPluginPublicNetworkRuntime } from "./plugin-public-network.mjs";
+import { createAiDirectRuntime } from "./ai-direct.mjs";
 import { shouldQuitAfterAllWindowsClosed } from "./window-lifecycle.mjs";
+import {
+  RENDERER_HIBERNATE_PREPARE_TIMEOUT_MS,
+  createRendererHibernateController,
+  workingSetBytesFromProcessMemoryInfo,
+} from "./renderer-hibernate.mjs";
 import {
   DESKTOP_APP_ENTRY_URL,
   DESKTOP_APP_ORIGIN,
@@ -116,7 +127,6 @@ let updateDownloadInFlight = null;
 let updateCheckTimer = null;
 let lastUpdateCheckAt = 0;
 let downloadedUpdateVersion = null;
-let heldUpdateVersion = null;
 let promptedUpdateVersion = null;
 let trustedWindowsUpdate = null;
 let windowsDownloadedUpdateVerified = false;
@@ -132,6 +142,7 @@ let rendererStartupFailureDialogOpen = false;
 let rendererStartupGuard = null;
 let rendererUnresponsiveTimer = null;
 const pluginPublicNetwork = createPluginPublicNetworkRuntime();
+const aiDirect = createAiDirectRuntime();
 let rendererUnresponsiveDialogOpen = false;
 let recoveredAfterAbnormalExit = false;
 let usePrivateAppProtocol = false;
@@ -209,15 +220,26 @@ const writeDiagnostic = async (event, details = {}) => {
   }
 };
 
+let cachedDesktopDeviceModel;
+
+const desktopDeviceModel = () => {
+  if (cachedDesktopDeviceModel === undefined) {
+    cachedDesktopDeviceModel = readDesktopDeviceModel() || "unknown";
+  }
+  return cachedDesktopDeviceModel;
+};
+
 const desktopRuntimeSystemInfo = () => ({
   appVersion: app.getVersion(),
   autoUpdateSupported: true,
   platform: process.platform,
   architecture: process.arch,
+  deviceModel: desktopDeviceModel(),
   osVersion: process.getSystemVersion?.() || "unknown",
   osRelease: operatingSystemRelease(),
   electron: process.versions.electron || "unknown",
   chrome: process.versions.chrome || "unknown",
+  dataDir: sidecarDataDirectory(activeAccountId),
 });
 
 const desktopDiagnosticSystemInfo = async () => {
@@ -506,13 +528,141 @@ const importMarkdownFile = async (filePath) => {
 };
 
 let pendingMarkdownImport = null;
+let pendingScreenshotImport = null;
+const screenshotCaptureGuard = createScreenshotCaptureGuard();
+const sentScreenshotCaptureIds = new Set();
 let rendererReady = false;
+
+const getRendererHibernateBackgroundState = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { focused: false, visible: false, quitting: isQuitting, loading: false };
+  }
+  return {
+    focused: mainWindow.isFocused(),
+    visible: mainWindow.isVisible() && !mainWindow.isMinimized(),
+    quitting: isQuitting,
+    loading: mainWindow.webContents.isLoading(),
+  };
+};
+
+const getRendererWorkingSetBytes = async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return 0;
+  try {
+    return workingSetBytesFromProcessMemoryInfo(await mainWindow.webContents.getProcessMemoryInfo());
+  } catch {
+    return 0;
+  }
+};
+
+const prepareRendererForHibernate = () => new Promise((resolve) => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) {
+    resolve("unavailable");
+    return;
+  }
+  const timeout = setTimeout(() => {
+    ipcMain.removeListener("desktop:hibernate-prepared", onPrepared);
+    resolve("timeout");
+  }, RENDERER_HIBERNATE_PREPARE_TIMEOUT_MS);
+  const onPrepared = (event) => {
+    if (event.sender !== mainWindow?.webContents) return;
+    clearTimeout(timeout);
+    ipcMain.removeListener("desktop:hibernate-prepared", onPrepared);
+    resolve("ready");
+  };
+  ipcMain.on("desktop:hibernate-prepared", onPrepared);
+  mainWindow.webContents.send("desktop:hibernate-prepare");
+});
+
+const reloadHibernatedRenderer = () => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused() || isQuitting) return;
+  rendererReady = false;
+  armRendererStartupGuard();
+  mainWindow.webContents.reload();
+};
+
+const rendererHibernate = createRendererHibernateController({
+  getBackgroundState: getRendererHibernateBackgroundState,
+  getMemoryBytes: getRendererWorkingSetBytes,
+  prepareRenderer: prepareRendererForHibernate,
+  reloadRenderer: reloadHibernatedRenderer,
+  onDiagnostic: (event, details) => { void writeDiagnostic(event, details); },
+});
+
+const syncRendererHibernate = () => {
+  if (isQuitting || !mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) {
+    rendererHibernate.cancel();
+    return;
+  }
+  rendererHibernate.noteBackground();
+};
 
 const flushPendingMarkdownImport = () => {
   if (!pendingMarkdownImport || !rendererReady || !mainWindow || mainWindow.isDestroyed()) return;
   const payload = pendingMarkdownImport;
   pendingMarkdownImport = null;
   mainWindow.webContents.send("desktop:import-markdown", payload);
+};
+
+const sendScreenshotImport = (payload) => {
+  const ipcPayload = screenshotImportIpcPayload(payload);
+  if (!ipcPayload.bytes.byteLength) return;
+  if (ipcPayload.captureId && sentScreenshotCaptureIds.has(ipcPayload.captureId)) return;
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading() || !rendererReady) {
+    pendingScreenshotImport = ipcPayload;
+    return;
+  }
+  pendingScreenshotImport = null;
+  if (ipcPayload.captureId) sentScreenshotCaptureIds.add(ipcPayload.captureId);
+  mainWindow.webContents.send("desktop:import-screenshot", ipcPayload);
+};
+
+const flushPendingScreenshotImport = () => {
+  if (!pendingScreenshotImport || !rendererReady || !mainWindow || mainWindow.isDestroyed()) return;
+  const payload = pendingScreenshotImport;
+  pendingScreenshotImport = null;
+  if (!payload.bytes?.byteLength) return;
+  if (payload.captureId && sentScreenshotCaptureIds.has(payload.captureId)) return;
+  if (payload.captureId) sentScreenshotCaptureIds.add(payload.captureId);
+  mainWindow.webContents.send("desktop:import-screenshot", payload);
+};
+
+const captureScreenshotToNote = async () => {
+  if (!screenshotCaptureGuard.tryBegin()) return;
+  const copy = desktopMenuCopy(app.getLocale());
+  const wasVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+  const revealWindow = () => {
+    if (process.platform === "darwin") app.show();
+    showWindow(mainWindow);
+  };
+  try {
+    if (process.platform === "darwin") app.hide();
+    else if (wasVisible) mainWindow.hide();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const captured = await captureScreenToNote({
+      platform: process.platform,
+      locale: app.getLocale(),
+      outputPath: process.platform === "darwin" ? writeScreenshotTempPath(app.getPath("temp")) : undefined,
+      desktopCapturer,
+      screen,
+    });
+    if (!captured) {
+      if (wasVisible) revealWindow();
+      return;
+    }
+    revealWindow();
+    sendScreenshotImport(captured);
+  } catch (error) {
+    if (wasVisible) revealWindow();
+    void writeDiagnostic("screenshot.failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    await dialog.showMessageBox({
+      type: "warning",
+      message: copy.screenshotFailed,
+    });
+  } finally {
+    screenshotCaptureGuard.end();
+  }
 };
 
 const flushPendingDesktopCommands = () => {
@@ -529,17 +679,67 @@ const flushPendingScheduledTaskRuns = () => {
   }
 };
 
+const pendingWeChatImports = [];
+let wechatShareController = null;
+
+const wechatShare = () => {
+  wechatShareController ??= createWeChatShareController({
+    downloadsPath: () => app.getPath("downloads"),
+    tempPath: () => app.getPath("temp"),
+    sendToRenderer: (payload) => {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading() || !rendererReady) {
+        pendingWeChatImports.push(payload);
+        return;
+      }
+      mainWindow.webContents.send("desktop:import-wechat-chat", payload);
+    },
+    onActivity: () => {
+      if (process.platform === "darwin") app.show();
+      showWindow(mainWindow);
+    },
+    writeDiagnostic: (event, details) => { void writeDiagnostic(event, details); },
+  });
+  return wechatShareController;
+};
+
+const flushPendingWeChatImports = () => {
+  if (!rendererReady || !mainWindow || mainWindow.isDestroyed()) return;
+  while (pendingWeChatImports.length > 0) {
+    mainWindow.webContents.send("desktop:import-wechat-chat", pendingWeChatImports.shift());
+  }
+};
+
+const handleProtocolUrl = (target) => {
+  if (typeof target !== "string" || !target.startsWith("edgeever://")) return;
+  try {
+    const url = new URL(target);
+    if (url.hostname === "wechat-import" || url.hostname === "share-import") {
+      void wechatShare().importFromProtocolUrl(target);
+      return;
+    }
+    const memoMatch = url.pathname.match(/^\/memo\/([^/]+)$/);
+    if (memoMatch) sendDesktopCommand(`open-memo:${decodeURIComponent(memoMatch[1])}`);
+  } catch {
+    // Ignore malformed protocol invocations.
+  }
+};
+
+const pendingShareFiles = [];
+
+const importSharedCommandLineFiles = (commandLine) => {
+  const sharedFiles = shareFilePathsFromCommandLine(commandLine);
+  if (!protocolUrlsReady) {
+    pendingShareFiles.push(...sharedFiles);
+    return sharedFiles.length > 0;
+  }
+  for (const filePath of sharedFiles) void wechatShare().importLocalFile(filePath);
+  return sharedFiles.length > 0;
+};
+
 const handleOpenTarget = (commandLine) => {
   const target = commandLine.find((value) => value.startsWith("edgeever://"));
-  if (target) {
-    try {
-      const url = new URL(target);
-      const memoMatch = url.pathname.match(/^\/memo\/([^/]+)$/);
-      if (memoMatch) sendDesktopCommand(`open-memo:${decodeURIComponent(memoMatch[1])}`);
-    } catch {
-      // Ignore malformed protocol invocations.
-    }
-  }
+  if (target) handleProtocolUrl(target);
+  if (importSharedCommandLineFiles(commandLine)) return;
   const associatedFile = commandLine.find((value) => !value.startsWith("-") && isSupportedAssociatedFile(value));
   if (associatedFile) void importMarkdownFile(associatedFile);
 };
@@ -595,8 +795,7 @@ const createTray = () => {
   tray.setToolTip("EdgeEver");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: copy.show, click: () => showWindow(mainWindow) },
-    { label: copy.syncNow, click: () => sendDesktopCommand("sync-now") },
-    { label: copy.backupNow, click: () => sendDesktopCommand("backup-now") },
+    { label: copy.screenshotToNote, click: () => void captureScreenshotToNote() },
     ...(updateState === "downloaded" ? [{ label: copy.restartToUpdate, click: () => installDownloadedUpdate() }] : []),
     { type: "separator" },
     { label: copy.quit, click: () => { isQuitting = true; app.quit(); } },
@@ -730,9 +929,15 @@ const registerResourceProtocol = () => {
 
     const directory = stagedResourceDirectory();
     try {
-      const metadata = JSON.parse(await readFile(join(directory, `${stagedId}.json`), "utf8"));
+      const metadata = await readStagedResourceMetadata(directory, stagedId);
       const path = join(directory, `${stagedId}.bin`);
-      const { size } = await stat(path);
+      const size = await stat(path).then((details) => details.size).catch(() => null);
+      if (size === null && isSafeResourceId(metadata.resourceId)) {
+        const target = new URL(`edgeever-resource://resource/${encodeURIComponent(metadata.resourceId)}`);
+        target.search = new URL(request.url).search;
+        return handleResourceProtocolRequest(new Request(target, { headers: request.headers }));
+      }
+      if (size === null) throw new Error("Staged bytes are missing");
       const stream = createReadStream(path);
       const headers = new Headers({
         "Content-Type": metadata.type || "application/octet-stream",
@@ -808,52 +1013,9 @@ const publishDesktopUpdateStatus = () => {
   mainWindow.webContents.send("desktop:update-status-changed", desktopUpdateStatus());
 };
 
-const readInstanceReleaseVersion = async () => {
-  if (!configuredApiBaseUrl) return null;
-  try {
-    const response = await net.fetch(`${configuredApiBaseUrl}/api/release`);
-    if (!response.ok) return null;
-    return instanceReleaseVersionFromPayload(await response.json());
-  } catch {
-    return null;
-  }
-};
-
-const holdAutoRestartUpdate = async (version) => {
-  heldUpdateVersion = version || "unknown";
-  autoUpdater.autoInstallOnAppQuit = false;
-  updateState = "available";
-  downloadedUpdateVersion = version || downloadedUpdateVersion;
-  refreshTrayMenu();
-  publishDesktopUpdateStatus();
-  await writeDiagnostic("update.held-for-instance", { version: heldUpdateVersion });
-};
-
-const releaseHeldAutoRestartUpdate = async () => {
-  if (!heldUpdateVersion || linuxUpdateTestMode) return false;
-  const instanceVersion = await readInstanceReleaseVersion();
-  if (shouldHoldAutoRestartUpdate(heldUpdateVersion, instanceVersion)) return false;
-  const version = heldUpdateVersion === "unknown" ? downloadedUpdateVersion : heldUpdateVersion;
-  heldUpdateVersion = null;
-  if (process.platform !== "win32" || windowsDownloadedUpdateVerified) {
-    autoUpdater.autoInstallOnAppQuit = true;
-  }
-  updateState = "downloaded";
-  downloadedUpdateVersion = version || downloadedUpdateVersion;
-  refreshTrayMenu();
-  publishDesktopUpdateStatus();
-  await writeDiagnostic("update.released-for-instance", { version: downloadedUpdateVersion });
-  await promptForDownloadedUpdate(downloadedUpdateVersion).catch((error) => {
-    promptedUpdateVersion = null;
-    void writeDiagnostic("update.prompt-failed", { message: error.message });
-  });
-  return true;
-};
-
 const installDownloadedUpdate = () => {
   if (
     updateState !== "downloaded" ||
-    heldUpdateVersion ||
     (process.platform === "win32" && !windowsDownloadedUpdateVerified)
   ) return { started: false };
   // The normal window close handler hides the app. Mark this as a real quit
@@ -926,11 +1088,8 @@ const checkForDesktopUpdate = (reason, { force = false, throwOnError = false } =
   if (!force && now - lastUpdateCheckAt < updateCheckFocusThrottleMs) return Promise.resolve(null);
   lastUpdateCheckAt = now;
   void writeDiagnostic("update.check-started", { reason });
-  updateCheckInFlight = Promise.resolve()
-    .then(() => releaseHeldAutoRestartUpdate())
-    .then(async (released) => {
-      if (released || updateState === "downloaded") return null;
-      const result = await autoUpdater.checkForUpdates();
+  updateCheckInFlight = autoUpdater.checkForUpdates()
+    .then(async (result) => {
       if (process.platform === "win32" && result?.isUpdateAvailable) {
         trustedWindowsUpdate = await fetchTrustedWindowsUpdate({
           version: result.updateInfo.version,
@@ -950,14 +1109,12 @@ const checkForDesktopUpdate = (reason, { force = false, throwOnError = false } =
       return result;
     })
     .catch(async (error) => {
-      if (!heldUpdateVersion) {
-        updateState = "idle";
-        downloadedUpdateVersion = null;
-        trustedWindowsUpdate = null;
-        windowsDownloadedUpdateVerified = false;
-        refreshTrayMenu();
-        publishDesktopUpdateStatus();
-      }
+      updateState = "idle";
+      downloadedUpdateVersion = null;
+      trustedWindowsUpdate = null;
+      windowsDownloadedUpdateVerified = false;
+      refreshTrayMenu();
+      publishDesktopUpdateStatus();
       await writeDiagnostic("update.check-failed", { reason, message: error.message });
       throw error;
     })
@@ -995,7 +1152,6 @@ const configureAutoUpdater = () => {
   autoUpdater.on("update-not-available", () => {
     updateState = "idle";
     downloadedUpdateVersion = null;
-    heldUpdateVersion = null;
     trustedWindowsUpdate = null;
     windowsDownloadedUpdateVerified = false;
     refreshTrayMenu();
@@ -1019,16 +1175,8 @@ const configureAutoUpdater = () => {
         windowsDownloadedUpdateVerified = true;
         autoUpdater.autoInstallOnAppQuit = true;
       }
-      downloadedUpdateVersion = info?.version || downloadedUpdateVersion;
-      if (!linuxUpdateTestMode) {
-        const instanceVersion = await readInstanceReleaseVersion();
-        if (shouldHoldAutoRestartUpdate(downloadedUpdateVersion, instanceVersion)) {
-          await holdAutoRestartUpdate(downloadedUpdateVersion);
-          return;
-        }
-      }
       updateState = "downloaded";
-      heldUpdateVersion = null;
+      downloadedUpdateVersion = info?.version || downloadedUpdateVersion;
       refreshTrayMenu();
       publishDesktopUpdateStatus();
       await writeDiagnostic("update.downloaded", { version: downloadedUpdateVersion });
@@ -1183,6 +1331,12 @@ const createWindow = async () => {
       mainWindow.hide();
     }
   });
+  mainWindow.on("hide", syncRendererHibernate);
+  mainWindow.on("show", syncRendererHibernate);
+  mainWindow.on("minimize", syncRendererHibernate);
+  mainWindow.on("restore", syncRendererHibernate);
+  mainWindow.on("blur", syncRendererHibernate);
+  mainWindow.on("focus", syncRendererHibernate);
 
   // Install startup diagnostics before navigation. A renderer exception can
   // happen while loadFile/loadURL is still resolving, so listeners registered
@@ -1385,6 +1539,8 @@ const startApplication = async () => {
     rendererReady = true;
     flushPendingDesktopCommands();
     flushPendingMarkdownImport();
+    flushPendingScreenshotImport();
+    flushPendingWeChatImports();
     flushPendingScheduledTaskRuns();
   });
   ipcMain.on("desktop:renderer-bootstrap-ready", (event) => {
@@ -1394,12 +1550,9 @@ const startApplication = async () => {
   ipcMain.on("desktop:api-base-url-sync", (event) => { event.returnValue = configuredApiBaseUrl; });
   ipcMain.on("desktop:session-token-sync", (event) => { event.returnValue = desktopSessionToken; });
   ipcMain.on("desktop:recovered-after-abnormal-exit-sync", (event) => { event.returnValue = recoveredAfterAbnormalExit; });
-  ipcMain.handle("desktop:copy-text", (_event, value) => {
-    if (typeof value !== "string") throw new Error("Clipboard value must be a string");
-    clipboard.writeText(value);
-    return clipboard.readText() === value;
-  });
-  ipcMain.handle("desktop:copy-html", (_event, input) => writeRichClipboard(clipboard, input));
+  ipcMain.handle("desktop:copy-text", (_event, value) => writeTextClipboard(clipboard, value));
+  ipcMain.handle("desktop:copy-html", (_event, input) => writeRichClipboard(clipboard, ClipboardItem, input));
+  ipcMain.handle("desktop:copy-image", (_event, bytes) => writeImageClipboard(clipboard, ClipboardItem, bytes));
   ipcMain.handle("desktop:set-session-token", async (_event, value) => {
     await saveDesktopSessionToken(value);
     return { stored: Boolean(desktopSessionToken) };
@@ -1415,6 +1568,30 @@ const startApplication = async () => {
   });
   ipcMain.on("desktop:cancel-public-network-fetch", (event, requestId) => {
     if (event.sender === mainWindow?.webContents && typeof requestId === "string") pluginPublicNetwork.cancel(requestId);
+  });
+  ipcMain.handle("desktop:ai-direct-open", async (event, requestId, input) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error("AI provider requests must come from the main window");
+    const sender = event.sender;
+    return aiDirect.open(requestId, input, {
+      onData: (bytes) => {
+        if (sender.isDestroyed()) return;
+        sender.send("desktop:ai-direct-chunk", requestId, { type: "data", bytes });
+      },
+      onEnd: () => {
+        if (sender.isDestroyed()) return;
+        sender.send("desktop:ai-direct-chunk", requestId, { type: "end" });
+      },
+      onError: (error) => {
+        if (sender.isDestroyed()) return;
+        sender.send("desktop:ai-direct-chunk", requestId, {
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
+  });
+  ipcMain.on("desktop:ai-direct-cancel", (event, requestId) => {
+    if (event.sender === mainWindow?.webContents && typeof requestId === "string") aiDirect.cancel(requestId);
   });
   ipcMain.handle("desktop:sync-scheduled-tasks", async (event, tasks) => {
     if (event.sender !== mainWindow?.webContents) throw new Error("Scheduled tasks must come from the main window");
@@ -1579,12 +1756,24 @@ const startApplication = async () => {
   ipcMain.handle("desktop:list-staged-resources", async () => {
     const directory = stagedResourceDirectory();
     try { await mkdir(directory, { recursive: true }); await restrictDirectory(directory); } catch {}
-    const names = await readdir(directory);
-    const result = [];
-    for (const name of names.filter((value) => value.endsWith(".json"))) {
-      try { result.push(JSON.parse(await readFile(join(directory, name), "utf8"))); } catch {}
-    }
-    return result;
+    return listPendingStagedResources(directory);
+  });
+  ipcMain.handle("desktop:list-staged-resource-aliases", async (_event, memoId) => {
+    const metadata = await listStagedResourceMetadata(stagedResourceDirectory());
+    return metadata.filter((item) => (!memoId || item.memoId === memoId) && isSafeResourceId(item.resourceId))
+      .map((item) => ({ id: item.id, memoId: item.memoId, resourceId: item.resourceId }));
+  });
+  ipcMain.handle("desktop:record-staged-resource-alias", async (_event, id, uploadedUrl) => {
+    const cacheDirectory = resourceCacheDirectory();
+    const resourceId = await cacheStagedResourceBytes(stagedResourceDirectory(), cacheDirectory, id, uploadedUrl);
+    await Promise.all([
+      restrictDirectory(cacheDirectory),
+      restrictFile(join(cacheDirectory, `${resourceId}.bin`)),
+      restrictFile(join(cacheDirectory, `${resourceId}.json`)),
+    ]);
+    const result = await recordStagedResourceAlias(stagedResourceDirectory(), id, uploadedUrl);
+    await restrictFile(join(stagedResourceDirectory(), `${id}.json`));
+    return { id: result.id, resourceId: result.resourceId };
   });
   ipcMain.handle("desktop:remap-staged-resource-memo-ids", async (_event, mappings) => {
     if (!Array.isArray(mappings) || mappings.length === 0) return { updated: 0 };
@@ -1608,8 +1797,13 @@ const startApplication = async () => {
   ipcMain.handle("desktop:read-staged-resource", async (_event, id) => {
     if (!isSafeResourceId(id)) throw new Error("Invalid staged resource id");
     const directory = stagedResourceDirectory();
-    const metadata = JSON.parse(await readFile(join(directory, `${id}.json`), "utf8"));
-    const bytes = await readFile(join(directory, `${id}.bin`));
+    const metadata = await readStagedResourceMetadata(directory, id);
+    const bytes = await readFile(join(directory, `${id}.bin`)).catch(async (error) => {
+      if (!isSafeResourceId(metadata.resourceId)) throw error;
+      const response = await handleResourceProtocolRequest(new Request(`edgeever-resource://resource/${encodeURIComponent(metadata.resourceId)}`));
+      if (!response.ok) throw new Error(`Resource request failed (${response.status})`);
+      return Buffer.from(await response.arrayBuffer());
+    });
     return { ...metadata, bytes: new Uint8Array(bytes) };
   });
   ipcMain.handle("desktop:read-staged-resource-part", async (_event, id, start, length) => {
@@ -1642,11 +1836,19 @@ const startApplication = async () => {
       bytes: new Uint8Array(await response.arrayBuffer()),
     };
   });
+  ipcMain.handle("desktop:read-wechat-import-media", async (_event, importId, mediaId) => (
+    wechatShare().readMedia(importId, mediaId)
+  ));
+  ipcMain.handle("desktop:finish-wechat-import", async (_event, importId, success) => {
+    await wechatShare().finish(importId, success === true);
+  });
+  ipcMain.handle("desktop:retry-wechat-import", (_event, importId) => wechatShare().retry(importId));
   ipcMain.handle("desktop:remove-staged-resource", async (_event, id) => {
     if (!isSafeResourceId(id)) throw new Error("Invalid staged resource id");
     const directory = stagedResourceDirectory();
+    const alias = await readStagedResourceMetadata(directory, id).catch(() => null);
     await Promise.all([
-      unlink(join(directory, `${id}.json`)).catch(() => {}),
+      ...(isSafeResourceId(alias?.resourceId) ? [] : [unlink(join(directory, `${id}.json`)).catch(() => {})]),
       unlink(join(directory, `${id}.bin`)).catch(() => {}),
       unlink(join(directory, `${id}.pending.json`)).catch(() => {}),
       unlink(join(directory, `${id}.pending.bin`)).catch(() => {}),
@@ -1659,13 +1861,57 @@ const startApplication = async () => {
   // user-visible critical path so the first installed launch opens promptly.
   await ejectMountedMacInstallers();
   await confirmMacInstallation();
+  void enableMacShareExtension({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    executablePath: process.execPath,
+    exists: existsSync,
+    execFile,
+  }).then((result) => {
+    if (result.enabled) void writeDiagnostic("share-extension.enabled");
+  }).catch((error) => {
+    void writeDiagnostic("share-extension.enable-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
+  void registerWindowsShareMenu({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    exePath: process.execPath,
+    locale: app.getLocale(),
+    execFile,
+  }).then((result) => {
+    if (result.registered) void writeDiagnostic("windows-share-menu.registered");
+  }).catch((error) => {
+    void writeDiagnostic("windows-share-menu.register-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
   configureAutoUpdater();
   handleOpenTarget(process.argv);
+  protocolUrlsReady = true;
+  while (pendingProtocolUrls.length > 0) handleProtocolUrl(pendingProtocolUrls.shift());
+  while (pendingShareFiles.length > 0) void wechatShare().importLocalFile(pendingShareFiles.shift());
+  if (process.platform === "darwin" && app.isPackaged) {
+    void wechatShare().importPending();
+    setInterval(() => { void wechatShare().importPending(); }, 2_000).unref();
+  }
   app.on("activate", () => {
     if (!showWindow(mainWindow)) void createWindow();
     void checkForDesktopUpdate("activate");
   });
 };
+
+const pendingProtocolUrls = [];
+let protocolUrlsReady = false;
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  if (!protocolUrlsReady) {
+    pendingProtocolUrls.push(url);
+    return;
+  }
+  handleProtocolUrl(url);
+});
 
 void app.whenReady().then(startApplication).catch((error) => {
   void showMainStartupFailure(error).catch((dialogError) => {

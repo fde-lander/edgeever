@@ -50,7 +50,7 @@ That question does not always have a comfortable answer.
 
 Notes often contain years of material: images, attachments, web clips, fragments of thought, and unfinished plans. They are not just files. They are a personal knowledge trail. If migration depends on fragile third-party plugins, or exports into formats that are not open or easy to process, users live with a quiet kind of anxiety.
 
-AI agents are also becoming a new entry point for work. Tools like Codex, Claude Code, Cursor, and Antigravity can already help us write code, organize material, and handle repetitive tasks. A notes system should be able to participate in that workflow safely and clearly.
+AI agents are also becoming a new entry point for work. Tools like Codex, Claude Code, Cursor, Antigravity, and WorkBuddy can already help us write code, organize material, and handle repetitive tasks. A notes system should be able to participate in that workflow safely and clearly.
 
 If my knowledge base cannot be accessed through an API or MCP with explicit authorization, it has a hard time joining the next generation of workflows.
 
@@ -138,7 +138,7 @@ It is meant to be an open, lightweight, long-lived personal notes foundation:
 - Classic three-pane workflow
 - Rich text, images, nested notebooks, and revision history
 - Cloudflare-native deployment
-- Clear data model with REST API, OpenAPI, and MCP
+- Clear data model with REST API and MCP
 - Low cost for individual users
 - Friendly to AI agents
 

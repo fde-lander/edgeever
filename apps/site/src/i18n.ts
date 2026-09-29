@@ -1,28 +1,84 @@
-export type SiteLocale = "zh-CN" | "en-US";
+import { jaSiteCopy, jaSiteTagline } from "./i18n-ja";
+
+export const siteLocales = ["zh-CN", "en-US", "ja"] as const;
+export type SiteLocale = (typeof siteLocales)[number];
 
 export const defaultSiteLocale: SiteLocale = "zh-CN";
+export const unmatchedSiteLocale: SiteLocale = "en-US";
 export const siteLocaleStorageKey = "edgeever.site.locale";
 export const siteLocaleDataAttribute = "data-edgeever-site-locale";
+
+export const siteLocalePrefixes: Record<SiteLocale, string> = {
+  "zh-CN": "",
+  "en-US": "/en",
+  ja: "/ja",
+};
+
+export const siteLocaleLabels: Record<SiteLocale, string> = {
+  "zh-CN": "简体中文",
+  "en-US": "English",
+  ja: "日本語",
+};
+
 export const siteTaglines = {
   "zh-CN": "开源、原生支持 AI、自由部署（Cloudflare 免费额度 / Docker）的自托管「印象笔记」替代方案",
   "en-US": "Open-source, AI-native, self-hosted Evernote alternative with Cloudflare & Docker deployment.",
+  ja: jaSiteTagline,
 } as const satisfies Record<SiteLocale, string>;
 
-export const getSiteLocale = (pathname: string): SiteLocale => (pathname === "/en" || pathname.startsWith("/en/") ? "en-US" : "zh-CN");
+const localePrefixPattern = /^\/(en|ja)(?=\/|$)/;
+
+export const stripSiteLocalePrefix = (path: string) => {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return normalizedPath.replace(localePrefixPattern, "") || "/";
+};
+
+export const matchSiteLocale = (locale: string | null | undefined): SiteLocale | null => {
+  if (!locale) {
+    return null;
+  }
+
+  const normalized = locale.trim().replaceAll("_", "-").toLowerCase();
+
+  if (normalized === "zh" || normalized.startsWith("zh-")) {
+    return "zh-CN";
+  }
+
+  if (normalized === "en" || normalized.startsWith("en-")) {
+    return "en-US";
+  }
+
+  if (normalized === "ja" || normalized.startsWith("ja-")) {
+    return "ja";
+  }
+
+  return null;
+};
+
+export const getSiteLocale = (pathname: string): SiteLocale => {
+  if (pathname === "/en" || pathname.startsWith("/en/")) {
+    return "en-US";
+  }
+
+  if (pathname === "/ja" || pathname.startsWith("/ja/")) {
+    return "ja";
+  }
+
+  return "zh-CN";
+};
 
 export const getLocalizedPath = (locale: SiteLocale, path: string) => {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const barePath = stripSiteLocalePrefix(path);
+  const prefix = siteLocalePrefixes[locale];
 
-  if (locale === "zh-CN") {
-    return normalizedPath === "/en" ? "/" : normalizedPath.replace(/^\/en(?=\/|$)/, "") || "/";
+  if (!prefix) {
+    return barePath;
   }
 
-  if (normalizedPath === "/") {
-    return "/en/";
-  }
-
-  return normalizedPath.startsWith("/en/") ? normalizedPath : `/en${normalizedPath}`;
+  return barePath === "/" ? `${prefix}/` : `${prefix}${barePath}`;
 };
+
+export const isExplicitSiteLocalePath = (pathname: string) => localePrefixPattern.test(pathname);
 
 export const siteCopy = {
   "zh-CN": {
@@ -38,6 +94,9 @@ export const siteCopy = {
       features: "功能特性",
       guides: "使用指南",
       deploy: "部署",
+      cloudflareDeploy: "Cloudflare 部署",
+      dockerDeploy: "Docker 部署",
+      selfHostedAlternative: "印象笔记替代",
       migration: "从印象笔记迁移",
       evernoteMigration: "从印象笔记迁移",
       memosMigration: "从 Memos 迁移",
@@ -45,6 +104,7 @@ export const siteCopy = {
       flomoMigration: "从 Flomo 迁移",
       advancedPlay: "搭配AI Agent的玩法",
       blog: "博客",
+      backToBlog: "返回博客",
       contact: "联系我们",
       privacy: "隐私政策",
       demo: "在线演示",
@@ -61,6 +121,8 @@ export const siteCopy = {
       popHighlight: "印象笔记开源经典平替 · 全平台客户端覆盖",
       demo: "在线演示",
       agentInstall: "一键 AI 部署",
+      getApps: "获取客户端：",
+      clipper: "剪藏插件",
       windows: "Windows",
       linux: "Linux",
       imageAlt: "EdgeEver product preview",
@@ -173,7 +235,7 @@ export const siteCopy = {
         {
           tag: "Remote MCP",
           title: "AI Agent 智脑联动",
-          desc: "原生接入 Antigravity、Claude Code、Codex 智能读写与整理",
+          desc: "原生接入 Antigravity、Claude Code、Codex、WorkBuddy 智能读写与整理",
           icon: "bx:bxs-bot",
           color: "from-green-500/10 to-emerald-500/5",
         },
@@ -214,9 +276,9 @@ export const siteCopy = {
         },
         {
           title: "原生 AI Agent 联动与编辑器内置多模型",
-          summary: "内置 REST API、OpenAPI schema、Remote MCP endpoint 与多模型集成，让 AI 真正成为个人知识库的智能副驾驶。",
+          summary: "内置 REST API、Remote MCP endpoint 与多模型集成，让 AI 真正成为个人知识库的智能副驾驶。",
           points: [
-            "内置 Remote MCP endpoint：直接授权 Antigravity、Claude Code、Codex 等 AI Agent 读取、生成与整理笔记。",
+            "内置 Remote MCP endpoint：直接授权 Antigravity、Claude Code、Codex、WorkBuddy 等 AI Agent 读取、生成与整理笔记。",
             "支持接入自己的 AI 模型：无缝配置 OpenAI、Anthropic Claude、Google Gemini、DeepSeek 及自定义兼容接口。",
             "智能编辑与提炼：在编辑器中随时对全文或选区进行要点提炼、语法校对、翻译、续写润色与知识地图生成。",
             "数据打通：通过 Agent 轻松打通 Notion Database、飞书多维表格等工具，将碎片笔记沉淀为结构化数据。",
@@ -303,6 +365,9 @@ export const siteCopy = {
       features: "Features",
       guides: "Guides",
       deploy: "Deploy",
+      cloudflareDeploy: "Cloudflare",
+      dockerDeploy: "Docker",
+      selfHostedAlternative: "Evernote alternative",
       migration: "Migrate from Evernote",
       evernoteMigration: "Migrate from Evernote",
       memosMigration: "Migrate from Memos",
@@ -310,6 +375,7 @@ export const siteCopy = {
       flomoMigration: "Migrate from Flomo",
       advancedPlay: "AI Agent plays",
       blog: "Blog",
+      backToBlog: "Back to blog",
       contact: "Contact",
       privacy: "Privacy",
       demo: "Demo",
@@ -326,6 +392,8 @@ export const siteCopy = {
       popHighlight: "Open-Source Evernote Alternative · Apps Across Platforms",
       demo: "Live demo",
       agentInstall: "Deploy with AI",
+      getApps: "Get Apps:",
+      clipper: "Clipper",
       windows: "Windows",
       linux: "Linux",
       imageAlt: "EdgeEver product preview",
@@ -357,7 +425,7 @@ export const siteCopy = {
       card2: {
         badge: "AI Native",
         title: "Native AI Agent & Built-in LLM Models",
-        desc: "Built-in Remote MCP endpoint connects Antigravity, Claude Code, and Codex; in-editor AI supports OpenAI, Claude, Gemini, and DeepSeek for summarization and editing.",
+        desc: "Built-in Remote MCP endpoint connects Antigravity, Claude Code, Codex, and WorkBuddy; in-editor AI supports OpenAI, Claude, Gemini, and DeepSeek for summarization and editing.",
         mockupStatus: "MCP & AI Connected",
         mockupCmd: "> mcp.search_notes(\"EdgeEver\")",
         mockupResult: "Found relevant notes. Generated multi-model summary & tags automatically.",
@@ -438,7 +506,7 @@ export const siteCopy = {
         {
           tag: "Remote MCP",
           title: "AI Agent Synergy",
-          desc: "Connect Antigravity, Claude Code & Codex for smart knowledge operations",
+          desc: "Connect Antigravity, Claude Code, Codex & WorkBuddy for smart knowledge operations",
           icon: "bx:bxs-bot",
           color: "from-green-500/10 to-emerald-500/5",
         },
@@ -479,9 +547,9 @@ export const siteCopy = {
         },
         {
           title: "Native AI Agent Synergy & In-Editor Multi-Model Assistants",
-          summary: "Built-in REST API, OpenAPI schema, Remote MCP endpoint, and multi-model integration turn AI into a true copilot for your notes.",
+          summary: "Built-in REST API, Remote MCP endpoint, and multi-model integration turn AI into a true copilot for your notes.",
           points: [
-            "Remote MCP Endpoint: Authorize Antigravity, Claude Code, and Codex to read, summarize, and organize your knowledge base.",
+            "Remote MCP Endpoint: Authorize Antigravity, Claude Code, Codex, and WorkBuddy to read, summarize, and organize your knowledge base.",
             "Connect Your Own AI Models: Support for OpenAI, Anthropic Claude, Google Gemini, DeepSeek, and custom compatible endpoints.",
             "In-Editor AI Actions: Summarize, polish, translate, extract action items, and continue writing with a single click.",
             "Ecosystem Integration: Sync seamlessly with Notion databases and Feishu Bitable, transforming raw thoughts into structured data.",
@@ -555,4 +623,5 @@ export const siteCopy = {
       ],
     },
   },
+  ja: jaSiteCopy,
 } as const;

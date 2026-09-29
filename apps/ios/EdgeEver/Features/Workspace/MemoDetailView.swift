@@ -45,6 +45,7 @@ struct MemoDetailView: View {
     @State private var showMoreMenu = false
     @State private var showNoteIdCopied = false
     @State private var showAiAssistant = false
+    @State private var showNotebookPicker = false
     @State private var resourceTarget: ResourceTarget?
     @State private var imagePreview: (source: String, alt: String)?
     /// TipTap EditorBundle is ~4MB; keep native text visible until first setContent finishes.
@@ -75,7 +76,7 @@ struct MemoDetailView: View {
         .background(AppTheme.card)
         // UIKit FAB in overlay — SwiftUI Button over WKWebView often receives zero taps.
         .overlay(alignment: .bottomTrailing) {
-            if let memo, !memo.isDeleted, !isVisualDiagram(memo) {
+            if let memo, !memo.isDeleted, !blocksRichTextEdit(memo) {
                 EditFabButton(
                     accessibilityLabel: env.preferences.t("编辑笔记", en: "Edit note")
                 ) {
@@ -276,6 +277,17 @@ struct MemoDetailView: View {
                 }
             }
         }
+        .sheet(isPresented: $showNotebookPicker) {
+            EditNotebookPickerSheet(
+                notebooks: availableNotebooks,
+                selectedId: memo?.notebookId ?? ""
+            ) { notebookId in
+                showNotebookPicker = false
+                guard let memo else { return }
+                Task { await moveMemoToNotebook(memo, notebookId: notebookId) }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .fullScreenCover(isPresented: Binding(
             get: { imagePreview != nil },
             set: { if !$0 { imagePreview = nil } }
@@ -304,10 +316,10 @@ struct MemoDetailView: View {
             titleVisibility: .visible
         ) {
             if let memo {
-                if !isVisualDiagram(memo) {
+                if !blocksRichTextEdit(memo) {
                     Button(env.preferences.t("编辑", en: "Edit")) { onEdit(memo.id, .body) }
                 }
-                if !memo.isDeleted && !isTemporaryMemoId(memo.id) && !isVisualDiagram(memo) {
+                if !memo.isDeleted && !isTemporaryMemoId(memo.id) && !blocksRichTextEdit(memo) {
                     Button(env.preferences.t("AI 笔记助手", en: "AI note assistant")) {
                         showAiAssistant = true
                     }
@@ -395,6 +407,7 @@ struct MemoDetailView: View {
             searchQuery = ""
             searchMatchCount = 0
             searchMatchIndex = 0
+            showNotebookPicker = false
             load()
             refreshSyncStatus()
         }
@@ -641,18 +654,7 @@ struct MemoDetailView: View {
                 .edgeEverSuccessShine(trigger: pinPulse)
 
                 HStack(spacing: 8) {
-                    HStack(spacing: 4) {
-                        Text(notebookName(for: memo))
-                            .font(.system(size: 14))
-                            .foregroundStyle(AppTheme.secondary)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(AppTheme.muted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .layoutPriority(0)
-                    .accessibilityIdentifier(DetailMemoChrome.notebook)
+                    notebookAffiliationControl(memo)
 
                     HStack(spacing: 8) {
                         Image(systemName: "tag")
@@ -766,7 +768,7 @@ struct MemoDetailView: View {
                     markdown: memo.contentMarkdown,
                     baseURL: env.session.session.flatMap { URL(string: $0.baseUrl) },
                     token: env.session.session?.token,
-                    locale: env.preferences.isEnglish ? "en-US" : "zh-CN",
+                    locale: env.preferences.apiLocale,
                     theme: colorScheme == .dark ? "dark" : "light",
                     placeholder: env.preferences.t("开始输入…", en: "Start writing…"),
                     onChange: nil,
@@ -776,7 +778,7 @@ struct MemoDetailView: View {
                     onImagePreview: { source, alt in
                         imagePreview = (source, alt)
                     },
-                    onDoubleTap: isVisualDiagram(memo) ? nil : {
+                    onDoubleTap: blocksRichTextEdit(memo) ? nil : {
                         onEdit(memo.id, .body)
                     },
                     onPickImage: nil,
@@ -823,10 +825,45 @@ struct MemoDetailView: View {
         env.preferences.isEnglish ? syncStatus.labelEN : syncStatus.labelZH
     }
 
+    private var availableNotebooks: [Notebook] {
+        (try? env.mirror.listNotebooks(scope: env.session.dataScope ?? "")) ?? []
+    }
+
     private func notebookName(for memo: MemoDetail) -> String {
-        let notebooks = (try? env.mirror.listNotebooks(scope: env.session.dataScope ?? "")) ?? []
-        return notebooks.first(where: { $0.id == memo.notebookId })?.name
+        availableNotebooks.first(where: { $0.id == memo.notebookId })?.name
             ?? env.preferences.t("笔记本", en: "Notebook")
+    }
+
+    private func notebookAffiliationLabel(_ memo: MemoDetail) -> some View {
+        HStack(spacing: 4) {
+            Text(notebookName(for: memo))
+                .font(.system(size: 14))
+                .foregroundStyle(AppTheme.secondary)
+                .lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AppTheme.muted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .layoutPriority(0)
+    }
+
+    @ViewBuilder
+    private func notebookAffiliationControl(_ memo: MemoDetail) -> some View {
+        if memo.isDeleted {
+            notebookAffiliationLabel(memo)
+                .accessibilityIdentifier(DetailMemoChrome.notebook)
+        } else {
+            Button {
+                showNotebookPicker = true
+            } label: {
+                notebookAffiliationLabel(memo)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(env.preferences.t("所在笔记本", en: "Notebook"))
+            .accessibilityHint(env.preferences.t("更改笔记所属笔记本", en: "Change the notebook for this note"))
+            .accessibilityIdentifier(DetailMemoChrome.notebook)
+        }
     }
 
     private func handleSyncStatusPress() {
@@ -861,11 +898,19 @@ struct MemoDetailView: View {
                     .multilineTextAlignment(.leading)
             }
             .buttonStyle(.plain)
-            .disabled(memo.isDeleted || isVisualDiagram(memo))
-            .accessibilityLabel(isVisualDiagram(memo)
+            .disabled(memo.isDeleted || blocksRichTextEdit(memo))
+            .accessibilityLabel(isInfographic(memo)
+                ? env.preferences.t("信息图标题", en: "Infographic title")
+                : isStructuredTable(memo)
+                ? env.preferences.t("表格标题", en: "Database title")
+                : isVisualDiagram(memo)
                 ? env.preferences.t("图表标题", en: "Diagram title")
                 : env.preferences.t("编辑笔记标题", en: "Edit note title"))
-            .accessibilityHint(isVisualDiagram(memo)
+            .accessibilityHint(isInfographic(memo)
+                ? env.preferences.t("信息图请在 Web 或桌面端编辑", en: "Edit infographics on Web or desktop")
+                : isStructuredTable(memo)
+                ? env.preferences.t("多维表格请在 Web 或桌面端编辑", en: "Edit databases on Web or desktop")
+                : isVisualDiagram(memo)
                 ? env.preferences.t("可视化图表请在 Web 或桌面端编辑", en: "Edit visual diagrams on Web or desktop")
                 : env.preferences.t("进入编辑并聚焦标题", en: "Opens editing with the title focused"))
             .accessibilityIdentifier(DetailMemoChrome.title)
@@ -886,6 +931,18 @@ struct MemoDetailView: View {
 
     private func isVisualDiagram(_ memo: MemoDetail) -> Bool {
         memo.contentMarkdown.contains("<!-- edgeever-diagram-v1:")
+    }
+
+    private func isStructuredTable(_ memo: MemoDetail) -> Bool {
+        memo.contentMarkdown.contains("<!-- edgeever-table-v1:")
+    }
+
+    private func isInfographic(_ memo: MemoDetail) -> Bool {
+        memo.contentMarkdown.contains("<!-- edgeever-infographic-v1:")
+    }
+
+    private func blocksRichTextEdit(_ memo: MemoDetail) -> Bool {
+        isVisualDiagram(memo) || isStructuredTable(memo) || isInfographic(memo)
     }
 
     private func refreshSyncStatus() {
@@ -935,6 +992,40 @@ struct MemoDetailView: View {
     private func localizedTitle(for memo: MemoDetail) -> String {
         let title = memo.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return title.isEmpty ? env.preferences.t("无标题笔记", en: "Untitled note") : title
+    }
+
+    private func moveMemoToNotebook(_ memo: MemoDetail, notebookId: String) async {
+        guard !memo.isDeleted else { return }
+        guard !notebookId.isEmpty, notebookId != memo.notebookId else { return }
+        guard let scope = env.session.dataScope else { return }
+        let revision = memo.revision
+        let contentHash = memo.contentHash
+        var updated = memo
+        updated.notebookId = notebookId
+        updated.updatedAt = EdgeEverDate.nowString()
+        do {
+            try env.mirror.upsertMemo(scope: scope, memo: updated)
+            self.memo = updated
+            try env.outbox.enqueueUpdate(
+                scope: scope,
+                payload: MemoUpdatePayload(
+                    memoId: updated.id,
+                    expectedRevision: revision,
+                    expectedContentHash: contentHash,
+                    title: updated.title ?? "",
+                    contentMarkdown: updated.contentMarkdown,
+                    contentJson: try? updated.contentJson.jsonString(),
+                    notebookId: notebookId,
+                    tags: updated.tags
+                )
+            )
+            await env.runSyncCycle()
+            load()
+            refreshSyncStatus()
+        } catch {
+            self.error = error.localizedDescription
+            load()
+        }
     }
 
     private func togglePin(_ memo: MemoDetail) async {

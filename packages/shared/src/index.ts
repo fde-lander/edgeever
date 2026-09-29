@@ -1,7 +1,9 @@
 export * from "./content";
+export * from "./document-extensions";
 export * from "./companion";
 export * from "./public-demo";
 export * from "./ai-assistant";
+export * from "./ai-generation";
 export * from "./ai-prompt-seeds";
 export * from "./ai-tag-suggestions";
 export * from "./ai-selection";
@@ -10,6 +12,7 @@ export * from "./attachment-metadata";
 export * from "./mobile-content-compatibility";
 export * from "./native-attachment-content";
 export * from "./backup";
+export * from "./client-display-size";
 export * from "./github-feedback";
 export * from "./image-display";
 export * from "./image-gallery";
@@ -28,8 +31,12 @@ export * from "./schemas";
 export * from "./sharing";
 export * from "./sync";
 export * from "./desktop-rpc";
+export * from "./details";
 export * from "./deployment-metadata";
 export * from "./diagram";
+export * from "./diagram-canvas";
+export * from "./infographic";
+export * from "./table";
 export * from "./diagram-palette";
 export * from "./diagram-flowchart-style";
 export * from "./diagram-architecture-style";
@@ -39,6 +46,7 @@ export * from "./file-attachment";
 export * from "./note-image-card";
 export * from "./pdf-attachment";
 export * from "./types";
+export * from "./version";
 export * from './plugin-capabilities';
 
 export {

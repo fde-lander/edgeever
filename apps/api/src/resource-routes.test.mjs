@@ -114,6 +114,32 @@ describe("resource route contracts", () => {
     expect(await response.json()).toMatchObject({ error: { code: "forbidden" } });
   });
 
+  test("lets a memo writer attach an image without the attachment-management scope", async () => {
+    const form = new FormData();
+    form.append("file", new File([Uint8Array.of(0xff, 0xd8, 0xff)], "cat.jpg", { type: "image/jpeg" }));
+    let uploaded = null;
+    const response = await createApp(
+      { ...agentAuth, scopes: ["write:memos"] },
+      async () => null,
+      {
+        getMemoDetail: async () => ({ id: "memo_1" }),
+        createImageResource: async (_context, input) => {
+          uploaded = input;
+          return { id: "res_1" };
+        },
+      },
+    ).request(
+      "/api/v1/memos/memo_1/resources",
+      { method: "POST", body: form },
+      createEnvironment(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(uploaded.memoId).toBe("memo_1");
+    expect(uploaded.filename).toBe("cat.jpg");
+    expect(await response.json()).toMatchObject({ resource: { id: "res_1" } });
+  });
+
   test("replaces resource content with an explicit optimistic-concurrency baseline", async () => {
     let replacement;
     const form = new FormData();
@@ -294,6 +320,34 @@ describe("resource route contracts", () => {
     expect(response.headers.get("Content-Type")).toBe("audio/flac");
     expect(response.headers.get("Content-Disposition")).toBe(
       "inline; filename=\"download.flac\"; filename*=UTF-8''%E8%AE%BF%E8%B0%88.flac",
+    );
+    expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+  });
+
+  test("serves filename-detected video inline with a playable MIME type", async () => {
+    const environment = createEnvironment();
+    environment.storage.resources = {
+      get: async () => ({
+        body: new Blob([new Uint8Array(256)]).stream(),
+        size: 256,
+        writeHttpMetadata: () => {},
+      }),
+    };
+    const response = await createApp(agentAuth, async () => ({
+      ...resourceRow,
+      filename: "录屏.mp4",
+      mime_type: "application/octet-stream",
+      storage_config_id: null,
+    })).request(
+      "/api/v1/resources/res_1/blob",
+      {},
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("video/mp4");
+    expect(response.headers.get("Content-Disposition")).toBe(
+      "inline; filename=\"download.mp4\"; filename*=UTF-8''%E5%BD%95%E5%B1%8F.mp4",
     );
     expect(response.headers.get("Accept-Ranges")).toBe("bytes");
   });

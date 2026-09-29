@@ -1,4 +1,4 @@
-import { isPdfAttachment, resolveAudioMimeType, ResourceUpdateSchema, type MemoDetail, type Resource } from "@edgeever/shared";
+import { isPdfAttachment, resolvePlayableMediaMimeType, ResourceUpdateSchema, type MemoDetail, type Resource } from "@edgeever/shared";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
 import { auditStatement } from "./audit";
@@ -21,7 +21,7 @@ import {
   type ResourceStatsRow,
 } from "./resource-service";
 import type { initiateResourceUpload as initiateResourceUploadService } from "./resource-upload-service";
-import { getAuditActor, getWorkspaceId, requireScopes } from "./request-auth";
+import { getAuditActor, getWorkspaceId, requireAnyScopes, requireScopes } from "./request-auth";
 import type { DatabaseAdapter } from "./storage-contract";
 
 type ResourceRouteDependencies = {
@@ -125,7 +125,7 @@ export const registerResourceRoutes = (
   });
 
   app.post("/api/v1/memos/:id/resources", async (context) => {
-    const denied = requireScopes(context, "write:resources");
+    const denied = requireAnyScopes(context, ["write:memos"], ["write:resources"]);
     if (denied) return denied;
 
     const declaredRequestBytes = Number(context.req.header("Content-Length"));
@@ -183,7 +183,7 @@ export const registerResourceRoutes = (
   });
 
   app.post("/api/v1/memos/:id/resource-uploads", async (context) => {
-    const denied = requireScopes(context, "write:resources");
+    const denied = requireAnyScopes(context, ["write:memos"], ["write:resources"]);
     if (denied) return denied;
 
     const memoId = context.req.param("id");
@@ -218,7 +218,7 @@ export const registerResourceRoutes = (
   });
 
   app.put("/api/v1/resource-uploads/:id/parts/:partNumber", async (context) => {
-    const denied = requireScopes(context, "write:resources");
+    const denied = requireAnyScopes(context, ["write:memos"], ["write:resources"]);
     if (denied) return denied;
 
     const body = context.req.raw.body;
@@ -246,7 +246,7 @@ export const registerResourceRoutes = (
   });
 
   app.post("/api/v1/resource-uploads/:id/complete", async (context) => {
-    const denied = requireScopes(context, "write:resources");
+    const denied = requireAnyScopes(context, ["write:memos"], ["write:resources"]);
     if (denied) return denied;
     try {
       const resource = await dependencies.completeResourceUpload(
@@ -261,7 +261,7 @@ export const registerResourceRoutes = (
   });
 
   app.delete("/api/v1/resource-uploads/:id", async (context) => {
-    const denied = requireScopes(context, "write:resources");
+    const denied = requireAnyScopes(context, ["write:memos"], ["write:resources"]);
     if (denied) return denied;
     try {
       await dependencies.abortResourceUpload(context, context.req.param("id"));
@@ -294,12 +294,12 @@ export const registerResourceRoutes = (
 
     const headers = new Headers();
     object.writeHttpMetadata(headers);
-    const audioMimeType = resolveAudioMimeType(resource.mime_type, resource.filename);
+    const playableMimeType = resolvePlayableMediaMimeType(resource.mime_type, resource.filename);
     headers.set(
       "Content-Type",
       isPdfAttachment(resource.mime_type, resource.filename)
         ? "application/pdf"
-        : audioMimeType ?? resource.mime_type ?? headers.get("Content-Type") ?? "application/octet-stream",
+        : playableMimeType ?? resource.mime_type ?? headers.get("Content-Type") ?? "application/octet-stream",
     );
     headers.set("Cache-Control", headers.get("Cache-Control") ?? "private, max-age=3600");
     headers.set("Accept-Ranges", "bytes");
@@ -315,7 +315,7 @@ export const registerResourceRoutes = (
     }
     headers.set(
       "Content-Disposition",
-      resource.kind === "image" || isPdfAttachment(resource.mime_type, resource.filename) || audioMimeType
+      resource.kind === "image" || isPdfAttachment(resource.mime_type, resource.filename) || playableMimeType
         ? contentDispositionInline(resource.filename)
         : contentDispositionAttachment(resource.filename),
     );

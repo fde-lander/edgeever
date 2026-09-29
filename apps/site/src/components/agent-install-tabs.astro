@@ -1,9 +1,10 @@
 ---
 import { Icon } from "astro-icon/components";
 import { deploymentPrompts, manualDeploymentCopy } from "@/deployment-prompts";
+import { getLocalizedPath } from "@/i18n";
 
 const { locale = "zh-CN" } = Astro.props;
-const isEnglish = locale === "en-US";
+const isEnglish = locale !== "zh-CN";
 
 const copy = isEnglish
   ? {
@@ -12,7 +13,7 @@ const copy = isEnglish
       docker: "Option C: Docker Deployment",
       recommended: "Recommended",
       agentIntro:
-        "Copy the prompt below directly into an AI Agent (such as Codex, Claude, Cursor, workbuddy, Antigravity, OpenClaw, Hermes Agent, etc.). During execution, if access to GitHub or Cloudflare is required, review the requested permissions and follow the prompts to authorize access.",
+        "Copy the prompt below directly into an AI Agent (such as Codex, Claude, Cursor, WorkBuddy, Antigravity, OpenClaw, Hermes Agent, etc.). During execution, if access to GitHub or Cloudflare is required, review the requested permissions and follow the prompts to authorize access.",
       agentGuide: "Detailed requirements: AI Agent Cloudflare Deployment",
       agentGuideHref:
         "https://github.com/tianma-if/edgeever/blob/main/docs/agent-deploy-cloudflare.md",
@@ -24,7 +25,7 @@ const copy = isEnglish
       dockerTitle: "One-command Docker self-hosting",
       dockerPrerequisite: "Install Docker with Docker Compose v2 before running the command.",
       dockerGuide: "Open the complete Docker deployment guide",
-      dockerGuideHref: "/en/docker-deploy",
+      dockerGuideHref: getLocalizedPath(locale, "/docker-deploy"),
       dockerCommandLabel: "COMMAND",
       copyCommand: "Copy command",
       promptLabel: "PROMPT",
@@ -40,7 +41,7 @@ const copy = isEnglish
       docker: "方案三：Docker 部署",
       recommended: "推荐",
       agentIntro:
-        "将下方提示词直接复制发送给 AI Agent（如 Codex、Claude、Cursor、workbuddy、Antigravity、OpenClaw、Hermes Agent 等）。执行过程中，如需访问 GitHub 或 Cloudflare，请确认权限范围并按提示完成授权。",
+        "将下方提示词直接复制发送给 AI Agent（如 Codex、Claude、Cursor、WorkBuddy、Antigravity、OpenClaw、Hermes Agent 等）。执行过程中，如需访问 GitHub 或 Cloudflare，请确认权限范围并按提示完成授权。",
       agentGuide: "详细约定与要求：AI Agent 在线部署约定",
       agentGuideHref:
         "https://github.com/tianma-if/edgeever/blob/main/docs/agent-deploy-cloudflare.zh-CN.md",

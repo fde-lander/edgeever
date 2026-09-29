@@ -10,6 +10,8 @@ import {
   draftRunResumeAction,
   nextVersion,
   parseReleaseCheckpoint,
+  updateIosMarketingVersion,
+  updateIosProjectMarketingVersion,
   parseReleaseArgs,
   playDeliveryResumeAction,
   playDeliveryFailureStrategy,
@@ -95,6 +97,50 @@ describe("release automation", () => {
     expect(playDelivery).toBeLessThan(allDraftGates);
   });
 
+  test("starts App Store delivery from the native iOS tree without blocking GitHub publication", () => {
+    const releaseSource = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
+    const iosPlan = releaseSource.indexOf('planNativeRelease("ios"');
+    const iosDispatch = releaseSource.indexOf("startIosStoreDelivery(");
+    const publication = releaseSource.indexOf('"--draft=false"');
+    const iosWait = releaseSource.indexOf('label: "App Store delivery"');
+    const restoreDraft = releaseSource.lastIndexOf('"--draft=true"');
+    const issueClose = releaseSource.indexOf('"issue",\n    "close"', publication);
+
+    expect(iosPlan).toBeGreaterThan(0);
+    expect(iosDispatch).toBeGreaterThan(iosPlan);
+    expect(iosDispatch).toBeLessThan(publication);
+    expect(iosWait).toBeGreaterThan(publication);
+    expect(iosWait).toBeGreaterThan(restoreDraft);
+    expect(issueClose).toBeGreaterThan(restoreDraft);
+    expect(issueClose).toBeLessThan(iosWait);
+    expect(releaseSource).toContain("is closed; App Store delivery failed");
+    expect(releaseSource).toContain('platform: "ios"');
+    expect(releaseSource).toContain("iosRebuild: iosPlan.rebuild");
+    expect(releaseSource).toContain("updateIosMarketingVersion");
+  });
+
+  test("rewrites the iOS marketing version onto the Release tag", () => {
+    expect(
+      updateIosMarketingVersion(
+        "// comment\nMARKETING_VERSION = 1.74.0\nCURRENT_PROJECT_VERSION = 49\n",
+        "1.79.0",
+      ),
+    ).toContain("MARKETING_VERSION = 1.79.0");
+  });
+
+  test("keeps the generated iOS project aligned with the Release tag", () => {
+    const updated = updateIosProjectMarketingVersion(
+      [
+        "MARKETING_VERSION = 1.79.0;",
+        "MARKETING_VERSION = 1.79.0;",
+      ].join("\n"),
+      "1.80.0",
+    );
+
+    expect(updated.match(/MARKETING_VERSION = 1\.80\.0;/g)).toHaveLength(2);
+    expect(updated).not.toContain("MARKETING_VERSION = 1.79.0;");
+  });
+
   test("restores an exact Draft checkpoint without exposing it in Issue text", () => {
     const checkpoint = { releaseSha: "abc", desktopRunId: 123 };
     const body = `<!-- edgeever-release-checkpoint:v1.42.0\n${JSON.stringify(checkpoint)}\n-->`;
@@ -123,6 +169,26 @@ describe("release automation", () => {
     recordCheckpointRun(checkpoint, "mobileRunId", 13);
     recordCheckpointRun(checkpoint, "mobileRunId", 13);
     expect(checkpointRunIds(checkpoint)).toEqual([11, 12, 13]);
+  });
+
+  test("keeps an active App Store delivery when a Draft advances without iOS changes", () => {
+    const storedState = {
+      releaseSha: "old",
+      desktopRunId: 11,
+      iosStoreRunId: 12,
+    };
+    const checkpoint = prepareReleaseCheckpoint({
+      storedState,
+      releaseSha: "new",
+      preserveIosStoreRun: true,
+    });
+    expect(checkpoint.iosStoreRunId).toBe(12);
+    expect(checkpoint.desktopRunId).toBeUndefined();
+    expect(checkpoint.runHistory).toContainEqual({
+      field: "iosStoreRunId",
+      runId: 12,
+      releaseSha: "old",
+    });
   });
 
   test("verifies an immutable Play delivery without uploading across mobile-compatible fixes", () => {
@@ -262,6 +328,7 @@ describe("release automation", () => {
       "--label", "maintenance",
       "--change-en", "Update the release flow.",
       "--change-zh", "更新发布流程。",
+      "--change-locale", "ja:リリースフローを更新します。",
       "--change-commit", "abc1234",
     ])).toMatchObject({ installDesktop: false });
     expect(parseReleaseArgs([
@@ -270,9 +337,29 @@ describe("release automation", () => {
       "--label", "maintenance",
       "--change-en", "Update the release flow.",
       "--change-zh", "更新发布流程。",
+      "--change-locale", "ja:リリースフローを更新します。",
       "--change-commit", "abc1234",
       "--install-desktop",
     ])).toMatchObject({ installDesktop: true });
+  });
+
+  test("requires Japanese App Store What's New", () => {
+    expect(() =>
+      parseReleaseArgs([
+        "--issue-title",
+        "Missing Japanese notes",
+        "--bump",
+        "patch",
+        "--label",
+        "bug",
+        "--change-en",
+        "Fix a bug.",
+        "--change-zh",
+        "修复问题。",
+        "--change-commit",
+        "abc1234",
+      ]),
+    ).toThrow("--change-locale ja is required");
   });
 
   test("rejects mismatched bilingual changes", () => {
@@ -385,11 +472,13 @@ describe("release automation", () => {
       changesZh: ["优化发布流程。"],
       issueNumber: 126,
     });
+    expect(notes).toContain("## 主要更新");
     expect(notes).toContain("## Key Changes");
     expect(notes).toContain("Related Issue: #126");
-    expect(notes).toContain("## 🇨🇳 中文说明 / Chinese Changelog");
     expect(notes).toContain("关联 Issue：#126");
-    expect(notes.indexOf("## 🇨🇳 中文说明 / Chinese Changelog"))
+    expect(notes).not.toContain("中文说明");
+    expect(notes).not.toContain("Chinese Changelog");
+    expect(notes.indexOf("## 主要更新"))
       .toBeLessThan(notes.indexOf("## Key Changes"));
     expect(notes.indexOf("优化发布流程。"))
       .toBeLessThan(notes.indexOf("Improve the release flow."));
@@ -415,6 +504,19 @@ describe("release automation", () => {
         "ja-JP": ["リリースフローを改善します。"],
       },
     });
+  });
+
+  test("persists localized in-app release changes when preparing versions", () => {
+    const releaseSource = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
+    const updateCall = releaseSource.indexOf("const versionPaths = updateReleaseVersions({");
+    const localizedChanges = releaseSource.indexOf(
+      "localizedChanges: options.localizedChanges",
+      updateCall,
+    );
+    const updateCallEnd = releaseSource.indexOf("});", updateCall);
+    expect(updateCall).toBeGreaterThanOrEqual(0);
+    expect(localizedChanges).toBeGreaterThan(updateCall);
+    expect(localizedChanges).toBeLessThan(updateCallEnd);
   });
 
   test("builds a bilingual umbrella Issue", () => {

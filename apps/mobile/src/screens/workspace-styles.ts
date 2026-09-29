@@ -1047,10 +1047,12 @@ const baseWorkspaceStyles = StyleSheet.create({
     padding: 14,
   },
   systemInfoRows: {
+    backgroundColor: "#ffffff",
     borderColor: "#e2e8f0",
     borderRadius: 8,
     borderWidth: 1,
-    overflow: "hidden",
+    gap: 12,
+    padding: 12,
   },
   systemInfoSection: {
     gap: 9,
@@ -1077,30 +1079,42 @@ const baseWorkspaceStyles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
   },
-  systemInfoRow: {
-    borderBottomColor: "#e2e8f0",
-    borderBottomWidth: 1,
+  systemInfoNotice: {
+    alignItems: "flex-start",
     flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 2,
   },
-  systemInfoRowLast: {
-    borderBottomWidth: 0,
+  systemInfoNoticeText: {
+    color: "#64748b",
+    flex: 1,
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  systemInfoRow: {
+    flexDirection: "row",
+    gap: 12,
   },
   systemInfoCell: {
     flex: 1,
-    gap: 3,
     minWidth: 0,
-    paddingHorizontal: 8,
-    paddingVertical: 9,
+    gap: 2,
   },
-  systemInfoCellDivider: {
-    borderRightColor: "#e2e8f0",
-    borderRightWidth: 1,
+  systemInfoWideCell: {
+    flex: 2,
+  },
+  systemInfoItemLabel: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "500",
   },
   systemInfoListValue: {
     color: "#0f172a",
-    fontFamily: "monospace",
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "400",
+  },
+  systemInfoMonoValue: {
+    fontFamily: "monospace",
   },
   panelLinkRow: {
     alignItems: "center",
@@ -1937,18 +1951,41 @@ const baseWorkspaceStyles = StyleSheet.create({
     marginTop: 20,
   },
   noteSearchPanel: {
-    backgroundColor: "#f8fafc",
+    alignItems: "center",
+    backgroundColor: "#ffffff",
     borderColor: "#e2e8f0",
     borderRadius: 8,
     borderWidth: 1,
-    gap: 10,
-    marginTop: 14,
-    padding: 10,
+    flexDirection: "row",
+    gap: 2,
+    marginTop: 12,
+    minHeight: 40,
+    paddingLeft: 10,
+    paddingRight: 2,
+  },
+  noteSearchInput: {
+    color: "#0f172a",
+    flex: 1,
+    fontSize: 15,
+    minHeight: 36,
+    minWidth: 0,
+    paddingVertical: 0,
+  },
+  noteSearchIconButton: {
+    alignItems: "center",
+    flexShrink: 0,
+    height: 36,
+    justifyContent: "center",
+    width: 36,
   },
   noteSearchCount: {
     color: "#64748b",
+    flexShrink: 0,
     fontSize: 12,
-    fontWeight: "800",
+    fontVariant: ["tabular-nums"],
+    fontWeight: "700",
+    minWidth: 44,
+    textAlign: "right",
   },
   noteSearchCountEmpty: {
     color: "#b91c1c",
@@ -2251,11 +2288,23 @@ const baseWorkspaceStyles = StyleSheet.create({
   bottomNavItem: {
     alignItems: "center",
     gap: 4,
-    minHeight: MOBILE_UI_METRICS.minimumTouchTarget,
-    minWidth: 58,
+    justifyContent: "center",
+    minHeight: 48,
+    minWidth: 80,
+  },
+  bottomNavActiveIndicator: {
+    backgroundColor: "#10b981",
+    borderRadius: 2,
+    height: 3,
+    position: "absolute",
+    top: 0,
+    width: 20,
   },
   bottomNavIcon: {
     position: "relative",
+  },
+  bottomNavIconActive: {
+    color: "#10b981",
   },
   bottomNavBadge: {
     backgroundColor: "#10b981",
@@ -2275,6 +2324,7 @@ const baseWorkspaceStyles = StyleSheet.create({
   },
   bottomNavTextActive: {
     color: "#0f172a",
+    fontWeight: "800",
   },
   previewBackdrop: {
     alignItems: "center",

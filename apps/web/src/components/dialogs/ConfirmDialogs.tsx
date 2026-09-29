@@ -43,7 +43,7 @@ export const AppConfirmDialog = ({
     tone === "danger"
       ? "bg-rose-50 text-rose-700"
       : tone === "primary"
-        ? "bg-emerald-50 text-emerald-700"
+        ? "bg-slate-100 text-slate-800"
         : "bg-slate-100 text-slate-600";
   const confirmVariant = tone === "danger" ? "danger" : "solid";
   const Icon = tone === "danger" ? AlertTriangle : ShieldCheck;
@@ -56,13 +56,13 @@ export const AppConfirmDialog = ({
             <Icon className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
-            <DialogTitle className="text-base font-semibold text-slate-950">
+            <DialogTitle className="font-semibold text-slate-950">
               {title}
             </DialogTitle>
             <DialogDescription className="mt-1 text-sm leading-5 text-slate-500">
               {description}
             </DialogDescription>
-            {error ? <p className="mt-2 text-sm text-rose-600" role="alert">{error}</p> : null}
+            {error ? <p className="mt-2 text-xs leading-5 text-rose-600" role="alert">{error}</p> : null}
           </div>
         </DialogHeader>
         <DialogFooter className="flex flex-col-reverse gap-2 px-5 py-4 sm:flex-row sm:justify-end border-t border-slate-50 bg-slate-50/50">
@@ -162,10 +162,10 @@ export const NotebookNameDialog = ({
         >
           <DialogHeader className="flex flex-row items-start justify-between gap-3 border-b border-slate-200 px-5 py-5 text-left">
             <div className="min-w-0">
-              <DialogTitle className="text-base font-semibold text-slate-950">
+              <DialogTitle className="font-semibold text-slate-950">
                 {title}
               </DialogTitle>
-              <DialogDescription className="mt-1 text-sm leading-5 text-slate-500">
+              <DialogDescription className="mt-1 text-xs leading-5 text-slate-500">
                 {dialog.mode === "create" ? t("dialogs.notebookName.createDescription") : t("dialogs.notebookName.renameDescription")}
               </DialogDescription>
             </div>
@@ -177,7 +177,7 @@ export const NotebookNameDialog = ({
             <Input
               id="notebook-name-input"
               ref={inputRef}
-              className="mt-2 h-11 text-base focus-visible:border-emerald-300 focus-visible:ring-emerald-500/20"
+              className="mt-2 h-11 text-base focus-visible:border-slate-400 focus-visible:ring-slate-900/10"
               value={name}
               disabled={isSaving}
               maxLength={80}

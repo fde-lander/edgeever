@@ -78,11 +78,11 @@ jobs:
             test "$expected_version" = "$root_version"
           fi
 
+          # `gh release view --json assets` stays empty after a draft is published.
+          # The API URL is addressed by release id and still lists the uploads.
+          release_api="$(gh release view "$CURRENT_TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)"
           mapfile -t current_assets < <(
-            gh release view "$CURRENT_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json assets \
-              --jq '.assets[].name'
+            gh api "$release_api" --jq '.assets[].name'
           )
           asset_ready="$(
             printf '%s\n' "${current_assets[@]}" |
@@ -262,7 +262,7 @@ jobs:
           EDGE_EVER_DESKTOP_BUILD: "1"
         run: bun run build:web
 
-      - name: Verify Web precache budget
+      - name: Verify Web performance budget
         if: matrix.shared_validation
         run: bun run verify:web-performance
 
@@ -857,14 +857,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           mkdir -p release/desktop
-          gh release download "$RELEASE_TAG" \
+          node scripts/download-release-assets.mjs \
             --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --dir release/desktop \
             --pattern 'EdgeEver-*-windows-x64.exe' \
             --pattern 'latest.yml' \
             --pattern 'latest-windows.json' \
             --pattern 'latest-windows.json.sig' \
-            --pattern 'SHA256SUMS-windows.txt' \
-            --dir release/desktop
+            --pattern 'SHA256SUMS-windows.txt'
 
       - name: Verify signature and installer digests
         run: node scripts/verify-windows-update-release.mjs release/desktop
@@ -894,12 +895,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           mkdir -p release/desktop
-          gh release download "$RELEASE_TAG" \
+          node scripts/download-release-assets.mjs \
             --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --dir release/desktop \
             --pattern 'EdgeEver-*-linux-x64.AppImage' \
             --pattern 'latest-linux.yml' \
-            --pattern 'SHA256SUMS-linux.txt' \
-            --dir release/desktop
+            --pattern 'SHA256SUMS-linux.txt'
 
       - name: Verify Linux automatic update release
         run: node scripts/verify-linux-update-release.mjs release/desktop

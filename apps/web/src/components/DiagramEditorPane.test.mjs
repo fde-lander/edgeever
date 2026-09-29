@@ -54,6 +54,9 @@ describe("diagram editor keyboard workflow", () => {
       source.indexOf("const suspendScrollerAutoResize"),
       source.indexOf("const nodeEditorState"),
     );
+    expect(settleHelper.indexOf("ensureDiagramPaperContainsNodes(graph)")).toBeGreaterThan(
+      settleHelper.indexOf("scroller.updateScroller()"),
+    );
     expect(settleHelper).not.toContain("graph.centerPoint");
     expect(settleHelper).toContain("anchorAfter.left - anchorBefore.left");
     expect(settleHelper).toContain("anchorAfter.top - anchorBefore.top");
@@ -158,15 +161,14 @@ describe("diagram editor canvas surface", () => {
     expect(source).not.toContain('t("diagram.saved")');
   });
 
-  test("uses a clean grid-free canvas for both diagram types", () => {
-    expect(source).toContain("grid: false");
+  test("uses an engineering dot grid for structured diagrams and a clean grid-free canvas for mind-maps", () => {
+    expect(source).toContain('kind === "architecture" || kind === "flowchart"');
     expect(source).toContain("graph.clearGrid();");
-    expect(source).not.toContain("diagramGrid");
-    expect(source).not.toContain("graph.drawGrid");
+    expect(source).toContain("graph.drawGrid");
   });
 
   test("uses restrained rounded edges and fits the complete diagram without clipping", () => {
-    expect(toolbarSource).toContain("DIAGRAM_THEME_GROUPS");
+    expect(toolbarSource).toContain("DIAGRAM_SELECTABLE_THEMES");
     expect(toolbarSource).toContain("DIAGRAM_STRUCTURE_GROUPS");
     expect(toolbarSource).toContain("diagramThemeSwatches");
     expect(toolbarSource).toContain("<StructureThumb");
@@ -176,7 +178,7 @@ describe("diagram editor canvas surface", () => {
     expect(toolbarSource).toContain('structure === "org"');
     expect(toolbarSource).toContain('structure === "timeline"');
     expect(toolbarSource).toContain('structure === "fishbone"');
-    expect(toolbarSource).toContain("diagram.themeGroupVivid");
+    expect(toolbarSource).not.toContain("diagram.themeGroupVivid");
     expect(toolbarSource).toContain('<TooltipContent>{t("diagram.theme")}</TooltipContent>');
     expect(toolbarSource).not.toContain('value="ocean"');
     expect(toolbarSource).not.toContain('value="ink"');
@@ -185,13 +187,23 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain('{ fill: "none" }');
     expect(source).toContain('if (kind !== "mind-map") edge.attr("line/fill", "none")');
     expect(source).toContain("FLOWCHART_EDGE_ROUTER");
-    expect(source).toContain("applyFlowchartEdgePorts(graph)");
+    expect(source).toContain("fontSize: ARCHITECTURE_EDGE_LABEL_FONT_SIZE");
+    expect(source).toContain("lineHeight: ARCHITECTURE_EDGE_LABEL_LINE_HEIGHT");
+    expect(source).toContain("fontSize: FLOWCHART_EDGE_LABEL_FONT_SIZE");
+    expect(source).toContain("lineHeight: FLOWCHART_EDGE_LABEL_LINE_HEIGHT");
+    expect(source).toContain("fontSize: MIND_MAP_EDGE_LABEL_FONT_SIZE");
+    expect(source).toContain("lineHeight: MIND_MAP_EDGE_LABEL_LINE_HEIGHT");
+    expect(source).toContain("applyOrthogonalEdgePorts(graph, document.kind)");
     expect(source).toContain("flowchartEdgeIsStraight");
     expect(source).toContain('showTheme={document.kind !== "architecture"}');
     expect(source).toContain('themeCatalog={document.kind === "flowchart" ? "flowchart" : "mind-map"}');
+    expect(source).toContain('document?.kind === "flowchart"');
+    expect(source).toContain("resolveFlowchartTheme(document.theme)");
+    expect(source).toContain("resolveDiagramTheme(document?.theme)");
+    expect(source).not.toContain("const documentTheme = resolveDiagramTheme(document?.theme)");
     expect(toolbarSource).toContain("showTheme = true");
     expect(toolbarSource).toContain("themeCatalog = \"mind-map\"");
-    expect(toolbarSource).toContain("FLOWCHART_THEME_GROUPS");
+    expect(toolbarSource).toContain("FLOWCHART_SELECTABLE_THEMES");
     expect(toolbarSource).toContain("flowchartThemeSwatches");
     expect(source).toContain("maxScale: policy.maxScale");
     expect(source).not.toContain("minScale: policy.minScale");
@@ -204,7 +216,10 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain("diagramNodeBounds(graph)");
     expect(source).toContain("flowchartFitsReadableViewport(bounds, size, padding, minScale, policy.maxScale)");
     expect(source).toContain("readDiagramContent(graph, document)");
+    expect(source).toContain("readDiagramContent(graphRef.current, document)");
     expect(source).toContain("diagramReaderFocusNode(document)");
+    expect(source).toContain("zoomDiagram(graph, 1, true)");
+    expect(source).not.toContain('document.kind === "flowchart" ? 1 : minScale');
     expect(source).toContain("scroller.positionPoint({ x: box.x + box.width / 2, y: box.y }, \"50%\", 48)");
     expect(source).toContain('policy.anchor === "leftmost"');
     expect(source).toContain("scroller.positionPoint({ x: origin.x, y: origin.y }, 40, 48)");
@@ -212,7 +227,7 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain("scroller.zoomToRect(bounds, options)");
     expect(source).toContain("getDiagramLayoutViewport(document.kind)");
     expect(source).toContain("fitDiagramContent(graph, document, containerRef.current);");
-    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport, { readable: true })");
+    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport)");
   });
 
   test("labels auto layout directly instead of relying on an ambiguous icon", () => {
@@ -222,11 +237,22 @@ describe("diagram editor canvas surface", () => {
     expect(toolbarSource).not.toContain('<Button size="icon" variant="ghost" aria-label={t("diagram.autoLayout")}');
   });
 
-  test("exposes view recovery separately from document layout", () => {
-    expect(toolbarSource).toContain("onFit");
-    expect(toolbarSource).toContain('t("diagram.fit")');
-    expect(source).toContain("onFit={() =>");
-    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport, { readable: true });");
+  test("does not put a fit-to-canvas control on the toolbar", () => {
+    expect(toolbarSource).not.toContain("onFit");
+    expect(toolbarSource).not.toContain('t("diagram.fit")');
+    expect(source).not.toContain("onFit={() =>");
+    expect(source).toContain("fitDiagramContent(graph, document, containerRef.current, 40, layout.viewport);");
+  });
+
+  test("lets the zoom percent be typed instead of only resetting to 100%", () => {
+    expect(toolbarSource).toContain("onZoomTo");
+    expect(toolbarSource).toContain("parseDiagramZoomPercent");
+    expect(toolbarSource).toContain('t("diagram.zoomPercent")');
+    expect(toolbarSource).not.toContain('t("diagram.zoomPercentHint")');
+    expect(toolbarSource).toContain("onPointerDown={(event) => event.stopPropagation()}");
+    expect(toolbarSource).not.toContain("onResetZoom");
+    expect(source).toContain("onZoomTo={(percent) =>");
+    expect(source).toContain("zoomDiagram(graph, percent / 100, true)");
   });
 
   test("delegates every diagram kind to one shared toolbar shell", () => {
@@ -295,6 +321,7 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain('t("diagram.componentSearch")');
     expect(source).toContain('labelKey: "diagram.componentCategoryExperience"');
     expect(source).toContain('labelKey: "diagram.componentCategoryServices"');
+    expect(source).toContain('labelKey: "diagram.componentCategoryAi"');
     expect(source).toContain('labelKey: "diagram.componentCategoryDatabases"');
     expect(source).toContain('labelKey: "diagram.componentCategoryStorage"');
     expect(source).toContain('labelKey: "diagram.componentCategoryMiddleware"');
@@ -302,6 +329,10 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain('labelKey: "diagram.componentCategorySecurity"');
     expect(source).toContain('labelKey: "diagram.componentCategoryObservability"');
     expect(source).toContain('labelKey: "diagram.componentCategoryExternal"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.largeLanguageModel"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.vectorDatabase"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.aiAgent"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.mcpServer"');
     expect(source).toContain("<Collapsible key={category.id} defaultOpen>");
     expect(source).toContain("category.items.filter");
     expect(source).toContain('className="grid grid-cols-7 gap-1 px-1 pb-2"');
@@ -313,7 +344,12 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain('resourceIcon: architectureResourceIcon(item)');
     expect(source).toContain('...(data?.resourceIcon ? { resourceIcon: data.resourceIcon } : {})');
     expect(source).toContain('architectureNodeVisual(node.shape, appearance, size, node.resourceIcon)');
-    expect(source).toContain('inferArchitectureResourceIcon(node.label, t)');
+    expect(source).toContain('labelKey: "diagram.architectureResources.gpu"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.cpu"');
+    expect(source).toContain('labelKey: "diagram.architectureResources.memory"');
+    expect(source).toContain("ARCHITECTURE_RESOURCE_ALIASES");
+    expect(source).toContain("<ArchitectureIconPicker");
+    expect(source).toContain("updateSelectedResourceIcon");
     expect(source).not.toContain('.render({}, null).props.iconNode');
     expect(source).not.toContain('className="line-clamp-2"');
   });
@@ -397,10 +433,30 @@ describe("diagram editor canvas surface", () => {
     expect(source).toContain('graph.startBatch("quick-create")');
   });
 
-  test("keeps the desktop header compact without shrinking mobile controls", () => {
-    expect(source).toContain("MEMO_EDITOR_TOP_ROW_CLASS_NAME");
-    expect(source).toContain("MEMO_EDITOR_TITLE_REGION_CLASS_NAME");
+  test("keeps notebook and tags on the title row above the diagram toolbar", () => {
+    const topRow = source.indexOf('cn(MEMO_EDITOR_TOP_ROW_CLASS_NAME, "border-b-0")');
+    const metadata = source.indexOf("<MemoEditorMetadataRow");
+    const status = source.indexOf("ref={setHeaderStatusCluster}");
+    const headerEnd = source.indexOf("</header>");
+    const toolbar = source.indexOf("<DiagramToolbar\n");
+    expect(topRow).toBeGreaterThan(-1);
+    expect(metadata).toBeGreaterThan(topRow);
+    expect(status).toBeGreaterThan(metadata);
+    expect(headerEnd).toBeGreaterThan(status);
+    expect(toolbar).toBeGreaterThan(headerEnd);
+    expect(source).toContain('rowClassName="shrink-0 flex-nowrap"');
+    expect(source).toContain("nextTitleStatusClearance");
+    expect(source).toContain('cn(MEMO_EDITOR_TOP_ROW_CLASS_NAME, "border-b-0")');
+    expect(source).not.toContain("MEMO_EDITOR_TITLE_REGION_CLASS_NAME");
+    expect(source.match(/<MemoEditorMetadataRow/g)).toHaveLength(1);
     expect(toolbarSource).toContain("<MemoEditorToolbarRow");
+  });
+
+  test("paints diagram chrome from theme tokens instead of literal white", () => {
+    expect(source).toContain('className="flex h-full min-h-0 flex-col bg-card"');
+    expect(source).toContain('className="shrink-0 border-b border-slate-200 bg-card"');
+    expect(source).not.toContain("flex-col bg-white");
+    expect(source).not.toContain("border-slate-200 bg-white");
   });
 
   test("repaints the graph when the application appearance changes", () => {

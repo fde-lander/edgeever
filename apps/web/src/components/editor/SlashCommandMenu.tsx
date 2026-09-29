@@ -9,18 +9,23 @@ import {
   Braces,
   CalendarClock,
   CalendarDays,
+  ChevronsDownUp,
   Clock3,
   FileUp,
   Heading1,
   Heading2,
   Heading3,
+  Heading4,
+  Heading5,
+  Heading6,
   Link,
   List,
   ListOrdered,
   ListTodo,
   Pilcrow,
   Quote,
-  Table2,
+  Sigma,
+  Table,
 } from "lucide-react";
 import {
   Command,
@@ -38,13 +43,19 @@ export type SlashCommandId =
   | "heading-1"
   | "heading-2"
   | "heading-3"
+  | "heading-4"
+  | "heading-5"
+  | "heading-6"
   | "bullet-list"
   | "ordered-list"
   | "task-list"
   | "blockquote"
   | "code-block"
   | "divider"
+  | "fold"
   | "table"
+  | "inline-math"
+  | "block-math"
   | "current-date"
   | "current-time"
   | "current-date-time"
@@ -68,6 +79,7 @@ export type SlashCommandActions = {
   openAttachmentPicker: () => void;
   openExternalLinkPicker: () => void;
   openNoteLinkPicker: () => void;
+  openMathFormula: (kind: "inline" | "block", range?: { from: number; to: number }) => void;
 };
 
 export type SlashCommandItem = {
@@ -98,6 +110,9 @@ export const createSlashCommandItems = (labels: SlashCommandLabels): SlashComman
   { id: "heading-1", command: "h1", group: "basic", icon: Heading1, label: labels.items["heading-1"], keywords: ["heading", "标题"] },
   { id: "heading-2", command: "h2", group: "basic", icon: Heading2, label: labels.items["heading-2"], keywords: ["heading", "标题"] },
   { id: "heading-3", command: "h3", group: "basic", icon: Heading3, label: labels.items["heading-3"], keywords: ["heading", "标题"] },
+  { id: "heading-4", command: "h4", group: "basic", icon: Heading4, label: labels.items["heading-4"], keywords: ["heading", "标题"] },
+  { id: "heading-5", command: "h5", group: "basic", icon: Heading5, label: labels.items["heading-5"], keywords: ["heading", "标题"] },
+  { id: "heading-6", command: "h6", group: "basic", icon: Heading6, label: labels.items["heading-6"], keywords: ["heading", "标题"] },
   { id: "current-date", command: "date", group: "basic", icon: CalendarDays, label: labels.items["current-date"], keywords: ["today", "日期", "今天"] },
   { id: "current-time", command: "time", group: "basic", icon: Clock3, label: labels.items["current-time"], keywords: ["now", "时间", "现在"] },
   { id: "current-date-time", command: "datetime", group: "basic", icon: CalendarClock, label: labels.items["current-date-time"], keywords: ["timestamp", "日期时间", "时间戳"] },
@@ -107,7 +122,10 @@ export const createSlashCommandItems = (labels: SlashCommandLabels): SlashComman
   { id: "blockquote", command: "quote", group: "basic", icon: Quote, label: labels.items.blockquote, keywords: ["引用"] },
   { id: "code-block", command: "code", group: "basic", icon: Braces, label: labels.items["code-block"], keywords: ["代码"] },
   { id: "divider", command: "divider", group: "insert", icon: BetweenHorizontalStart, label: labels.items.divider, keywords: ["rule", "分割", "分隔"] },
-  { id: "table", command: "table", group: "insert", icon: Table2, label: labels.items.table, keywords: ["表格"] },
+  { id: "fold", command: "fold", group: "insert", icon: ChevronsDownUp, label: labels.items.fold, keywords: ["collapse", "spoiler", "折叠", "折りたたみ"] },
+  { id: "table", command: "table", group: "insert", icon: Table, label: labels.items.table, keywords: ["表格"] },
+  { id: "inline-math", command: "math", group: "insert", icon: Sigma, label: labels.items["inline-math"], keywords: ["latex", "formula", "katex", "公式", "数学", "数式"] },
+  { id: "block-math", command: "equation", group: "insert", icon: Sigma, label: labels.items["block-math"], keywords: ["latex", "formula", "display", "katex", "块级公式", "独立公式", "数式"] },
   { id: "attachment", command: "upload", group: "insert", icon: FileUp, label: labels.items.attachment, keywords: ["file", "attachment", "文件", "上传", "附件"] },
   { id: "note-link", command: "note", group: "insert", icon: Link, label: labels.items["note-link"], keywords: ["link", "memo", "笔记", "引用"] },
   { id: "external-link", command: "link", group: "insert", icon: Link, label: labels.items["external-link"], keywords: ["url", "web", "链接", "网址"] },
@@ -225,13 +243,25 @@ const runSlashCommand = ({
     case "heading-1": chain.setHeading({ level: 1 }).run(); break;
     case "heading-2": chain.setHeading({ level: 2 }).run(); break;
     case "heading-3": chain.setHeading({ level: 3 }).run(); break;
+    case "heading-4": chain.setHeading({ level: 4 }).run(); break;
+    case "heading-5": chain.setHeading({ level: 5 }).run(); break;
+    case "heading-6": chain.setHeading({ level: 6 }).run(); break;
     case "bullet-list": chain.toggleBulletList().run(); break;
     case "ordered-list": chain.toggleOrderedList().run(); break;
     case "task-list": chain.toggleTaskList().run(); break;
     case "blockquote": chain.toggleBlockquote().run(); break;
     case "code-block": chain.setCodeBlock().run(); break;
     case "divider": chain.setHorizontalRule().run(); break;
+    case "fold": chain.setDetails().run(); break;
     case "table": chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(); break;
+    case "inline-math":
+      chain.run();
+      actions.openMathFormula("inline", { from: range.from, to: range.from });
+      break;
+    case "block-math":
+      chain.run();
+      actions.openMathFormula("block", { from: range.from, to: range.from });
+      break;
     case "current-date": chain.insertContent(formatCurrentDate(new Date())).run(); break;
     case "current-time": chain.insertContent(formatCurrentTime(new Date())).run(); break;
     case "current-date-time": chain.insertContent(formatCurrentDateTime(new Date())).run(); break;

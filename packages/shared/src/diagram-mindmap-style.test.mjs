@@ -20,6 +20,8 @@ import {
   mindMapUsesUnderline,
   resolveMindMapNodeStyle,
   MIND_MAP_CONNECTOR_NAME,
+  MIND_MAP_EDGE_LABEL_FONT_SIZE,
+  MIND_MAP_EDGE_LABEL_LINE_HEIGHT,
   MIND_MAP_VERTICAL_GAP,
 } from "./diagram-mindmap-style.ts";
 
@@ -52,6 +54,15 @@ describe("mind map presentation", () => {
     expect(compactMindMapNodeSize("A much longer topic label", false).width).toBeLessThanOrEqual(168);
     expect(mindMapNodePresentation("核心主题", "root").fontSize).toBe(15);
     expect(MIND_MAP_VERTICAL_GAP).toBe(20);
+  });
+
+  test("keeps edge annotations visually subordinate to nested topics", () => {
+    const nestedPresentation = mindMapNodePresentation("分支主题", "nested");
+    const nestedVisual = mindMapNodeVisual("nested", palette);
+    expect(MIND_MAP_EDGE_LABEL_FONT_SIZE).toBe(10);
+    expect(MIND_MAP_EDGE_LABEL_LINE_HEIGHT).toBe(14);
+    expect(MIND_MAP_EDGE_LABEL_FONT_SIZE).toBeLessThan(nestedPresentation.fontSize);
+    expect(MIND_MAP_EDGE_LABEL_LINE_HEIGHT).toBeLessThan(nestedVisual.label.lineHeight);
   });
 
   test("uses a capsule root, rounded first-level topics, and lighter nested topics", () => {
@@ -123,6 +134,9 @@ describe("mind map presentation", () => {
     expect(styled.visual.underline.stroke).toBe(mindMapBranchTint(0, "light", "sun")?.edge);
     const brandNested = resolveMindMapNodeStyle(nodes, "one-a", palette, "brand", "light", { width: 96, height: 32 });
     expect(brandNested.visual.underline.stroke).toBe(palette.mindMapEdge);
+    const plainNested = resolveMindMapNodeStyle(nodes, "one-a", palette, "plain", "light", { width: 96, height: 32 });
+    expect(plainNested.tint).toBeUndefined();
+    expect(resolveMindMapNodeStyle(nodes, "one", palette, undefined, "light", { width: 96, height: 36 }).tint).toBeUndefined();
   });
 
   test("builds a closed horizontal cubic ribbon that is thicker at the source", () => {

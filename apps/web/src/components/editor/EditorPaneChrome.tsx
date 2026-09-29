@@ -18,6 +18,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { cn } from "@/lib/utils";
 import type { getNotebookMoveOptions } from "@/lib/app-helpers";
 import type { ResourceMenuTarget } from "./useEditorResourceActions";
+import { attachmentResourceMenuPosition } from "./attachment-resource-menu";
 import { imageResourceMenuPosition } from "./image-resource-menu-position";
 
 export const IconTooltip = ({ label, children }: { label: string; children: ReactNode }) => (
@@ -50,7 +51,7 @@ export const NoteLinkInteractionHint = ({
 }) => createPortal(
   <div
     role="tooltip"
-    className="pointer-events-none fixed z-[100] whitespace-nowrap rounded-md bg-[var(--tooltip-bg)] px-2.5 py-1.5 text-xs font-medium text-[var(--tooltip-fg)] shadow-md"
+    className="pointer-events-none fixed z-[100] whitespace-nowrap rounded-lg border border-[var(--tooltip-border)] bg-[var(--tooltip-bg)] px-2.5 py-1.5 text-xs font-medium leading-4 text-[var(--tooltip-fg)] shadow-[var(--tooltip-shadow)]"
     style={{
       left: position.left,
       top: position.top,
@@ -93,10 +94,10 @@ export const ResourceActionMenu = ({
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) => {
-  const imageElement = target.kind === "image" ? target.element : undefined;
+  const referenceElement = target.element ?? null;
   const { refs, floatingStyles, isPositioned } = useFloating({
-    ...imageResourceMenuPosition,
-    elements: { reference: imageElement ?? null },
+    ...(target.kind === "image" ? imageResourceMenuPosition : attachmentResourceMenuPosition),
+    elements: { reference: referenceElement },
     whileElementsMounted: autoUpdate,
   });
 
@@ -107,8 +108,8 @@ export const ResourceActionMenu = ({
       data-edgeever-resource-menu
       role="toolbar"
       aria-label={labels.download}
-      className="fixed z-[110] flex items-center gap-1 rounded-lg border border-slate-200 bg-card p-1 shadow-lg"
-      style={imageElement ? {
+      className="fixed z-[110] flex items-center gap-1 overflow-hidden rounded-lg border border-slate-200 bg-card p-1 shadow-lg"
+      style={referenceElement ? {
         ...floatingStyles,
         visibility: isPositioned ? "visible" : "hidden",
       } : {
@@ -218,7 +219,7 @@ export const MobileNotebookSelectSheet = ({
                     key={option.id}
                     className={cn(
                       "h-12 px-3 text-base",
-                      selected ? "bg-emerald-50 font-semibold text-emerald-700 data-[selected=true]:bg-emerald-50" : "text-slate-700",
+                      selected ? "bg-workspace-selection font-semibold text-slate-950 data-[selected=true]:bg-workspace-selection" : "text-slate-700",
                     )}
                     style={{ paddingLeft: `${12 + option.depth * 18}px` }}
                     value={option.id}

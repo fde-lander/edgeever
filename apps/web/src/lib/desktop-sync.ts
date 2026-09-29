@@ -2,17 +2,24 @@ import {
   getMemoSyncBaseConflictDetails,
   getSyncRetryAt,
   hasSyncStateReset,
+  isDesktopLocalRevisionId,
   isMemoSyncBaseCurrent,
+  memoUpdatePayloadMatchesRemote,
+  resolveSameDeviceMemoSyncRecovery,
   type DesktopOutboxItem,
   type DesktopRpcParams,
   type DesktopRpcResponses,
+  type MemoDetail,
+  type SameDeviceMemoSyncRecovery,
   type SyncBootstrapResponse,
   type SyncChangesResponse,
   type TiptapDoc,
 } from "@edgeever/shared";
 import { api, ApiRequestError } from "@/lib/api";
 import { isDesktopResourceRuntime, mapMarkdownResourceUrls, mapTiptapResourceUrls, toApiResourceUrl } from "@/lib/desktop-resources";
-import { notifyMemoIdRemapped, notifyMemoSyncAcknowledged } from "@/lib/sync-events";
+import { readEmergencyDraft } from "@/lib/emergency-draft";
+import { notebookDeleteIdsFromPayload } from "@/lib/notebook-delete";
+import { notifyMemoIdRemapped, notifyMemoSyncAcknowledged, notifySyncQueueChanged } from "@/lib/sync-events";
 
 type StagedResourceRewrite = { memoId: string; placeholder: string; url: string };
 
@@ -60,6 +67,59 @@ export const isStagedResourceReferenced = (payloads: unknown[], stagedId: string
   return payloads.some((payload) => valueReferencesStagedResource(payload, placeholder));
 };
 
+const stagedIdsReferencedByLocalMemos = async (rewrites: StagedResourceRewrite[]) => {
+  const referenced = new Set<string>();
+  for (const rewrite of rewrites) {
+    const stagedId = rewrite.placeholder.startsWith("edgeever-staged://")
+      ? rewrite.placeholder.slice("edgeever-staged://".length)
+      : rewrite.placeholder;
+    try {
+      const local = await request("memo.get", { memoId: rewrite.memoId, includeDeleted: true });
+      if (isStagedResourceReferenced([local.memo.contentJson, local.memo.contentMarkdown], stagedId)) {
+        referenced.add(stagedId);
+      }
+    } catch {
+      referenced.add(stagedId);
+    }
+  }
+  return referenced;
+};
+
+export const stagedIdsReferencedByUnsavedContent = (
+  rewrites: StagedResourceRewrite[],
+  values: unknown[],
+) => new Set(rewrites
+  .filter((rewrite) => isStagedResourceReferenced(values, rewrite.placeholder.slice("edgeever-staged://".length)))
+  .map((rewrite) => rewrite.placeholder.slice("edgeever-staged://".length)));
+
+const stagedIdsReferencedByRenderer = async (rewrites: StagedResourceRewrite[]) => {
+  if (rewrites.length === 0) return new Set<string>();
+  const memoIds = [...new Set(rewrites.map((rewrite) => rewrite.memoId))];
+  try {
+    const { localDb } = await import("@/lib/local-db");
+    const [drafts, queued] = await Promise.all([
+      localDb.drafts.bulkGet(memoIds),
+      localDb.syncQueue.where("memoId").anyOf(memoIds).toArray(),
+    ]);
+    const visibleSources = typeof document === "undefined" ? [] : [
+      ...Array.from(document.querySelectorAll("[src], [href]"), (element) => (
+        element.getAttribute("src") ?? element.getAttribute("href")
+      )),
+      ...Array.from(document.querySelectorAll("textarea"), (element) => element.value),
+    ];
+    return stagedIdsReferencedByUnsavedContent(rewrites, [
+      ...drafts,
+      ...queued.map((item) => item.payload),
+      ...memoIds.map((memoId) => readEmergencyDraft(memoId)),
+      ...visibleSources,
+    ]);
+  } catch {
+    // If drafts cannot be inspected, keep the bytes until a later sync can
+    // prove that no editor can save the old staged URL again.
+    return new Set(rewrites.map((rewrite) => rewrite.placeholder.slice("edgeever-staged://".length)));
+  }
+};
+
 const remapStagedResourceMemoIds = async (memoIdMappings: ReadonlyMap<string, string>) => {
   if (memoIdMappings.size === 0) return;
   // Keep sync compatible with a renderer hot-reload or an older native shell
@@ -68,15 +128,31 @@ const remapStagedResourceMemoIds = async (memoIdMappings: ReadonlyMap<string, st
 };
 
 const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
-  if (!isDesktopResourceRuntime() || (typeof navigator !== "undefined" && !navigator.onLine)) return { attempted: 0, synced: 0, failed: 0, rewrites: [] as StagedResourceRewrite[], stagedIds: [] as string[] };
-  const staged = await window.edgeeverDesktop!.listStagedResources();
+  if (!isDesktopResourceRuntime() || (typeof navigator !== "undefined" && !navigator.onLine)) return { attempted: 0, synced: 0, failed: 0, rewrites: [] as StagedResourceRewrite[], cleanupRewrites: [] as StagedResourceRewrite[], stagedIds: [] as string[] };
+  const bridge = window.edgeeverDesktop!;
+  const [staged, aliases] = await Promise.all([
+    bridge.listStagedResources(),
+    bridge.listStagedResourceAliases?.() ?? Promise.resolve([]),
+  ]);
+  const aliasesById = new Map(aliases.map((item) => [item.id, item]));
   const pending = await request("sync.outbox.list", { limit: 200 });
   const pendingPayloads = pending.items.map((item) => item.payload);
   let synced = 0;
   let failed = 0;
-  const rewrites: StagedResourceRewrite[] = [];
+  const rewrites: StagedResourceRewrite[] = aliases.map((item) => ({
+    memoId: item.memoId,
+    placeholder: `edgeever-staged://${item.id}`,
+    url: `/api/v1/resources/${encodeURIComponent(item.resourceId)}/blob`,
+  }));
+  const cleanupRewrites: StagedResourceRewrite[] = [];
   const stagedIds: string[] = [];
   for (const item of staged) {
+    const existingAlias = aliasesById.get(item.id);
+    if (existingAlias) {
+      cleanupRewrites.push(rewrites.find((rewrite) => rewrite.placeholder === `edgeever-staged://${item.id}`)!);
+      stagedIds.push(item.id);
+      continue;
+    }
     // An image can finish staging before the editor's debounced local save
     // has queued the memo update that references it. Uploading and deleting
     // the staged file in that gap leaves the memo with an unrecoverable
@@ -94,7 +170,11 @@ const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
         ], { type: item.type }),
       });
       await window.edgeeverDesktop!.sidecarRequest("resource.cache", { resource: uploaded.resource });
-      rewrites.push({ memoId, placeholder: `edgeever-staged://${item.id}`, url: uploaded.resource.url });
+      if (!bridge.recordStagedResourceAlias) throw new Error("Staged resource alias bridge is unavailable");
+      await bridge.recordStagedResourceAlias(item.id, uploaded.resource.url);
+      const rewrite = { memoId, placeholder: `edgeever-staged://${item.id}`, url: uploaded.resource.url };
+      rewrites.push(rewrite);
+      cleanupRewrites.push(rewrite);
       stagedIds.push(item.id);
       synced += 1;
     } catch {
@@ -102,13 +182,13 @@ const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
     }
   }
   try {
-    await patchCreatedMemoResources(rewrites);
+    await patchCreatedMemoResources(cleanupRewrites);
   } catch {
     // Keep the staged files and rewritten outbox payloads recoverable. A later
     // sync can retry the remote patch without losing the local attachment.
-    failed += rewrites.length > 0 ? 1 : 0;
+    failed += cleanupRewrites.length > 0 ? 1 : 0;
   }
-  return { attempted: staged.length, synced, failed, rewrites, stagedIds };
+  return { attempted: staged.length, synced, failed, rewrites, cleanupRewrites, stagedIds };
 };
 
 const removeSyncedStagedResources = async (stagedIds: string[]) => {
@@ -208,8 +288,8 @@ export const resolveDesktopMemoSyncBase = (
   // Older desktop clients advanced the cached cloud revision for every local
   // autosave. A base ahead of the actual server is therefore a local counter,
   // not evidence of a concurrent remote edit. Rebase that impossible state so
-  // existing drafts recover automatically. Bases behind the server remain
-  // conflicts and keep the normal adopt-cloud/copy-draft protection.
+  // existing drafts recover automatically. Bases behind the server are inspected
+  // by resolveDesktopStaleMemoUpdate before becoming a user-facing conflict.
   if (expected.expectedRevision > current.revision) {
     return {
       expectedRevision: current.revision,
@@ -218,6 +298,54 @@ export const resolveDesktopMemoSyncBase = (
   }
   return expected;
 };
+
+type DesktopLocalRevisionWitness = {
+  id: string;
+  revision: number;
+  contentHash: string;
+  contentMarkdown: string;
+  contentJson?: unknown;
+};
+
+export const desktopLocalRevisionWitnessesRemote = (
+  revisions: ReadonlyArray<DesktopLocalRevisionWitness>,
+  remote: { contentHash: string; contentMarkdown: string; contentJson?: unknown },
+  expectedRevision: number,
+) => revisions.some((revision) => {
+  if (!isDesktopLocalRevisionId(revision.id) || revision.revision < expectedRevision) {
+    return false;
+  }
+  if (revision.contentHash === remote.contentHash) {
+    return true;
+  }
+  if (revision.contentMarkdown !== remote.contentMarkdown) {
+    return false;
+  }
+  return revision.contentMarkdown !== ""
+    || JSON.stringify(revision.contentJson ?? null) === JSON.stringify(remote.contentJson ?? null);
+});
+
+export const resolveDesktopStaleMemoUpdate = (input: {
+  current: { revision: number; contentHash: string };
+  expected: { expectedRevision: number; expectedContentHash: string };
+  payload: {
+    title?: unknown;
+    tags?: unknown;
+    contentMarkdown?: unknown;
+    contentJson?: unknown;
+  };
+  remote: Pick<MemoDetail, "title" | "tags" | "contentMarkdown" | "contentHash" | "contentJson">;
+  localRevisions: ReadonlyArray<DesktopLocalRevisionWitness>;
+}): SameDeviceMemoSyncRecovery => resolveSameDeviceMemoSyncRecovery({
+  current: input.current,
+  expected: input.expected,
+  payloadMatchesRemote: memoUpdatePayloadMatchesRemote(input.payload, input.remote),
+  remoteProducedLocally: desktopLocalRevisionWitnessesRemote(
+    input.localRevisions,
+    input.remote,
+    input.expected.expectedRevision,
+  ),
+});
 
 const acknowledge = async (
   item: DesktopOutboxItem,
@@ -259,17 +387,44 @@ const syncOutboxItem = async (item: DesktopOutboxItem, stagedRewrites: StagedRes
     };
     const currentBase = { revision: editSession.baseRevision, contentHash: editSession.baseContentHash };
     const expectedBase = resolveDesktopMemoSyncBase(currentBase, queuedBase);
+    let syncBase = expectedBase;
     if (!isMemoSyncBaseCurrent(currentBase, expectedBase)) {
-      throw new ApiRequestError(
-        "Note changed before the offline draft could sync.",
-        409,
-        "revision_conflict",
-        getMemoSyncBaseConflictDetails(currentBase, expectedBase),
-      );
+      const remote = await api.getMemo(memoId, { includeDeleted: true });
+      let localRevisions: DesktopLocalRevisionWitness[] = [];
+      try {
+        localRevisions = (await request("memo.revisions", { memoId, limit: 200 })).revisions;
+      } catch {
+        // A lost acknowledgement of the exact payload can still be acked
+        // without local history. Missing snapshots keep a genuine remote edit
+        // as a conflict.
+      }
+      const recovery = resolveDesktopStaleMemoUpdate({
+        current: currentBase,
+        expected: expectedBase,
+        payload,
+        remote: remote.memo,
+        localRevisions,
+      });
+      if (recovery === "ack") {
+        await acknowledge(item, remote.memo);
+        return remote.memo;
+      }
+      if (recovery !== "rebase") {
+        throw new ApiRequestError(
+          "Note changed before the offline draft could sync.",
+          409,
+          "revision_conflict",
+          getMemoSyncBaseConflictDetails(currentBase, expectedBase),
+        );
+      }
+      syncBase = {
+        expectedRevision: currentBase.revision,
+        expectedContentHash: currentBase.contentHash,
+      };
     }
     const data = await api.updateMemo(memoId, {
-      expectedRevision: expectedBase.expectedRevision,
-      expectedContentHash: expectedBase.expectedContentHash,
+      expectedRevision: syncBase.expectedRevision,
+      expectedContentHash: syncBase.expectedContentHash,
       editSessionId: editSession.id,
       title: String(payload.title ?? ""),
       contentJson: payload.contentJson as TiptapDoc,
@@ -335,7 +490,9 @@ const syncOutboxItem = async (item: DesktopOutboxItem, stagedRewrites: StagedRes
   }
 
   if (item.kind === "notebook.delete") {
-    await api.deleteNotebook(String(payload.notebookId ?? item.entityId));
+    for (const notebookId of notebookDeleteIdsFromPayload(payload, String(payload.notebookId ?? item.entityId))) {
+      await api.deleteNotebook(notebookId);
+    }
     await acknowledge(item);
     return null;
   }
@@ -610,9 +767,33 @@ export const mergeSyncedMemos = <T>(target: Map<string, T>, source: ReadonlyMap<
 };
 
 let activeSync: Promise<DesktopSyncResult> | null = null;
+let pausedImports = 0;
+
+// Importers create a local memo before its attachment can be staged. Keep that
+// short sequence together so cloud acknowledgement cannot remap the memo ID
+// between create and update (or leave an empty cloud memo on failure).
+export const pauseDesktopSyncForImport = async () => {
+  pausedImports += 1;
+  try {
+    if (activeSync) await activeSync;
+  } catch (error) {
+    pausedImports -= 1;
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    pausedImports -= 1;
+    if (pausedImports === 0) notifySyncQueueChanged();
+  };
+};
 
 export const syncDesktopData = () => {
   if (activeSync) return activeSync;
+  if (pausedImports > 0) {
+    return Promise.resolve({ attempted: 0, synced: 0, failed: 0, conflicted: 0, memoIdMappings: new Map(), syncedMemos: new Map() });
+  }
   activeSync = (async () => {
     const memoIdMappings = new Map<string, string>();
     const syncedMemos = new Map<string, DesktopRpcResponses["memo.get"]["memo"]>();
@@ -633,7 +814,24 @@ export const syncDesktopData = () => {
       mergeMemoIdMappings(memoIdMappings, outbox.memoIdMappings);
       mergeSyncedMemos(syncedMemos, outbox.syncedMemos);
       if (stagedResources.failed === 0 && outbox.failed === 0 && outbox.conflicted === 0 && creates.conflicted === 0) {
-        await removeSyncedStagedResources(stagedResources.stagedIds);
+        const stillReferenced = await stagedIdsReferencedByLocalMemos(stagedResources.cleanupRewrites);
+        if (stillReferenced.size > 0) {
+          try {
+            await patchCreatedMemoResources(stagedResources.cleanupRewrites.filter((rewrite) => {
+              const stagedId = rewrite.placeholder.slice("edgeever-staged://".length);
+              return stillReferenced.has(stagedId);
+            }));
+          } catch {
+            // Keep the staged files so a later save can finish rewriting the note.
+          }
+        }
+        const remainingReferenced = stillReferenced.size > 0
+          ? await stagedIdsReferencedByLocalMemos(stagedResources.cleanupRewrites)
+          : stillReferenced;
+        const rendererReferenced = await stagedIdsReferencedByRenderer(stagedResources.cleanupRewrites);
+        await removeSyncedStagedResources(stagedResources.stagedIds.filter((stagedId) => (
+          !remainingReferenced.has(stagedId) && !rendererReferenced.has(stagedId)
+        )));
       }
       phase = "read_status";
       const remaining = await request("sync.status", {});

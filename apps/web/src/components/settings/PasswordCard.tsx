@@ -2,9 +2,8 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  SETTINGS_CARD_DESCRIPTION_CLASSNAME,
   SETTINGS_CARD_HEADER_CLASSNAME,
   SETTINGS_CARD_ICON_CLASSNAME,
   SETTINGS_CARD_TITLE_CLASSNAME,
@@ -69,18 +68,15 @@ export const PasswordCard = ({ authRequired, demoMode }: PasswordCardProps) => {
           <KeyRound className={SETTINGS_CARD_ICON_CLASSNAME} />
           {t("password.title")}
         </CardTitle>
-        <CardDescription className={SETTINGS_CARD_DESCRIPTION_CLASSNAME}>
-          {t("password.description")}
-        </CardDescription>
       </CardHeader>
       <CardContent className="p-4 pt-0">
         {demoMode ? (
-          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" role="status">
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900" role="status">
             {t("password.demoReadOnly")}
           </p>
         ) : (
           <form className="grid gap-3 lg:grid-cols-3 lg:gap-y-2.5" onSubmit={handleSubmit}>
-          <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+          <label className="grid gap-1.5 text-xs font-normal leading-5 text-slate-700">
             {t("password.currentPassword")}
             <Input
               className="lg:h-9"
@@ -91,7 +87,7 @@ export const PasswordCard = ({ authRequired, demoMode }: PasswordCardProps) => {
               required
             />
           </label>
-          <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+          <label className="grid gap-1.5 text-xs font-normal leading-5 text-slate-700">
             {t("password.newPassword")}
             <Input
               className="lg:h-9"
@@ -103,7 +99,7 @@ export const PasswordCard = ({ authRequired, demoMode }: PasswordCardProps) => {
               required
             />
           </label>
-          <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+          <label className="grid gap-1.5 text-xs font-normal leading-5 text-slate-700">
             {t("password.confirmPassword")}
             <Input
               className="lg:h-9"
@@ -122,7 +118,7 @@ export const PasswordCard = ({ authRequired, demoMode }: PasswordCardProps) => {
             >
               {feedback?.message}
             </p>
-            <Button className="w-full bg-emerald-600 text-white hover:bg-emerald-700 sm:w-auto lg:h-9 lg:px-3" type="submit" disabled={isSubmitting}>
+            <Button className="w-full sm:w-auto lg:h-9 lg:px-3" variant="solid" type="submit" disabled={isSubmitting}>
               {isSubmitting ? t("password.changing") : t("password.change")}
             </Button>
           </div>

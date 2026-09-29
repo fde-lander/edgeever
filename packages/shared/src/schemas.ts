@@ -123,6 +123,32 @@ export const ScheduledTaskFinishSchema = z.object({
   errorMessage: z.string().trim().max(2_000).nullable().optional(),
 });
 
+const httpUrl = z.string().trim().max(2000).refine((value) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}, { message: "URL must use http or https." });
+
+export const WorkspaceExtensionUpsertSchema = z.object({
+  type: z.enum(["plugin", "theme"]),
+  version: z.string().trim().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/).max(80),
+  enabled: z.boolean(),
+  installedAt: z.string().datetime(),
+  manifestUrl: httpUrl,
+  sourceKind: z.enum(["marketplace", "github", "manifest"]),
+  verified: z.boolean(),
+  repositoryUrl: httpUrl.max(500).nullable().optional(),
+  releaseTag: z.string().trim().min(1).max(80).nullable().optional(),
+  publisher: z.literal("edgeever").nullable().optional(),
+}).refine((input) => {
+  if (input.sourceKind === "github") return Boolean(input.repositoryUrl);
+  if (input.sourceKind === "marketplace") return Boolean(input.repositoryUrl || input.manifestUrl);
+  return true;
+}, { message: "GitHub and marketplace extensions require a source URL." });
+
 export const MoveMemosSchema = z.object({
   memoIds: z.array(z.string().trim().min(1)).min(1).max(100),
   notebookId: z.string().trim().min(1),
@@ -334,10 +360,6 @@ export const AiTagSuggestionsRequestSchema = z.object({
   }
 });
 
-export const AiTagSuggestionPromptUpdateSchema = z.object({
-  prompt: z.string().trim().min(1).max(4_000).nullable(),
-});
-
 export const AiPromptTemplateCreateSchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(200).optional(),
@@ -356,6 +378,67 @@ export const AiPromptTemplateUpdateSchema = z.object({
   message: "At least one field is required.",
 });
 
+export const MemoShareUpdateSchema = z.object({
+  passwordProtected: z.boolean(),
+});
+
+export const NoteBodyFontUpdateSchema = z.object({
+  bodyFont: z.enum(["wenkai", "wenkai-screen", "zhuque", "source-han-serif", "neo-zhi-song", "source-han-sans", "source-serif"]).nullable(),
+});
+
+export const PublicShareUnlockSchema = z.object({
+  password: z.string().min(1).max(64),
+});
+
+export const TableFormFieldSchema = z.object({
+  fieldId: z.string().trim().min(1).max(80),
+  required: z.boolean(),
+});
+
+export const TableFormUpdateSchema = z.object({
+  enabled: z.boolean(),
+  passwordProtected: z.boolean(),
+  rotatePassword: z.boolean().optional(),
+  title: z.string().trim().max(120),
+  description: z.string().trim().max(1000),
+  submitLabel: z.string().trim().max(40),
+  fields: z.array(TableFormFieldSchema).max(40),
+});
+
+export const PublicTableFormSubmissionSchema = z.object({
+  cells: z.record(z.string().max(80), z.unknown()),
+});
+
+export type TableFormFieldSetting = z.infer<typeof TableFormFieldSchema>;
+
+export type TableFormSettings = {
+  enabled: boolean;
+  token: string;
+  passwordProtected: boolean;
+  password?: string;
+  title: string;
+  description: string;
+  submitLabel: string;
+  fields: TableFormFieldSetting[];
+};
+
+export type PublicTableFormField = {
+  id: string;
+  name: string;
+  type: "text" | "number" | "checkbox" | "date" | "select" | "url" | "attachment";
+  required: boolean;
+  options?: string[];
+};
+
+export type PublicTableForm = {
+  passwordRequired: boolean;
+  title: string;
+  description: string;
+  submitLabel: string;
+  full: boolean;
+  fields: PublicTableFormField[];
+};
+
 export type NotebookCreateInput = z.infer<typeof NotebookCreateSchema>;
 export type NotebookUpdateInput = z.infer<typeof NotebookUpdateSchema>;
 export type MemoCreateInput = z.infer<typeof MemoCreateSchema>;
@@ -367,6 +450,7 @@ export type ScheduledTaskUpdateInput = z.infer<typeof ScheduledTaskUpdateSchema>
 export type PluginScheduleUpsertInput = z.input<typeof PluginScheduleUpsertSchema>;
 export type ScheduledTaskClaimInput = z.infer<typeof ScheduledTaskClaimSchema>;
 export type ScheduledTaskFinishInput = z.infer<typeof ScheduledTaskFinishSchema>;
+export type WorkspaceExtensionUpsertInput = z.infer<typeof WorkspaceExtensionUpsertSchema>;
 export type MoveMemosInput = z.infer<typeof MoveMemosSchema>;
 export type DeleteMemosInput = z.infer<typeof DeleteMemosSchema>;
 export type MergeMemosInput = z.infer<typeof MergeMemosSchema>;
@@ -388,6 +472,9 @@ export type AiDefaultModelUpdateInput = z.infer<typeof AiDefaultModelUpdateSchem
 export type AiGenerateInput = z.input<typeof AiGenerateSchema>;
 export type AiAttachmentInput = z.infer<typeof AiAttachmentSchema>;
 export type AiTagSuggestionsRequestInput = z.infer<typeof AiTagSuggestionsRequestSchema>;
-export type AiTagSuggestionPromptUpdateInput = z.infer<typeof AiTagSuggestionPromptUpdateSchema>;
 export type AiPromptTemplateCreateInput = z.input<typeof AiPromptTemplateCreateSchema>;
 export type AiPromptTemplateUpdateInput = z.infer<typeof AiPromptTemplateUpdateSchema>;
+export type MemoShareUpdateInput = z.infer<typeof MemoShareUpdateSchema>;
+export type PublicShareUnlockInput = z.infer<typeof PublicShareUnlockSchema>;
+export type TableFormUpdateInput = z.infer<typeof TableFormUpdateSchema>;
+export type PublicTableFormSubmissionInput = z.infer<typeof PublicTableFormSubmissionSchema>;

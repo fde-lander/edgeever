@@ -10,6 +10,13 @@ import { docToMarkdown, docToText, type MemoDetail } from "@edgeever/shared";
 import type { EdgeEverRepository } from "@/lib/repository";
 import { api, getConfiguredDesktopApiBaseUrl } from "@/lib/api";
 import { createStagedResourceListItem, mapMarkdownResourceUrls, mapTiptapResourceUrls, toApiResourceUrl, toDesktopResourceUrl } from "@/lib/desktop-resources";
+import {
+  applyStagedResourceUrlRewrites,
+  collectStagedResourceReferences,
+  contentReferencesStagedResourceUrl,
+  repairMemoStagedResourceUrls,
+  stagedResourceIdFromUrl,
+} from "@/lib/staged-resource-repair";
 import type { ResourceListItem, ResourceStorageSummary } from "@edgeever/shared";
 import { notifySyncQueueDeferred } from "@/lib/sync-events";
 
@@ -26,6 +33,51 @@ const toDisplayMemo = (memo: MemoDetail): MemoDetail => ({
   contentJson: mapTiptapResourceUrls(memo.contentJson, toDesktopResourceUrl),
   contentMarkdown: mapMarkdownResourceUrls(memo.contentMarkdown, toDesktopResourceUrl) ?? "",
 });
+
+const liveStagedIdsForMemo = async (memoId: string) => {
+  const staged = await listStagedResources();
+  return new Set(
+    staged
+      .filter((resource) => resource.memoId === memoId)
+      .map((resource) => stagedResourceIdFromUrl(resource.url))
+      .filter((id): id is string => Boolean(id)),
+  );
+};
+
+const resourcesForMemo = async (memoId: string) => {
+  const listed = await request("resource.list", { limit: 500 });
+  return listed.resources.filter((resource) => resource.memoId === memoId);
+};
+
+const rewriteUploadedAliases = async <T extends { contentJson?: unknown; contentMarkdown?: string | null }>(memoId: string, memo: T): Promise<T> => {
+  const aliases = await window.edgeeverDesktop?.listStagedResourceAliases?.(memoId) ?? [];
+  if (aliases.length === 0) return memo;
+  const rewrites = aliases.map((item) => ({
+    placeholder: `edgeever-staged://${item.id}`,
+    url: `/api/v1/resources/${encodeURIComponent(item.resourceId)}/blob`,
+  }));
+  return {
+    ...memo,
+    contentJson: applyStagedResourceUrlRewrites(memo.contentJson, rewrites) as T["contentJson"],
+    contentMarkdown: typeof memo.contentMarkdown === "string"
+      ? applyStagedResourceUrlRewrites(memo.contentMarkdown, rewrites) as string
+      : memo.contentMarkdown,
+  };
+};
+
+const repairDisplayedMemo = async (memo: MemoDetail): Promise<MemoDetail> => {
+  if (
+    !contentReferencesStagedResourceUrl(memo.contentJson)
+    && !contentReferencesStagedResourceUrl(memo.contentMarkdown)
+  ) {
+    return toDisplayMemo(memo);
+  }
+  const aliased = await rewriteUploadedAliases(memo.id, memo);
+  if (!contentReferencesStagedResourceUrl(aliased.contentJson)
+    && !contentReferencesStagedResourceUrl(aliased.contentMarkdown)) return toDisplayMemo(aliased);
+  const [resources, liveStagedIds] = await Promise.all([resourcesForMemo(memo.id), liveStagedIdsForMemo(memo.id)]);
+  return toDisplayMemo(repairMemoStagedResourceUrls(aliased, resources, liveStagedIds));
+};
 
 const listStagedResources = async (): Promise<ResourceListItem[]> => {
   const bridge = window.edgeeverDesktop;
@@ -60,6 +112,12 @@ const request = async <M extends DesktopRpcMethod>(method: M, params: DesktopRpc
   const bridge = window.edgeeverDesktop;
   if (!bridge?.isAvailable) throw new Error("EdgeEver desktop bridge is unavailable");
   return bridge.sidecarRequest<DesktopRpcResponses[M]>(method, params);
+};
+
+export const cancelPendingDesktopImportMemo = async (memoId: string) => {
+  const result = await request("memo.delete", { memoId, permanent: true, cancelPendingCreate: true });
+  window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
+  return result;
 };
 
 export const createDesktopRepository = (): EdgeEverRepository => ({
@@ -208,10 +266,11 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
     window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
     return result;
   }),
-  mergeMemos: (input) => request("memo.merge", input).then((result) => {
+  mergeMemos: async (input) => {
+    const result = await request("memo.merge", input);
     window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
-    return { memo: toDisplayMemo(result.memo) };
-  }),
+    return { memo: await repairDisplayedMemo(result.memo) };
+  },
 
   listMemos: (params) => {
     const rpcParams: DesktopMemoListParams = {
@@ -223,7 +282,7 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
 
   getMemo: async (memoId, includeDeleted = false) => {
     const result = await request("memo.get", { memoId, includeDeleted });
-    return { memo: toDisplayMemo(result.memo) };
+    return { memo: await repairDisplayedMemo(result.memo) };
   },
 
   createMemo: (input) => {
@@ -239,10 +298,30 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
   },
 
   updateMemo: async (memo: MemoDetail, input) => {
-    const portableContentJson = mapTiptapResourceUrls(input.contentJson, toApiResourceUrl);
-    const contentMarkdown = input.contentMarkdown === undefined
+    const needsStagedRepair = contentReferencesStagedResourceUrl(input.contentJson)
+      || contentReferencesStagedResourceUrl(input.contentMarkdown);
+    const aliasedInput = needsStagedRepair
+      ? await rewriteUploadedAliases(memo.id, { contentJson: input.contentJson, contentMarkdown: input.contentMarkdown })
+      : input;
+    const repairedInput = contentReferencesStagedResourceUrl(aliasedInput.contentJson)
+      || contentReferencesStagedResourceUrl(aliasedInput.contentMarkdown)
+      ? repairMemoStagedResourceUrls(aliasedInput, ...(await Promise.all([resourcesForMemo(memo.id), liveStagedIdsForMemo(memo.id)])))
+      : aliasedInput;
+    if (contentReferencesStagedResourceUrl(repairedInput.contentJson)
+      || contentReferencesStagedResourceUrl(repairedInput.contentMarkdown)) {
+      const live = new Set((await window.edgeeverDesktop?.listStagedResources() ?? []).map((item) => item.id));
+      const references = collectStagedResourceReferences(repairedInput);
+      if (references.length === 0 || references.some((reference) => !live.has(reference.stagedId))) {
+        throw new Error("Memo contains a missing staged resource");
+      }
+    }
+    const portableContentJson = mapTiptapResourceUrls(repairedInput.contentJson ?? input.contentJson, toApiResourceUrl);
+    const contentMarkdown = repairedInput.contentMarkdown === undefined && input.contentMarkdown === undefined
       ? docToMarkdown(portableContentJson)
-      : mapMarkdownResourceUrls(input.contentMarkdown, toApiResourceUrl);
+      : mapMarkdownResourceUrls(
+        typeof repairedInput.contentMarkdown === "string" ? repairedInput.contentMarkdown : input.contentMarkdown,
+        toApiResourceUrl,
+      );
     const rpcParams: DesktopMemoUpdateParams & { contentText: string } = {
       memoId: memo.id,
       expectedRevision: memo.revision,
@@ -250,18 +329,18 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
       title: input.title,
       contentJson: portableContentJson,
       contentMarkdown,
-      contentText: docToText(input.contentJson),
+      contentText: docToText(portableContentJson),
       tags: input.tags,
     };
     const result = await request("memo.update", rpcParams);
     notifySyncQueueDeferred();
-    return { memo: toDisplayMemo(result.memo), queued: true as const };
+    return { memo: await repairDisplayedMemo(result.memo), queued: true as const };
   },
 
   adoptCloudMemo: async (memoId) => {
     const { discardDesktopMemoConflict } = await import("@/lib/desktop-sync");
     const memo = await discardDesktopMemoConflict(memoId);
-    return { memo: toDisplayMemo(memo) };
+    return { memo: await repairDisplayedMemo(memo) };
   },
 
   deleteMemo: (memoId, permanent = false) => request("memo.delete", { memoId, permanent }).then((result) => {

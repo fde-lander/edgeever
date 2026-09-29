@@ -1,7 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { parseMarketplaceRegistry } from "@edgeever/plugin-api";
 import { sha256Hex } from "./github-plugin-distribution.ts";
 import { loadPluginMarketplace, resolveOfficialPluginMarketplace } from "./plugin-marketplace.ts";
+import { stubUnavailableGithubInstance } from "./github-plugin-test-api.mjs";
+
+let restoreGithubInstance;
+beforeAll(() => { restoreGithubInstance = stubUnavailableGithubInstance(); });
+afterAll(() => { restoreGithubInstance?.(); });
 
 describe("bundled plugin marketplace", () => {
   test("loads the registry beside the packaged desktop renderer", async () => {
@@ -38,6 +43,25 @@ describe("bundled plugin marketplace", () => {
     }
   });
 
+  test("pins the official Tasks release and all distributed assets", async () => {
+    const registry = parseMarketplaceRegistry(await Bun.file(new URL("../../../public/extensions/registry.json", import.meta.url)).json());
+    const entry = registry.entries.find((candidate) => candidate.id === "org.edgeever.tasks");
+
+    expect(entry).toMatchObject({
+      publisher: "edgeever",
+      repositoryUrl: "https://github.com/tianma-if/edgeever-tasks",
+      distribution: { type: "github", repositoryUrl: "https://github.com/tianma-if/edgeever-tasks" },
+      verification: {
+        version: "0.6.4",
+        checksums: {
+          manifestJson: "c9da5505296f94d53db44a7301a5dfddd4081b12774f42199b0c5f96271e47cb",
+          mainJs: "c668ebd87e807e864d01dc879f3486b8c2d90b0fa4a004e7e9935d41360a74c3",
+          stylesCss: "1c307ac17bd4680c534007adaee1d2f3a4b1d6f36ee8585c291d65ebf94b9b03",
+        },
+      },
+    });
+  });
+
   test("pins the official AI RSS release and all distributed assets", async () => {
     const registry = parseMarketplaceRegistry(await Bun.file(new URL("../../../public/extensions/registry.json", import.meta.url)).json());
     const entry = registry.entries.find((candidate) => candidate.id === "org.edgeever.plugins.ai-rss");
@@ -47,10 +71,10 @@ describe("bundled plugin marketplace", () => {
       repositoryUrl: "https://github.com/tianma-if/edgeever-ai-rss",
       distribution: { type: "github", repositoryUrl: "https://github.com/tianma-if/edgeever-ai-rss" },
       verification: {
-        version: "0.5.3",
+        version: "0.5.9",
         checksums: {
-          manifestJson: "b164bf6ab199f0ef4282319dd87294a876ef3e7701962bae35a7b65c4e3c1156",
-          mainJs: "7828d256ad758f85bd736742a72cac62ba46db6a2108c3a974bf9f429fcc3be4",
+          manifestJson: "1cb1f4eb347cf9f566d5f888ecacda349ef112c80d03d4d848d2f19df079d6b2",
+          mainJs: "208153aac4648943e94370a664abbd83a284bdeb96c3cefade85d26cfe64a7f8",
           stylesCss: "05cd135a1fe70c3f38d34850a2e9abf6b0c0530b09477960036f567375b2082e",
         },
       },
@@ -80,6 +104,11 @@ describe("bundled plugin marketplace", () => {
       version: "0.5.3",
       apiVersion: "2",
       settingsUi: "host",
+      description: "Live release description",
+      locales: {
+        "zh-CN": { description: "实时发行版中文说明" },
+        ja: { description: "ライブリリースの日本語説明" },
+      },
       entry: "./main.js",
       permissions: ["ui:notices"],
     };
@@ -118,6 +147,13 @@ describe("bundled plugin marketplace", () => {
         mainJs: await sha256Hex(assets["main.js"]),
       },
     });
+    expect(resolved.entries[0]).toMatchObject({
+      description: "Live release description",
+      locales: {
+        "zh-CN": { description: "实时发行版中文说明" },
+        ja: { description: "ライブリリースの日本語説明" },
+      },
+    });
   });
 
   test("does not download official plugin packages when the live version already matches", async () => {
@@ -148,6 +184,8 @@ describe("bundled plugin marketplace", () => {
           version: "0.5.5",
           apiVersion: "2",
           settingsUi: "host",
+          description: "Live release description",
+          locales: { ja: { description: "ライブリリースの日本語説明" } },
           entry: "./main.js",
           permissions: ["ui:notices"],
         }));
@@ -161,6 +199,10 @@ describe("bundled plugin marketplace", () => {
 
     expect(resolved.resolutionErrors).toEqual({});
     expect(resolved.entries[0].verification).toEqual({ version: "0.5.5", checksums });
+    expect(resolved.entries[0]).toMatchObject({
+      description: "Live release description",
+      locales: { ja: { description: "ライブリリースの日本語説明" } },
+    });
     expect(calls).toHaveLength(1);
   });
 

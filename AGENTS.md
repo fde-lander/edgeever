@@ -6,7 +6,7 @@
 
 - **技术栈与背景**：优先参考 `README.md`。
 - **移动端平台边界**：Android 客户端位于 `apps/mobile`，使用 Expo / React Native 实现；iOS 客户端位于 `apps/ios`，使用 Swift / SwiftUI 原生实现。
-- **双语同步**：修改中文文档时必须同步更新对应的英文文档。
+- **双语同步**：修改中文文档时必须同步更新对应的英文文档。修改根目录 README 时必须同步 `README.md`、`README.zh-CN.md`、`README.zh-TW.md`、`README.ja.md`。
 - **分支规范**：严禁创建新分支，所有修改与提交必须直接在 `main` 分支上完成。
 
 ## 变更风险评估
@@ -34,8 +34,6 @@
 11. **Release 说明结构**：使用中英文双语格式（正文禁止包含字面量 `\n`），只写用户可感知的变化、影响以及必要的升级或迁移提醒。类型检查、构建命令、签名、公证、资产复用等技术验证细节保留在 Actions 和关联 Issue 中，不写入公开 Release 正文。功能/修复关联对应 Issue 并标记 Label，发布后回链并关闭 Issue。正文结构：
 
 ```md
-## 🇨🇳 中文说明 / Chinese Changelog
-
 ## 主要更新
 
 - 面向用户说明本次变化及影响。

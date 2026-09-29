@@ -76,8 +76,11 @@ const isGithubUnreachableError = (error: unknown) => {
 const isGithubRateLimitedStatus = (status: number) => status === 403 || status === 429;
 
 const isMissingGithubAssetError = (error: unknown) => {
+  if (error instanceof ApiRequestError && error.status === 404) return true;
   const message = error instanceof Error ? error.message : String(error);
-  return /HTTP 404/i.test(message);
+  return /HTTP 404/i.test(message)
+    || /GitHub release was not found/i.test(message)
+    || /GitHub Release .+ (was not found|is missing )/i.test(message);
 };
 
 const fetchGithubMetadataThroughInstance = async (url: string): Promise<Response> => {
@@ -165,7 +168,13 @@ const namedReleaseAsset = (name: string): GithubReleaseAsset => ({
   browser_download_url: "",
 });
 
+const isGithubApiQuotaError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return /HTTP (401|403|429)/.test(message) || message.includes(GITHUB_UNREACHABLE_MESSAGE);
+};
+
 const findRelease = async (request: typeof fetch, coordinates: GithubRepositoryCoordinates, version: string) => {
+  let quotaStatus: number | null = null;
   for (const tag of [version, `v${version}`]) {
     const response = await readGithubApi(
       request,
@@ -173,11 +182,16 @@ const findRelease = async (request: typeof fetch, coordinates: GithubRepositoryC
       { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": GITHUB_API_VERSION },
     );
     if (response.status === 404) continue;
+    if (isGithubRateLimitedStatus(response.status) || response.status === 401) {
+      quotaStatus = response.status;
+      continue;
+    }
     if (!response.ok) throw new Error(`GitHub release request failed with HTTP ${response.status}.`);
     const release = await response.json() as GithubReleaseResponse;
     if (release.draft) throw new Error("GitHub draft releases cannot be installed.");
     return release;
   }
+  if (quotaStatus) throw new Error(`GitHub release request failed with HTTP ${quotaStatus}.`);
   throw new Error(`GitHub Release ${version} or v${version} was not found.`);
 };
 
@@ -379,7 +393,22 @@ export const downloadGithubExtension = async (
   }
 
   assertBundledEntry(repositoryManifest);
-  const release = await findRelease(request, coordinates, repositoryManifest.version);
+  const downloadFromPinnedRelease = async () => {
+    const pinned = await downloadPinnedGithubExtension(input, repositoryManifest.version, {
+      downloadAssetBytes,
+      requireStyles: false,
+    });
+    assertReleaseManifest(repositoryManifest, pinned.manifest);
+    return pinned;
+  };
+
+  let release: GithubReleaseResponse;
+  try {
+    release = await findRelease(request, coordinates, repositoryManifest.version);
+  } catch (error) {
+    if (!isGithubApiQuotaError(error)) throw error;
+    return downloadFromPinnedRelease();
+  }
   const manifestAsset = requireAsset(release, "manifest.json");
   const mainAsset = requireAsset(release, "main.js");
   const stylesAsset = release.assets.find((asset) => asset.name === "styles.css") ?? null;

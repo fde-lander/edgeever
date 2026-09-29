@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { BookOpen, CalendarClock, Download, ExternalLink, History, PanelRightOpen, Play, Puzzle, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { BookOpen, CalendarClock, Download, ExternalLink, History, Play, Puzzle, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,18 +7,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import type { EdgeEverPluginHost, InstalledExtension, RegisteredPluginCommand, RegisteredPluginPanel } from "@/lib/plugins/plugin-host";
+import type { EdgeEverPluginHost, InstalledExtension, RegisteredPluginCommand } from "@/lib/plugins/plugin-host";
 import { PluginCatalogCard } from "@/components/plugins/PluginCatalogCard";
-import { PluginPanelDialog } from "@/components/plugins/PluginPanelDialog";
 import { loadResolvedPluginMarketplace } from "@/lib/plugins/plugin-marketplace";
 import { GitHubMark } from "@/components/GitHubRepositoryLink";
 import { applyPluginUpdate, checkPluginUpdates, type PluginUpdateInfo } from "@/lib/plugins/plugin-updates";
 import { PluginUpdateDialog } from "@/components/plugins/PluginUpdateDialog";
 import { PluginSettingsSection } from "@/components/plugins/PluginSettingsSection";
-import { buildPluginCatalogItems, getPluginCatalogSourceKey } from "@/lib/plugins/plugin-catalog";
-import { getPluginDetailPage, getPluginDetailPath, hasPluginSettings, type PluginDetailPage } from "@/lib/plugins/plugin-navigation";
+import { buildPluginCatalogItems, getPluginCatalogDescription, getPluginCatalogName, getPluginCatalogSourceKey } from "@/lib/plugins/plugin-catalog";
+import type { MarketplaceEntry } from "@edgeever/plugin-api";
+import { getPluginDetailPage, getPluginDetailPath, hasPluginSettings, isPluginCardCommand, type PluginDetailPage } from "@/lib/plugins/plugin-navigation";
 import type { ScheduledTask } from "@edgeever/shared";
 import { api, getOrCreateClientDeviceId } from "@/lib/api";
+import { BETA_BADGE_CLASSNAME } from "@/lib/workspace-ui";
 import { ScheduledTaskRunHistoryDialog } from "@/components/execution/ScheduledTaskRunHistoryDialog";
 import { AppConfirmDialog } from "@/components/dialogs/ConfirmDialogs";
 import {
@@ -28,7 +29,6 @@ import {
   shouldRequestPluginTrustAcknowledgement,
 } from "@/lib/plugins/plugin-trust";
 
-const permissionLabel = (permission: string) => permission.replace(":", " · ");
 const PLUGIN_CARD_GRID_CLASS_NAME = "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3";
 
 const LegacyManualScheduledTasksSection = () => {
@@ -88,11 +88,11 @@ const LegacyManualScheduledTasksSection = () => {
           <div key={task.id} className="flex flex-wrap items-center gap-3 rounded-md border border-slate-200 bg-card px-3 py-2">
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-semibold text-slate-800">{task.name}</div>
-              <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">
+              <div className="mt-0.5 truncate font-mono text-xs text-slate-400">
                 {task.cronExpression} · {task.timezone} · {task.taskPayload.pluginId}:{task.taskPayload.commandId}
               </div>
               {task.lastRun ? (
-                <div className={`mt-1 text-[10px] ${task.lastRun.status === "failed" ? "text-rose-600" : "text-slate-400"}`}>
+                <div className={`mt-1 text-xs ${task.lastRun.status === "failed" ? "text-rose-600" : "text-slate-400"}`}>
                   {t(`plugins.schedules.status.${task.lastRun.status}`)} · {new Date(task.lastRun.startedAt).toLocaleString()}
                 </div>
               ) : null}
@@ -139,11 +139,10 @@ const PluginDetailView = ({
   page,
   commands,
   extension,
+  marketplaceEntry,
   host,
-  panels,
   pendingId,
   update,
-  onOpenPanel,
   onRunCommand,
   onToggle,
   onUninstall,
@@ -152,11 +151,10 @@ const PluginDetailView = ({
   page: PluginDetailPage;
   commands: RegisteredPluginCommand[];
   extension: InstalledExtension;
+  marketplaceEntry?: MarketplaceEntry;
   host: EdgeEverPluginHost;
-  panels: RegisteredPluginPanel[];
   pendingId: string | null;
   update?: PluginUpdateInfo;
-  onOpenPanel: (panel: RegisteredPluginPanel) => void;
   onRunCommand: (command: RegisteredPluginCommand) => void;
   onToggle: (enabled: boolean) => void;
   onUninstall: () => void;
@@ -165,6 +163,10 @@ const PluginDetailView = ({
   const { t, i18n } = useTranslation();
   const { manifest } = extension;
   const id = manifest.id;
+  const catalogItem = { id, extension, marketplaceEntry };
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const name = getPluginCatalogName(catalogItem, locale);
+  const description = getPluginCatalogDescription(catalogItem, locale);
   const sourceKey = extension.source.verified ? "verified" : extension.source.kind;
 
   return (
@@ -172,18 +174,18 @@ const PluginDetailView = ({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-semibold text-slate-950">{manifest.name}</h2>
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">{manifest.type}</span>
+            <h2 className="text-sm font-semibold text-slate-950">{name}</h2>
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{manifest.type}</span>
             {update ? (
-              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-800">
                 {t("plugins.updates.available", { version: update.latestVersion })}
               </span>
             ) : null}
           </div>
-          {manifest.description ? <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{manifest.description}</p> : null}
+          {description ? <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">{description}</p> : null}
         </div>
         <Switch
-          aria-label={t("plugins.toggle", { name: manifest.name })}
+          aria-label={t("plugins.toggle", { name })}
           checked={extension.enabled}
           disabled={pendingId === id}
           onCheckedChange={onToggle}
@@ -223,22 +225,11 @@ const PluginDetailView = ({
           </dl>
 
           {extension.source.repositoryUrl ? (
-            <a className="inline-flex w-fit max-w-full items-center gap-2 text-sm text-slate-500 hover:text-emerald-700" href={extension.source.repositoryUrl} target="_blank" rel="noreferrer">
+            <a className="inline-flex w-fit max-w-full items-center gap-2 text-xs text-slate-500 hover:text-slate-950" href={extension.source.repositoryUrl} target="_blank" rel="noreferrer">
               <GitHubMark className="h-4 w-4 shrink-0" />
               <span className="truncate">{extension.source.repositoryUrl.replace("https://github.com/", "")}</span>
               <ExternalLink className="h-3.5 w-3.5 shrink-0" />
             </a>
-          ) : null}
-
-          {manifest.type === "plugin" && manifest.permissions.length > 0 ? (
-            <section>
-              <h3 className="text-xs font-semibold text-slate-700">{t("plugins.details.permissions")}</h3>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {manifest.permissions.map((permission) => (
-                  <span key={permission} className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">{permission === "network:public" ? t("plugins.permissions.publicNetwork") : permissionLabel(permission)}</span>
-                ))}
-              </div>
-            </section>
           ) : null}
 
           {manifest.type === "plugin" && manifest.networkHosts?.length ? (
@@ -252,7 +243,7 @@ const PluginDetailView = ({
             </section>
           ) : null}
 
-          {extension.error ? <div className="text-sm text-rose-600">{extension.error}</div> : null}
+          {extension.error ? <div className="text-xs leading-5 text-rose-600">{extension.error}</div> : null}
 
           <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
             {update ? (
@@ -261,16 +252,10 @@ const PluginDetailView = ({
                 {t("plugins.updates.update")}
               </Button>
             ) : null}
-            {commands.map((command) => (
+            {commands.filter(isPluginCardCommand).map((command) => (
               <Button key={command.id} size="sm" variant="outline" className="gap-1.5" disabled={pendingId === `${id}:${command.id}`} onClick={() => onRunCommand(command)}>
                 <Play className="h-3.5 w-3.5" />
                 {command.title}
-              </Button>
-            ))}
-            {panels.map((panel) => (
-              <Button key={panel.id} size="sm" variant="outline" className="gap-1.5" onClick={() => onOpenPanel(panel)}>
-                <PanelRightOpen className="h-3.5 w-3.5" />
-                {panel.title}
               </Button>
             ))}
             <Button size="sm" variant="ghost" className="ml-auto gap-1.5 text-rose-600 hover:bg-rose-50 hover:text-rose-700" disabled={pendingId === `remove:${id}`} onClick={onUninstall}>
@@ -309,7 +294,6 @@ export const PluginManagerCard = ({
   const [manuallyChecking, setManuallyChecking] = useState(false);
   const [lastManualCheckCount, setLastManualCheckCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activePanel, setActivePanel] = useState<RegisteredPluginPanel | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<PluginUpdateInfo | null>(null);
   const [pendingTrustPluginId, setPendingTrustPluginId] = useState<string | null>(null);
   const marketplaceQuery = useQuery({ queryKey: ["plugin-marketplace", "v1"], queryFn: () => loadResolvedPluginMarketplace(), staleTime: 5 * 60_000 });
@@ -330,15 +314,6 @@ export const PluginManagerCard = ({
   const selectedExtension = selectedPluginId
     ? snapshot.extensions.find((extension) => extension.manifest.id === selectedPluginId)
     : undefined;
-  const activePanelPluginId = activePanel?.pluginId ?? null;
-  const activePanelId = activePanel?.id ?? null;
-  const activePanelRegistered = Boolean(activePanelPluginId && activePanelId && snapshot.panels.some(
-    (panel) => panel.pluginId === activePanelPluginId && panel.id === activePanelId
-  ));
-
-  useEffect(() => {
-    if (activePanelId && activePanelPluginId && !activePanelRegistered) setActivePanel(null);
-  }, [activePanelId, activePanelPluginId, activePanelRegistered]);
 
   const install = async () => {
     if (!manifestUrl.trim()) return;
@@ -423,14 +398,12 @@ export const PluginManagerCard = ({
     <Card className="w-full min-w-0 shadow-none">
       <CardHeader className="p-4 sm:p-5">
         <div className="flex items-center justify-between gap-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Puzzle className="h-4 w-4 text-emerald-700" />
+          <CardTitle className="flex min-w-0 items-center gap-2 text-sm">
+            <Puzzle className="h-4 w-4 shrink-0 text-slate-900" />
             {selectedPluginId ? t("plugins.details.title") : t("plugins.title")}
-            <span className="inline-flex items-center rounded-full border border-emerald-200/80 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-700   ">
-              Beta
-            </span>
+            <span className={BETA_BADGE_CLASSNAME}>Beta</span>
           </CardTitle>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             {snapshot.extensions.length > 0 || (marketplaceQuery.data?.entries.length ?? 0) > 0 ? (
               <Button
                 variant="ghost"
@@ -449,7 +422,7 @@ export const PluginManagerCard = ({
                       : t("plugins.updates.found", { count: lastManualCheckCount })}
                 </span>
                 {lastManualCheckCount === null && (updateQuery.data?.updates.length ?? 0) > 0 ? (
-                  <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                  <span className="rounded-full bg-slate-200 px-1.5 py-0.5 text-xs font-semibold text-slate-800">
                     {updateQuery.data?.updates.length}
                   </span>
                 ) : null}
@@ -459,11 +432,14 @@ export const PluginManagerCard = ({
               <a href={developerDocsUrl} target="_blank" rel="noreferrer" aria-label={t("plugins.developerDocs")}>
                 <BookOpen className="h-4 w-4" />
                 <span className="hidden sm:inline">{t("plugins.developerDocs")}</span>
-                <ExternalLink className="hidden h-3.5 w-3.5 sm:block" />
+                <ExternalLink className="hidden h-3.5 w-3.5 sm:inline" />
               </a>
             </Button>
           </div>
         </div>
+        {selectedPluginId ? null : (
+          <p className="text-xs leading-5 text-slate-500">{t("plugins.syncDescription")}</p>
+        )}
       </CardHeader>
       <CardContent className="grid gap-4 p-4 pt-0 sm:px-5 sm:pb-5">
         {error ? <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">{error}</div> : null}
@@ -486,10 +462,10 @@ export const PluginManagerCard = ({
             <PluginDetailView
               page={getPluginDetailPage(selectedExtension.manifest, requestedPage)}
               extension={selectedExtension}
+              marketplaceEntry={catalogItems.find((item) => item.id === selectedExtension.manifest.id)?.marketplaceEntry}
               host={host}
               update={updateQuery.data?.updates.find((update) => update.pluginId === selectedExtension.manifest.id)}
               commands={snapshot.commands.filter((command) => command.pluginId === selectedExtension.manifest.id)}
-              panels={snapshot.panels.filter((panel) => panel.pluginId === selectedExtension.manifest.id)}
               pendingId={pendingId}
               onToggle={(enabled) => toggleExtension(selectedExtension, enabled)}
               onUpdate={() => {
@@ -500,14 +476,13 @@ export const PluginManagerCard = ({
                 `${selectedExtension.manifest.id}:${command.id}`,
                 () => host.runCommand(selectedExtension.manifest.id, command.id),
               )}
-              onOpenPanel={setActivePanel}
               onUninstall={() => void run(`remove:${selectedExtension.manifest.id}`, async () => {
                 await host.uninstall(selectedExtension.manifest.id);
                 onClosePlugin?.();
               })}
             />
           ) : (
-            <div className="rounded-lg border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">
+            <div className="rounded-lg border border-dashed border-slate-200 p-8 text-center text-xs leading-5 text-slate-500">
               {t("plugins.details.notFound")}
             </div>
           )
@@ -519,6 +494,7 @@ export const PluginManagerCard = ({
             value={manifestUrl}
             onChange={(event) => setManifestUrl(event.target.value)}
             placeholder={t("plugins.sourcePlaceholder")}
+            className="focus-visible:border-slate-400 focus-visible:ring-slate-400/25"
           />
           <Button className="gap-1.5 sm:shrink-0" disabled={installing || !manifestUrl.trim()} onClick={() => void install()}>
             <Download className="h-4 w-4" />
@@ -538,7 +514,6 @@ export const PluginManagerCard = ({
                 item={item}
                 update={updateQuery.data?.updates.find((update) => update.pluginId === item.id)}
                 commands={snapshot.commands.filter((command) => command.pluginId === item.id)}
-                panels={snapshot.panels.filter((panel) => panel.pluginId === item.id)}
                 pendingId={pendingId}
                 onOpenPlugin={onOpenPlugin}
                 onToggle={(enabled) => {
@@ -559,7 +534,6 @@ export const PluginManagerCard = ({
                   `${item.id}:${command.id}`,
                   () => host.runCommand(item.id, command.id),
                 )}
-                onOpenPanel={setActivePanel}
                 onUninstall={() => void run(`remove:${item.id}`, () => host.uninstall(item.id))}
               />
             ))}
@@ -568,7 +542,6 @@ export const PluginManagerCard = ({
           </>
         )}
 
-        <PluginPanelDialog host={host} panel={activePanel} onClose={() => setActivePanel(null)} />
         {pendingUpdate ? (
           <PluginUpdateDialog
             update={pendingUpdate}

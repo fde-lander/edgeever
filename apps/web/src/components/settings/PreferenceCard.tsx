@@ -1,7 +1,7 @@
-import { AlignHorizontalJustifyCenter, ChartNoAxesCombined, FileCode2, Image, Keyboard, Languages, MousePointerClick, Palette, Sparkles, SunMoon } from "lucide-react";
-import { useState, useEffect } from "react";
+import { AlignHorizontalJustifyCenter, AppWindow, BookOpenText, ChartNoAxesCombined, Image, Keyboard, Languages, MousePointerClick, Palette, Sparkles, SunMoon } from "lucide-react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import type { EditorContentAlignment, ShortcutSettings } from "@/lib/app-helpers";
+import type { EditorContentAlignment } from "@/lib/app-helpers";
 import {
   EDITOR_LINK_OPEN_MODE_CHANGED_EVENT,
   getStoredEditorLinkOpenMode,
@@ -19,15 +19,8 @@ import {
   writeAiSpaceShortcutPreference,
 } from "@/lib/ai-space-shortcut-preference";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  SETTINGS_CARD_HEADER_CLASSNAME,
-  SETTINGS_CARD_ICON_CLASSNAME,
-  SETTINGS_CARD_TITLE_CLASSNAME,
-  SETTINGS_ITEM_DESCRIPTION_CLASSNAME,
-  SETTINGS_ITEM_ICON_CLASSNAME,
-  SETTINGS_ITEM_TITLE_CLASSNAME,
-} from "./settings-ui";
+import { Input } from "@/components/ui/input";
+import { SETTINGS_ITEM_TITLE_CLASSNAME } from "./settings-ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -37,26 +30,157 @@ import {
   supportedLocales,
   type AppLocalePreference,
 } from "@/i18n";
-import { ShortcutSettingsItem } from "./ShortcutSettingsItem";
-import { CustomEditorThemeDialog } from "./CustomEditorThemeDialog";
 import {
-  MARKDOWN_THEME_PREFERENCES,
+  applyEditorBodyFontPreference,
+  getFontChoicePreviewStack,
+  readEditorBodyFontPreference,
+  writeEditorBodyFontPreference,
+  type EditorBodyFontChoice,
+  type EditorBodyFontPreference,
+} from "@/lib/editor-body-font";
+import { applyUiFontPreference, readUiFontPreference, writeUiFontPreference } from "@/lib/ui-font";
+import { syncPublishedNoteBodyFont } from "@/lib/published-note-body-font";
+import { CustomEditorThemeDialog } from "./CustomEditorThemeDialog";
+
+const PreferenceSection = ({ title, children }: { title: string; children: ReactNode }) => (
+  <section className="grid gap-2">
+    <h2 className="px-1 text-xs font-normal leading-5 text-slate-500">{title}</h2>
+    <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-card">
+      {children}
+    </div>
+  </section>
+);
+import {
   MERMAID_THEME_PREFERENCES,
   useAppearanceTheme,
   useEditorTheme,
-  useMarkdownTheme,
   useMermaidTheme,
   DEFAULT_CUSTOM_LIGHT_COLORS,
   DEFAULT_CUSTOM_DARK_COLORS,
+  localizeStoredCustomThemeName,
   type CustomEditorTheme,
   type ThemePreference,
 } from "../ThemeProvider";
 
+const CUSTOM_FONT_SUGGESTIONS = [
+  { label: "苹方 (PingFang SC)", family: "PingFang SC" },
+  { label: "微软雅黑 (Microsoft YaHei)", family: "Microsoft YaHei" },
+  { label: "鸿蒙黑体 (HarmonyOS)", family: "HarmonyOS Sans SC" },
+  { label: "冬青黑体 (Hiragino)", family: "Hiragino Sans GB" },
+] as const;
+
+const FontChoiceFields = ({
+  label,
+  preference,
+  onChange,
+}: {
+  label: string;
+  preference: EditorBodyFontPreference;
+  onChange: (preference: EditorBodyFontPreference) => void;
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full shrink-0 flex-col gap-2 sm:w-80">
+      <Select
+        value={preference.choice}
+        onValueChange={(value) => onChange({ choice: value as EditorBodyFontChoice, customFamily: preference.customFamily })}
+      >
+        <SelectTrigger aria-label={label} className="h-9 bg-card">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="system">{t("settings.editorBodyFonts.system")}</SelectItem>
+          <SelectItem
+            value="wenkai"
+            style={{ fontFamily: getFontChoicePreviewStack("wenkai") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("wenkai") }}>
+              {t("settings.editorBodyFonts.wenkai")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="wenkai-screen"
+            style={{ fontFamily: getFontChoicePreviewStack("wenkai-screen") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("wenkai-screen") }}>
+              {t("settings.editorBodyFonts.wenkaiScreen")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="zhuque"
+            style={{ fontFamily: getFontChoicePreviewStack("zhuque") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("zhuque") }}>
+              {t("settings.editorBodyFonts.zhuque")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="source-han-serif"
+            style={{ fontFamily: getFontChoicePreviewStack("source-han-serif") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("source-han-serif") }}>
+              {t("settings.editorBodyFonts.sourceHanSerif")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="neo-zhi-song"
+            style={{ fontFamily: getFontChoicePreviewStack("neo-zhi-song") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("neo-zhi-song") }}>
+              {t("settings.editorBodyFonts.neoZhiSong")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="source-han-sans"
+            style={{ fontFamily: getFontChoicePreviewStack("source-han-sans") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("source-han-sans") }}>
+              {t("settings.editorBodyFonts.sourceHanSans")}
+            </span>
+          </SelectItem>
+          <SelectItem
+            value="source-serif"
+            style={{ fontFamily: getFontChoicePreviewStack("source-serif") }}
+          >
+            <span style={{ fontFamily: getFontChoicePreviewStack("source-serif") }}>
+              {t("settings.editorBodyFonts.sourceSerif")}
+            </span>
+          </SelectItem>
+          <SelectItem value="custom">{t("settings.editorBodyFonts.custom")}</SelectItem>
+        </SelectContent>
+      </Select>
+      {preference.choice === "custom" ? (
+        <div className="flex flex-col gap-1.5">
+          <Input
+            value={preference.customFamily}
+            aria-label={t("settings.editorBodyFontCustomLabel")}
+            placeholder={t("settings.editorBodyFontCustomPlaceholder")}
+            className="h-9"
+            maxLength={200}
+            onChange={(event) => onChange({ choice: "custom", customFamily: event.target.value })}
+          />
+          <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
+            <span className="shrink-0 text-slate-400">{t("settings.editorBodyFontSuggestions")}:</span>
+            {CUSTOM_FONT_SUGGESTIONS.map((item) => (
+              <button
+                key={item.family}
+                type="button"
+                className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900"
+                onClick={() => onChange({ choice: "custom", customFamily: item.family })}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 interface PreferenceCardProps {
   imageCompressionEnabled: boolean;
   onImageCompressionChange: (enabled: boolean) => void;
-  shortcutSettings: ShortcutSettings;
-  onShortcutSettingsChange: (settings: ShortcutSettings) => void;
   editorContentAlignment: EditorContentAlignment;
   onEditorContentAlignmentChange: (alignment: EditorContentAlignment) => void;
 }
@@ -64,8 +188,6 @@ interface PreferenceCardProps {
 export const PreferenceCard = ({
   imageCompressionEnabled,
   onImageCompressionChange,
-  shortcutSettings,
-  onShortcutSettingsChange,
   editorContentAlignment,
   onEditorContentAlignmentChange,
 }: PreferenceCardProps) => {
@@ -78,7 +200,6 @@ export const PreferenceCard = ({
   } = useEditorTheme();
   const { preference: appearancePreference, setPreference: setAppearancePreference } = useAppearanceTheme();
   const { mermaidThemePreference, setMermaidTheme } = useMermaidTheme();
-  const { markdownThemePreference, setMarkdownTheme } = useMarkdownTheme();
   const [customThemeDialogOpen, setCustomThemeDialogOpen] = useState(false);
   const [editingTheme, setEditingTheme] = useState<CustomEditorTheme | null>(null);
   const [activeLocalePreference, setActiveLocalePreference] = useState<AppLocalePreference>(() => getAppLocalePreference());
@@ -86,6 +207,8 @@ export const PreferenceCard = ({
   const [linkOpenMode, setLinkOpenMode] = useState<EditorLinkOpenMode>(() => getStoredEditorLinkOpenMode());
   const [aiSelectionMenuEnabled, setAiSelectionMenuEnabled] = useState(readAiSelectionMenuPreference);
   const [aiSpaceShortcutEnabled, setAiSpaceShortcutEnabled] = useState(readAiSpaceShortcutPreference);
+  const [editorBodyFont, setEditorBodyFont] = useState(readEditorBodyFontPreference);
+  const [uiFont, setUiFont] = useState(readUiFontPreference);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 640px)");
@@ -150,15 +273,20 @@ export const PreferenceCard = ({
   }, []);
 
   const activeCustom = customEditorThemes.find((t) => t.id === editorTheme);
-  const isPreset = editorTheme === "default" || editorTheme === "minimal-emerald" || editorTheme === "outline-emerald" || editorTheme === "wechat-green" || editorTheme === "modern-mint" || editorTheme === "marxico";
+  const customThemeLabel = (name: string) =>
+    localizeStoredCustomThemeName(name, {
+      defaultName: t("settings.customEditorTheme.defaultName"),
+      newName: (index) => t("settings.customEditorTheme.newName", { n: index }),
+    });
 
   const handleEditClick = () => {
-    if (activeCustom) {
-      setEditingTheme(activeCustom);
+    const target = activeCustom ?? customEditorThemes[0];
+    if (target) {
+      setEditingTheme({ ...target, name: customThemeLabel(target.name) });
     } else {
       const newTheme: CustomEditorTheme = {
         id: `custom-${Date.now()}`,
-        name: `New theme ${customEditorThemes.length + 1}`,
+        name: t("settings.customEditorTheme.newName", { n: customEditorThemes.length + 1 }),
         light: DEFAULT_CUSTOM_LIGHT_COLORS,
         dark: DEFAULT_CUSTOM_DARK_COLORS,
       };
@@ -192,21 +320,27 @@ export const PreferenceCard = ({
     void changeAppLocalePreference(preference);
   };
 
+  const updateEditorBodyFont = (preference: EditorBodyFontPreference) => {
+    setEditorBodyFont(preference);
+    writeEditorBodyFontPreference(preference);
+    applyEditorBodyFontPreference(preference);
+    void syncPublishedNoteBodyFont();
+  };
+
+  const updateUiFont = (preference: EditorBodyFontPreference) => {
+    setUiFont(preference);
+    writeUiFontPreference(preference);
+    applyUiFontPreference(preference);
+  };
+
   return (
-    <Card className="w-full min-w-0 overflow-hidden shadow-none">
-      <CardHeader className={SETTINGS_CARD_HEADER_CLASSNAME}>
-        <CardTitle className={SETTINGS_CARD_TITLE_CLASSNAME}>
-          <Image className={SETTINGS_CARD_ICON_CLASSNAME} />
-          {t("settings.preferences")}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="divide-y divide-slate-100 p-0">
+    <div className="grid gap-6">
+      <PreferenceSection title={t("settings.groups.interface")}>
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Languages className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <Languages className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.languageTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.languageDescription")}</div>
             </div>
           </div>
           <div className="w-full shrink-0 sm:w-80">
@@ -230,11 +364,10 @@ export const PreferenceCard = ({
         </div>
 
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <SunMoon className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <SunMoon className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.themeTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.themeDescription")}</div>
             </div>
           </div>
           <div className="w-full shrink-0 sm:w-80">
@@ -254,15 +387,30 @@ export const PreferenceCard = ({
           </div>
         </div>
 
-        <div className="hidden min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 lg:flex">
-          <div className="flex min-w-0 items-start gap-3">
-            <AlignHorizontalJustifyCenter className={SETTINGS_ITEM_ICON_CLASSNAME} />
+        <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <AppWindow className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
-              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.editorContentAlignmentTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.editorContentAlignmentDescription")}</div>
+              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.uiFontTitle")}</div>
             </div>
           </div>
-          <div className="w-full shrink-0 sm:w-44">
+          <FontChoiceFields
+            label={t("settings.uiFontTitle")}
+            preference={uiFont}
+            onChange={updateUiFont}
+          />
+        </div>
+      </PreferenceSection>
+
+      <PreferenceSection title={t("settings.groups.reading")}>
+        <div className="hidden min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 lg:flex">
+          <div className="flex min-w-0 items-center gap-3">
+            <AlignHorizontalJustifyCenter className="h-4 w-4 shrink-0 text-slate-500" />
+            <div className="min-w-0">
+              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.editorContentAlignmentTitle")}</div>
+            </div>
+          </div>
+          <div className="w-full shrink-0 sm:w-80">
             <Select
               value={editorContentAlignment}
               onValueChange={(value) => onEditorContentAlignmentChange(value as EditorContentAlignment)}
@@ -279,95 +427,42 @@ export const PreferenceCard = ({
         </div>
 
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Palette className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <BookOpenText className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
-              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.editorThemeTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.editorThemeDescription")}</div>
+              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.editorBodyFontTitle")}</div>
             </div>
           </div>
-          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-80 sm:flex-row">
-            <Select
-              value={isMobile && !isPreset ? "default" : editorTheme}
-              onValueChange={(value) => {
-                if (value === "create-new") {
-                  const newTheme: CustomEditorTheme = {
-                    id: `custom-${Date.now()}`,
-                    name: `New theme ${customEditorThemes.length + 1}`,
-                    light: DEFAULT_CUSTOM_LIGHT_COLORS,
-                    dark: DEFAULT_CUSTOM_DARK_COLORS,
-                  };
-                  setEditingTheme(newTheme);
-                  setCustomThemeDialogOpen(true);
-                } else {
-                  setEditorTheme(value);
-                }
-              }}
-            >
-              <SelectTrigger aria-label={t("settings.editorThemeTitle")} className="h-9 w-full min-w-0 flex-1 bg-card">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">{t("settings.editorThemes.default")}</SelectItem>
-                <SelectItem value="minimal-emerald">{t("settings.editorThemes.minimal-emerald")}</SelectItem>
-                <SelectItem value="outline-emerald">{t("settings.editorThemes.outline-emerald")}</SelectItem>
-                <SelectItem value="wechat-green">{t("settings.editorThemes.wechat-green")}</SelectItem>
-                <SelectItem value="modern-mint">{t("settings.editorThemes.modern-mint")}</SelectItem>
-                <SelectItem value="marxico">{t("settings.editorThemes.marxico")}</SelectItem>
-                {!isMobile && (
-                  <>
-                    {customEditorThemes.length > 0 && <div className="my-1 border-t border-slate-100" />}
-                    {customEditorThemes.map((theme) => (
-                      <SelectItem key={theme.id} value={theme.id}>
-                        {theme.name}
-                      </SelectItem>
-                    ))}
-                    <div className="my-1 border-t border-slate-100" />
-                    <SelectItem value="create-new" className="text-emerald-700 font-medium">
-                      + {t("settings.customEditorTheme.create", "Create New Theme...")}
-                    </SelectItem>
-                  </>
-                )}
-              </SelectContent>
-            </Select>
-            {!isMobile && (
-              <Button variant="outline" className="h-9 shrink-0 px-3 text-sm" onClick={handleEditClick}>
-                {activeCustom ? t("settings.customEditorTheme.edit") : t("settings.customEditorTheme.customize", "Customize")}
+          <FontChoiceFields
+            label={t("settings.editorBodyFontTitle")}
+            preference={editorBodyFont}
+            onChange={updateEditorBodyFont}
+          />
+        </div>
+
+        {!isMobile && (
+          <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <Palette className="h-4 w-4 shrink-0 text-slate-500" />
+              <div className="min-w-0">
+                <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.customEditorTheme.settingsTitle")}</div>
+              </div>
+            </div>
+            <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+              <Button variant="outline" className="h-9 shrink-0 px-3 text-xs" onClick={handleEditClick}>
+                {activeCustom || customEditorThemes.length > 0
+                  ? t("settings.customEditorTheme.edit")
+                  : t("settings.customEditorTheme.create")}
               </Button>
-            )}
-          </div>
-        </div>
-
-        <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <FileCode2 className={SETTINGS_ITEM_ICON_CLASSNAME} />
-            <div className="min-w-0">
-              <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.markdownThemeTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.markdownThemeDescription")}</div>
             </div>
           </div>
-          <div className="w-full shrink-0 sm:w-80">
-            <Select value={markdownThemePreference} onValueChange={(value) => setMarkdownTheme(value as typeof markdownThemePreference)}>
-              <SelectTrigger aria-label={t("settings.markdownThemeTitle")} className="h-9 bg-card">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {MARKDOWN_THEME_PREFERENCES.map((theme) => (
-                  <SelectItem key={theme} value={theme}>
-                    {t(`settings.markdownThemes.${theme}`)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        )}
 
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <ChartNoAxesCombined className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <ChartNoAxesCombined className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.mermaidThemeTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.mermaidThemeDescription")}</div>
             </div>
           </div>
           <div className="w-full shrink-0 sm:w-80">
@@ -385,13 +480,14 @@ export const PreferenceCard = ({
             </Select>
           </div>
         </div>
+      </PreferenceSection>
 
+      <PreferenceSection title={t("settings.groups.editing")}>
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Image className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <Image className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.imageCompressionTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.imageCompressionDescription")}</div>
             </div>
           </div>
           <div className="flex w-full shrink-0 justify-start sm:w-44 sm:justify-end">
@@ -404,11 +500,10 @@ export const PreferenceCard = ({
         </div>
 
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Sparkles className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <Sparkles className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.aiSelectionMenuTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.aiSelectionMenuDescription")}</div>
             </div>
           </div>
           <div className="flex w-full shrink-0 justify-start sm:w-44 sm:justify-end">
@@ -424,11 +519,10 @@ export const PreferenceCard = ({
         </div>
 
         <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Keyboard className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <Keyboard className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.aiSpaceShortcutTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.aiSpaceShortcutDescription")}</div>
             </div>
           </div>
           <div className="flex w-full shrink-0 justify-start sm:w-44 sm:justify-end">
@@ -445,11 +539,10 @@ export const PreferenceCard = ({
 
         {/* Desktop only: mobile editors always open links on a plain tap. */}
         <div className="hidden min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 lg:flex">
-          <div className="flex min-w-0 items-start gap-3">
-            <MousePointerClick className={SETTINGS_ITEM_ICON_CLASSNAME} />
+          <div className="flex min-w-0 items-center gap-3">
+            <MousePointerClick className="h-4 w-4 shrink-0 text-slate-500" />
             <div className="min-w-0">
               <div className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.linkOpenModifierTitle")}</div>
-              <div className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.linkOpenModifierDescription")}</div>
             </div>
           </div>
           <div className="flex w-full shrink-0 justify-start sm:w-44 sm:justify-end">
@@ -464,14 +557,7 @@ export const PreferenceCard = ({
             />
           </div>
         </div>
-
-        <div className="hidden lg:block">
-          <ShortcutSettingsItem
-            shortcutSettings={shortcutSettings}
-            onShortcutSettingsChange={onShortcutSettingsChange}
-          />
-        </div>
-      </CardContent>
+      </PreferenceSection>
       {!isMobile && editingTheme && (
         <CustomEditorThemeDialog
           open={customThemeDialogOpen}
@@ -482,6 +568,6 @@ export const PreferenceCard = ({
           isDefaultTheme={editingTheme.id === "custom-default"}
         />
       )}
-    </Card>
+    </div>
   );
 };

@@ -13,6 +13,30 @@ final class TipTapContentSourceTests: XCTestCase {
         XCTAssertTrue(decision.payload.contains("edgeever-diagram-v1"))
     }
 
+    func testViewerStripsStructuredTableMarker() {
+        let markdown = "| 名称 |\n| --- |\n| 示例 |\n\n<!-- edgeever-table-v1:abc -->"
+        let decision = TipTapContentSource.resolve(
+            mode: .viewer,
+            documentJSON: #"{"type":"doc","content":[{"type":"paragraph"}]}"#,
+            markdown: markdown
+        )
+        XCTAssertFalse(decision.useJSON)
+        XCTAssertFalse(decision.payload.contains("edgeever-table-v1"))
+        XCTAssertTrue(decision.payload.contains("示例"))
+    }
+
+    func testViewerStripsInfographicMarkerAndKeepsReadableSyntax() {
+        let markdown = "```infographic\ninfographic list-row-simple-horizontal-arrow\ndata\n  title Test\n```\n\n<!-- edgeever-infographic-v1:abc -->"
+        let decision = TipTapContentSource.resolve(
+            mode: .viewer,
+            documentJSON: #"{"type":"doc","content":[{"type":"paragraph"}]}"#,
+            markdown: markdown
+        )
+        XCTAssertFalse(decision.useJSON)
+        XCTAssertFalse(decision.payload.contains("edgeever-infographic-v1"))
+        XCTAssertTrue(decision.payload.contains("infographic list-row-simple-horizontal-arrow"))
+    }
+
     func testEditorMarkdownRemainsAuthoritativeForRichStructures() {
         let markdown = """
         1. first

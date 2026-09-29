@@ -22,10 +22,19 @@ import type {
 
 const actionKey = (action: RegisteredPluginAction) => `${action.type}:${action.pluginId}:${action.id}`;
 
-export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: {
+export const PluginToolbarMenu = ({
+  host,
+  onManage,
+  align = "end",
+  side = "bottom",
+  tooltipSide,
+  className,
+}: {
   host: EdgeEverPluginHost;
   onManage: () => void;
   align?: "start" | "center" | "end";
+  side?: "top" | "right" | "bottom" | "left";
+  tooltipSide?: "top" | "right" | "bottom" | "left";
   className?: string;
 }) => {
   const { t } = useTranslation();
@@ -85,7 +94,7 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
         }}
       >
         {pendingAction === key ? (
-          <LoaderCircle className="h-4 w-4 animate-spin text-emerald-600" />
+          <LoaderCircle className="h-4 w-4 animate-spin text-slate-500" />
         ) : action.type === "panel" ? (
           <PanelRightOpen className="h-4 w-4 text-slate-500" />
         ) : (
@@ -104,20 +113,20 @@ export const PluginToolbarMenu = ({ host, onManage, align = "end", className }: 
             <TooltipTrigger asChild>
               <DropdownMenuTrigger asChild>
                 <Button
-                  className={cn("relative hidden h-8 w-8 text-slate-500 hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-emerald-500/70 lg:inline-flex", className)}
+                  className={cn("relative hidden h-8 w-8 text-slate-600 hover:bg-slate-50 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-900/20 lg:inline-flex", className)}
                   size="icon"
                   variant="ghost"
                   aria-label={t("plugins.toolbar.open")}
                 >
                   <Puzzle className="h-4 w-4" />
-                  {hasActions ? <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-white" aria-hidden="true" /> : null}
+                  {hasActions ? <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-card" aria-hidden="true" /> : null}
                 </Button>
               </DropdownMenuTrigger>
             </TooltipTrigger>
-            <TooltipContent side="bottom">{t("plugins.toolbar.open")}</TooltipContent>
+            <TooltipContent side={tooltipSide ?? side}>{t("plugins.toolbar.open")}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
-        <DropdownMenuContent align={align} className="w-72">
+        <DropdownMenuContent align={align} side={side} className="w-72">
           {groups.length > 0 ? groups.map((group, index) => (
             <div key={group.pluginId}>
               {index > 0 ? <DropdownMenuSeparator /> : null}

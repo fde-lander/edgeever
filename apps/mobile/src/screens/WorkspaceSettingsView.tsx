@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from "
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
 import type { InstanceHealth } from "@edgeever/client";
-import { buildGitHubFeedbackUrl, type AuthUser } from "@edgeever/shared";
+import { buildGitHubFeedbackUrl, formatClientDisplaySize, isClientAheadOfInstance, toDevicePixelScreenSize, type AuthUser } from "@edgeever/shared";
 import { useQuery } from "@tanstack/react-query";
-import { BackHandler, Linking, Modal, Platform, ScrollView, Switch, View } from "react-native";
+import { BackHandler, Dimensions, Linking, Modal, PixelRatio, Platform, ScrollView, Switch, View } from "react-native";
 import { Activity, ActivityIndicator, Check, ChevronDown, ChevronLeft, ChevronRight, Cloud, Copy, ExternalLink, Image as ImageIcon, Info, LogOut, MessageSquare, MonitorSmartphone, Moon, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "../components/icons";
 import { Pressable, Text } from "../components/LocalizedText";
 import { useMobileLocale } from "../lib/mobile-locale";
@@ -21,6 +21,18 @@ const useMobileLocalePreference = () => useMobileLocale().preference;
 
 const MOBILE_APP_VERSION = Constants.expoConfig?.version ?? "0.1.2";
 
+const readMobileDeviceModel = () => {
+  if (Platform.OS !== "android") return null;
+  const { Brand, Manufacturer, Model } = Platform.constants;
+  const model = typeof Model === "string" ? Model.trim() : "";
+  const manufacturer = typeof Manufacturer === "string" && Manufacturer.trim()
+    ? Manufacturer.trim()
+    : typeof Brand === "string" ? Brand.trim() : "";
+  if (!model) return manufacturer || null;
+  if (!manufacturer || model.toLowerCase().startsWith(manufacturer.toLowerCase())) return model;
+  return `${manufacturer} ${model}`;
+};
+
 const formatExecutionEnvironment = (environment: string | null | undefined, localePreference: MobileLocaleMode = "system") => {
   const english = isEnglishMobileLocale(localePreference);
 
@@ -30,7 +42,7 @@ const formatExecutionEnvironment = (environment: string | null | undefined, loca
     case "storeClient":
       return english ? "Expo Go / development client" : "Expo Go / 开发客户端";
     case "bare":
-      return "Bare React Native";
+      return english ? "Native app" : "原生应用";
     default:
       return environment || getMobileSystemInfoText(localePreference).unknown;
   }
@@ -39,6 +51,7 @@ const MOBILE_LOCALE_OPTIONS: Array<{ label: string; value: MobileLocalePreferenc
   { label: "跟随系统", value: "system" },
   { label: "简体中文", value: "zh-CN" },
   { label: "English", value: "en-US" },
+  { label: "日本語", value: "ja" },
 ];
 type SettingsTab = "general" | "account" | "system";
 export type MobileLocaleMode = MobileLocalePreference;
@@ -49,10 +62,21 @@ type MobileInstanceDiagnostics = {
   version: string;
 };
 
+type MobileSystemInfoItem = {
+  fullWidth?: boolean;
+  label: string;
+  localOnly?: boolean;
+  mono?: boolean;
+  value: string;
+  wide?: boolean;
+};
+
 type MobileSystemInfoGroup = {
+  columns: number;
   description: string;
   id: "cloud" | "client" | "connection";
-  items: Array<{ label: string; value: string }>;
+  items: MobileSystemInfoItem[];
+  notice?: string;
   title: string;
 };
 
@@ -137,6 +161,7 @@ export const SettingsView = ({
     void Linking.openURL(buildMobileFeedbackUrl(localePreference, {
       connectionState: instanceResult ? "connected" : instanceDiagnosticsQuery.isError ? "failed" : "checking",
       instance: instanceResult,
+      instanceUrl: session?.baseUrl,
       sync: syncResult,
     }));
   };
@@ -162,6 +187,7 @@ export const SettingsView = ({
             connectionState={instanceDiagnosticsQuery.data ? "connected" : instanceDiagnosticsQuery.isError ? "failed" : "checking"}
             defaultExpanded
             instance={instanceDiagnosticsQuery.data}
+            instanceUrl={session?.baseUrl}
             sync={syncDiagnosticsQuery.data}
           />
         </View>
@@ -354,11 +380,13 @@ const SystemInfoCard = ({
   connectionState,
   defaultExpanded = false,
   instance,
+  instanceUrl,
   sync,
 }: {
   connectionState: "checking" | "connected" | "failed";
   defaultExpanded?: boolean;
   instance?: MobileInstanceDiagnostics;
+  instanceUrl?: string;
   sync?: MobileSyncDiagnostics;
 }) => {
   const [copied, setCopied] = useState(false);
@@ -367,7 +395,7 @@ const SystemInfoCard = ({
   const localePreference = useMobileLocalePreference();
   const english = isEnglishMobileLocale(localePreference);
   const copy = getMobileSystemInfoText(localePreference);
-  const infoGroups = getMobileSystemInfoGroups(localePreference, { connectionState, instance, sync });
+  const infoGroups = getMobileSystemInfoGroups(localePreference, { connectionState, instance, instanceUrl, sync });
   const description = hasUpdate ? copy.updateAvailableDescription : copy.description;
   const checking = status === "checking";
   const downloading = status === "downloading";
@@ -435,50 +463,53 @@ const SystemInfoCard = ({
   );
 };
 
-const MobileSystemInfoSection = ({ group }: { group: MobileSystemInfoGroup }) => (
-  <View style={styles.systemInfoSection}>
-    <View style={styles.systemInfoSectionHeader}>
-      {group.id === "cloud"
-        ? <Cloud color="#047857" size={16} />
-        : group.id === "client"
-          ? <MonitorSmartphone color="#047857" size={16} />
-          : <Activity color="#047857" size={16} />}
-      <View style={styles.systemInfoSectionCopy}>
-        <Text style={styles.systemInfoSectionTitle}>{group.title}</Text>
-        <Text style={styles.systemInfoSectionDescription}>{group.description}</Text>
+const MobileSystemInfoSection = ({ group }: { group: MobileSystemInfoGroup }) => {
+  return (
+    <View style={styles.systemInfoSection}>
+      <View style={styles.systemInfoSectionHeader}>
+        {group.id === "cloud"
+          ? <Cloud color="#047857" size={16} />
+          : group.id === "client"
+            ? <MonitorSmartphone color="#047857" size={16} />
+            : <Activity color="#047857" size={16} />}
+        <View style={styles.systemInfoSectionCopy}>
+          <Text style={styles.systemInfoSectionTitle}>{group.title}</Text>
+          <Text style={styles.systemInfoSectionDescription}>{group.description}</Text>
+        </View>
       </View>
-    </View>
-    <View style={styles.systemInfoRows}>
-      {Array.from({ length: Math.ceil(group.items.length / 3) }, (_, rowIndex) => {
-        const rowItems = group.items.slice(rowIndex * 3, rowIndex * 3 + 3);
-
-        return (
-          <View
-            key={`${group.id}-row-${rowIndex}`}
-            style={[styles.systemInfoRow, rowIndex === Math.ceil(group.items.length / 3) - 1 && styles.systemInfoRowLast]}
-          >
-            {rowItems.map((item, itemIndex) => (
-              <View
-                key={item.label}
-                style={[styles.systemInfoCell, itemIndex < rowItems.length - 1 && styles.systemInfoCellDivider]}
-              >
-                <Text numberOfLines={1} style={styles.panelLabel}>{item.label}</Text>
-                <Text numberOfLines={1} selectable style={styles.systemInfoListValue}>{item.value}</Text>
+      {group.notice ? (
+        <View accessibilityLiveRegion="polite" style={styles.systemInfoNotice}>
+          <Info color="#94a3b8" size={14} />
+          <Text style={styles.systemInfoNoticeText}>{group.notice}</Text>
+        </View>
+      ) : null}
+      <View style={styles.systemInfoRows}>
+        {layoutMobileSystemInfoRows(group.items, group.columns).map((rowItems, rowIndex) => (
+          <View key={`${group.id}-row-${rowIndex}`} style={styles.systemInfoRow}>
+            {rowItems.map((item) => (
+              <View key={item.label} style={[styles.systemInfoCell, item.wide && group.columns === 3 && styles.systemInfoWideCell]}>
+                <Text style={styles.systemInfoItemLabel}>{item.label}</Text>
+                <Text selectable style={[styles.systemInfoListValue, item.mono && styles.systemInfoMonoValue]}>{item.value}</Text>
               </View>
             ))}
           </View>
-        );
-      })}
+        ))}
+      </View>
     </View>
-  </View>
-);
+  );
+};
 
 
 const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
   isEnglishMobileLocale(localePreference)
     ? {
-        build: "Build",
+        build: "Build type",
+        developmentBuild: "Development",
+        productionBuild: "Production",
         client: "Client",
+        clientAheadOfInstanceCloudflare: "This client is newer than the connected cloud instance. You can wait for the daily automatic instance update, or run the Update deployed EdgeEver workflow.",
+        clientAheadOfInstanceDocker: "This client is newer than the connected cloud instance. You can wait for the daily automatic instance update, or run ./update.sh in the install directory (default ~/edgeever).",
+        clientAheadOfInstanceUnknown: "This client is newer than the connected cloud instance. You can wait for the daily automatic instance update, or update the instance manually.",
         clientDescription: "The EdgeEver app and runtime environment on this device.",
         clientSection: "Current client",
         cloudDescription: "Version and deployment environment for the connected instance.",
@@ -500,6 +531,7 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         installMode: "Mode",
         instanceBuild: "Instance build",
         instanceConnection: "Instance connection",
+        instanceUrl: "Instance URL",
         instanceVersion: "Instance version",
         language: "Language",
         newUploadObjectStorage: "New upload object storage",
@@ -507,7 +539,10 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         platform: "System",
         mobileApp: "Mobile app",
         platformVersion: "System version",
-        requestLatency: "Request latency",
+        requestLatency: "Health check time",
+        deviceModel: "Device model",
+        screenResolution: "Screen resolution",
+        screenResolutionValue: "{{screen}} @{{dpr}}x",
         timeZone: "Time zone",
         openUpdate: "Get update",
         title: "System info",
@@ -517,8 +552,13 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         version: "Version",
       }
     : {
-        build: "构建",
+        build: "构建类型",
+        developmentBuild: "开发版",
+        productionBuild: "正式版",
         client: "客户端",
+        clientAheadOfInstanceCloudflare: "当前客户端版本高于云端实例。可等待每天自动更新，或手动运行 Update deployed EdgeEver 工作流。",
+        clientAheadOfInstanceDocker: "当前客户端版本高于云端实例。可等待每天自动更新，或在安装目录执行 ./update.sh（默认 ~/edgeever）。",
+        clientAheadOfInstanceUnknown: "当前客户端版本高于云端实例。可等待每天自动更新，也可手动更新实例。",
         clientDescription: "这台设备上的 EdgeEver 应用与运行环境。",
         clientSection: "当前客户端",
         cloudDescription: "当前连接实例的版本与部署环境。",
@@ -540,6 +580,7 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         installMode: "安装形态",
         instanceBuild: "实例构建",
         instanceConnection: "实例连接",
+        instanceUrl: "实例地址",
         instanceVersion: "实例版本",
         language: "语言",
         newUploadObjectStorage: "新上传对象存储",
@@ -547,7 +588,10 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         platform: "系统",
         mobileApp: "移动应用",
         platformVersion: "系统版本",
-        requestLatency: "请求耗时",
+        requestLatency: "健康检查耗时",
+        deviceModel: "设备型号",
+        screenResolution: "屏幕分辨率",
+        screenResolutionValue: "{{screen}} @{{dpr}}x",
         timeZone: "时区",
         openUpdate: "前往更新",
         title: "系统信息",
@@ -556,6 +600,17 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         updateAvailableTitle: "发现新版本",
         version: "版本",
       };
+
+const getMobileClientAheadNotice = (
+  copy: ReturnType<typeof getMobileSystemInfoText>,
+  instanceVersion: string | null | undefined,
+  runtime: string | null | undefined,
+) => {
+  if (!isClientAheadOfInstance(MOBILE_APP_VERSION, instanceVersion)) return undefined;
+  if (runtime === "cloudflare-workers") return copy.clientAheadOfInstanceCloudflare;
+  if (runtime === "self-hosted-bun") return copy.clientAheadOfInstanceDocker;
+  return copy.clientAheadOfInstanceUnknown;
+};
 
 const getMobileDeploymentPlatform = (runtime: string | null | undefined, english: boolean) => {
   if (runtime === "cloudflare-workers") return "Cloudflare";
@@ -589,11 +644,58 @@ const getMobileObjectStorage = (health: InstanceHealth | undefined, english: boo
   }
 };
 
+const layoutMobileSystemInfoRows = (items: MobileSystemInfoItem[], columns: number) => {
+  const rows: MobileSystemInfoItem[][] = [];
+  let buffer: MobileSystemInfoItem[] = [];
+  const pushBufferedRows = () => {
+    if (buffer.length === 0) return;
+    if (columns === 3 && buffer.some((item) => item.wide)) {
+      let row: MobileSystemInfoItem[] = [];
+      let occupiedColumns = 0;
+      for (const item of buffer) {
+        const itemColumns = item.wide ? 2 : 1;
+        if (occupiedColumns + itemColumns > columns) {
+          rows.push(row);
+          row = [];
+          occupiedColumns = 0;
+        }
+        row.push(item);
+        occupiedColumns += itemColumns;
+      }
+      if (row.length > 0) rows.push(row);
+      buffer = [];
+      return;
+    }
+    const rowCount = Math.ceil(buffer.length / columns);
+    const baseRowSize = Math.floor(buffer.length / rowCount);
+    const extraItems = buffer.length % rowCount;
+    let offset = 0;
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const rowSize = baseRowSize + (rowIndex < extraItems ? 1 : 0);
+      rows.push(buffer.slice(offset, offset + rowSize));
+      offset += rowSize;
+    }
+    buffer = [];
+  };
+
+  for (const item of items) {
+    if (item.fullWidth) {
+      pushBufferedRows();
+      rows.push([item]);
+      continue;
+    }
+    buffer.push(item);
+  }
+  pushBufferedRows();
+  return rows;
+};
+
 const getMobileSystemInfoGroups = (
   localePreference: MobileLocaleMode,
   diagnostics: {
     connectionState?: "checking" | "connected" | "failed";
     instance?: MobileInstanceDiagnostics;
+    instanceUrl?: string;
     sync?: MobileSyncDiagnostics;
   } = {},
 ): MobileSystemInfoGroup[] => {
@@ -626,47 +728,65 @@ const getMobileSystemInfoGroups = (
 
   return [
     {
+      columns: english ? 2 : 3,
       description: copy.cloudDescription,
       id: "cloud",
+      notice: getMobileClientAheadNotice(copy, instance?.version, instance?.health.runtime),
       items: [
-        { label: copy.instanceVersion, value: instance?.version ? `v${instance.version.replace(/^v/, "")}` : copy.unknown },
-        { label: copy.instanceBuild, value: instance?.health.build || copy.unknown },
-        { label: copy.databaseVersion, value: instance?.health.migration || copy.unknown },
-        { label: copy.databaseBackend, value: getMobileDatabaseBackend(instance?.health.storage?.database, copy.unknown) },
-        { label: copy.newUploadObjectStorage, value: getMobileObjectStorage(instance?.health, english, copy.unknown) },
-        ...(instance?.health.objectStorageProvider === "s3"
-          ? [{ label: copy.existingAttachments, value: copy.existingAttachmentsOriginalStorage }]
+        ...(diagnostics.instanceUrl
+          ? [{ fullWidth: true, label: copy.instanceUrl, localOnly: true, value: diagnostics.instanceUrl }]
           : []),
+        { label: copy.instanceVersion, mono: true, value: instance?.version ? `v${instance.version.replace(/^v/, "")}` : copy.unknown },
+        { label: copy.databaseVersion, mono: true, value: instance?.health.migration || copy.unknown },
+        { label: copy.databaseBackend, value: getMobileDatabaseBackend(instance?.health.storage?.database, copy.unknown) },
         { label: copy.deploymentPlatform, value: getMobileDeploymentPlatform(instance?.health.runtime, english) },
+        { label: copy.instanceBuild, mono: true, value: instance?.health.build || copy.unknown, wide: true },
+        { fullWidth: true, label: copy.newUploadObjectStorage, value: getMobileObjectStorage(instance?.health, english, copy.unknown) },
+        ...(instance?.health.objectStorageProvider === "s3"
+          ? [{ fullWidth: true, label: copy.existingAttachments, value: copy.existingAttachmentsOriginalStorage }]
+          : []),
         ...(instance?.health.runtime === "self-hosted-bun"
-          ? [{ label: copy.containerImageSource, value: getMobileContainerImageSource(instance.health.containerImageSource, english) }]
+          ? [{ fullWidth: true, label: copy.containerImageSource, value: getMobileContainerImageSource(instance.health.containerImageSource, english) }]
           : []),
       ],
       title: copy.cloudSection,
     },
     {
+      columns: english ? 2 : 3,
       description: copy.clientDescription,
       id: "client",
       items: [
-        { label: copy.version, value: `v${MOBILE_APP_VERSION}` },
-        { label: copy.build, value: __DEV__ ? "development" : "production" },
+        { label: copy.version, mono: true, value: `v${MOBILE_APP_VERSION}` },
+        { label: copy.build, value: __DEV__ ? copy.developmentBuild : copy.productionBuild },
         { label: copy.client, value: copy.mobileApp },
         { label: copy.platform, value: platformName },
-        { label: copy.platformVersion, value: String(Platform.Version) },
-        { label: copy.language, value: localePreference === "system" ? `${resolvedLocale} (${copy.followSystem})` : resolvedLocale },
-        { label: copy.timeZone, value: Intl.DateTimeFormat().resolvedOptions().timeZone || copy.unknown },
+        { label: copy.platformVersion, mono: true, value: Platform.OS === "android" ? `${Platform.constants.Release} (API ${Platform.Version})` : String(Platform.Version), wide: true },
+        { label: copy.deviceModel, value: readMobileDeviceModel() || copy.unknown, wide: true },
         { label: copy.installMode, value: formatExecutionEnvironment(Constants.executionEnvironment, localePreference) },
+        {
+          fullWidth: true,
+          mono: true,
+          label: copy.screenResolution,
+          value: formatClientDisplaySize(toDevicePixelScreenSize({
+            devicePixelRatio: PixelRatio.get(),
+            screenHeight: Dimensions.get("screen").height,
+            screenWidth: Dimensions.get("screen").width,
+          }), copy.screenResolutionValue) || copy.unknown,
+        },
+        { fullWidth: true, label: copy.language, mono: true, value: localePreference === "system" ? `${resolvedLocale} (${copy.followSystem})` : resolvedLocale },
+        { fullWidth: true, label: copy.timeZone, mono: true, value: Intl.DateTimeFormat().resolvedOptions().timeZone || copy.unknown },
       ],
       title: copy.clientSection,
     },
     {
+      columns: 2,
       description: copy.connectionDescription,
       id: "connection",
       items: [
         { label: copy.instanceConnection, value: connectionValue },
-        { label: copy.requestLatency, value: instance ? `${instance.latencyMs} ms` : copy.unknown },
-        { label: copy.pendingSync, value: pendingSync === null ? copy.unknown : String(pendingSync) },
-        { label: copy.failedSync, value: failedSync === null ? copy.unknown : String(failedSync) },
+        { label: copy.requestLatency, mono: true, value: instance ? `${instance.latencyMs} ms` : copy.unknown },
+        { label: copy.pendingSync, mono: true, value: pendingSync === null ? copy.unknown : String(pendingSync) },
+        { label: copy.failedSync, mono: true, value: failedSync === null ? copy.unknown : String(failedSync) },
       ],
       title: copy.connectionSection,
     },
@@ -688,10 +808,12 @@ const buildMobileFeedbackUrl = (
     privacyNotice: english
       ? "GitHub Issues are public. Do not include passwords, tokens, instance URLs, or private note content."
       : "GitHub Issue 公开可见，请勿提交密码、Token、实例地址或私人笔记内容。",
-    systemInfo: infoGroups.flatMap((group) => group.items.map((item) => ({
-      label: `${group.title} / ${item.label}`,
-      value: item.value,
-    }))),
+    systemInfo: infoGroups.flatMap((group) => group.items
+      .filter((item) => !item.localOnly)
+      .map((item) => ({
+        label: `${group.title} / ${item.label}`,
+        value: item.value,
+      }))),
     systemInfoHeading: english ? "System information" : "系统信息",
     systemInfoNotice: english
       ? "The following information was generated by EdgeEver to help diagnose the issue."

@@ -7,7 +7,7 @@ import {
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { resolveContainerImageSource } from "./container-image-source";
-import openApiSpec from "../../../docs/openapi.json";
+import apiProbe from "../../../docs/openapi.json";
 import releaseSummary from "../../../release-summary.json";
 import {
   authenticateRequest,
@@ -95,6 +95,7 @@ import { registerPluginDistributionRoutes } from "./plugin-distribution-routes";
 import { registerSyncRoutes } from "./sync-routes";
 import { registerMemoRoutes } from "./memo-routes";
 import { registerScheduledTaskRoutes } from "./scheduled-task-routes";
+import { registerWorkspaceExtensionRoutes } from "./workspace-extension-routes";
 import { registerBackupRoutes } from "./backup-routes";
 import { registerMcpRoutes } from "./mcp-routes";
 import { executeWorkspaceTool } from "./mcp-tool-executor";
@@ -127,6 +128,7 @@ import {
 } from "./user-routes";
 import { registerNotebookRoutes } from "./notebook-routes";
 import { registerMemoShareRoutes, registerPublicShareRoutes } from "./share-routes";
+import { registerPublicTableFormRoutes, registerTableFormRoutes } from "./table-form-routes";
 import {
   deleteStoredObjects,
   getActiveObjectStorageConfig,
@@ -245,9 +247,11 @@ app.get("/api/health", async (c) => {
   });
 });
 
-app.get("/api/openapi.json", (c) => c.json(openApiSpec));
+// Reachability probe only. Not an API catalog. Agents should use MCP.
+app.get("/api/openapi.json", (c) => c.json(apiProbe));
 
 registerPublicShareRoutes(app);
+registerPublicTableFormRoutes(app);
 
 registerAuthRoutes(app, {
   authenticateRequest: (...args) => authenticateRequestWithHiding(...args),
@@ -332,7 +336,9 @@ registerSyncRoutes(app, {
 registerTagRoutes(app);
 registerPluginDistributionRoutes(app);
 registerScheduledTaskRoutes(app);
+registerWorkspaceExtensionRoutes(app, { isDemoMode: (...args) => isDemoMode(...args) });
 registerMemoShareRoutes(app);
+registerTableFormRoutes(app);
 registerTemplateRoutes(app, {
   createMemoRecord: (...args) => createMemoRecord(...args),
   getMemoDetail: (...args) => getMemoDetail(...args),
@@ -340,6 +346,7 @@ registerTemplateRoutes(app, {
 
 registerMemoRoutes(app, {
   clampNumber: (...args) => clampNumber(...args),
+  createImageResource: (...args) => createImageResource(...args),
   createMemo: (...args) => createMemoRecord(...args),
   createMemoEditSession: (...args) => createMemoEditSession(...args),
   deleteMemo: (...args) => deleteMemoRecord(...args),

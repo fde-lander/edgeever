@@ -7,6 +7,8 @@
 !.env.local-dev.example
 
 node_modules/
+__pycache__/
+*.py[cod]
 .idea/
 dist/
 !packages/plugin-api/dist/
@@ -14,6 +16,8 @@ dist/
 build/
 apps/extension/dist-firefox/
 apps/extension/web-ext-artifacts/
+# Built store packages. Listing screenshots and promo tiles in this folder stay tracked.
+apps/extension/store-assets/*.zip
 release/desktop/
 coverage/
 playwright-report/
@@ -44,6 +48,9 @@ credentials.json
 
 # Local App Review crash dumps / image self-test screenshots.
 .tmp-app-review-crashes/
+
+# Generated Expo iOS tree; store iOS is apps/ios.
+apps/mobile/ios/
 
 # Local brand concept and research drafts.
 /assets/brand/edgeever-concept-13.png

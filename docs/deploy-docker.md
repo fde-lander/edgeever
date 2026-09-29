@@ -1,7 +1,7 @@
 # Deploy EdgeEver with Docker
 
 EdgeEver uses the same web application, Hono routes, services, authentication,
-OpenAPI document, MCP implementation, and append-only migrations on Cloudflare
+MCP implementation, and append-only migrations on Cloudflare
 and Docker. Only the thin runtime and infrastructure adapters differ: Docker
 uses Bun with SQLite and local files (or S3-compatible object storage), while
 Cloudflare uses Workers with D1 and R2.
@@ -30,12 +30,6 @@ The installer creates `~/edgeever`, generates an administrator password, pulls
 `latest`, starts the container, and waits for it to become healthy. Run the same
 command again to upgrade without replacing the password or `/data` volume. The
 installer and Compose configuration use the official GHCR image.
-
-Some network environments in mainland China may experience slow connections or
-timeouts when accessing GHCR. If the image cannot be pulled normally, configure
-an available network proxy or a trusted registry mirror before deployment.
-Users are responsible for evaluating the availability and security of
-third-party network and registry services.
 
 By default, the installer schedules `~/edgeever/update.sh` with the current
 user's crontab at 04:17 server time every day. The updater refreshes the Compose

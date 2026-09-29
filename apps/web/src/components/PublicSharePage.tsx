@@ -1,27 +1,26 @@
 import "katex/dist/katex.min.css";
 import { Node, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
-import { TableKit } from "@tiptap/extension-table";
 import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import { useQuery } from "@tanstack/react-query";
-import { Clock3, FileText, LoaderCircle, ShieldCheck } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Clock3, FileText, LoaderCircle, LockKeyhole, ShieldCheck } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router";
-import { api } from "@/lib/api";
+import { ApiRequestError, api } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { EdgeEverCodeBlock, codeBlockLowlight } from "@/lib/code-block";
 import { withEnvironmentTitlePrefix } from "@/lib/environment-title";
 import { resolvePublicShareBody } from "@/lib/public-share-body";
 import {
   parseImageWidth,
   getImageReferrerPolicy,
-  ImageGallery,
-  MergeDivider,
-  PluginEmbed,
+  createEdgeEverDocumentExtensions,
+  parsePublishedNoteBodyFont,
   type PublicMemoShare,
 } from "@edgeever/shared";
+import { applyEditorBodyFontPreference } from "@/lib/editor-body-font";
 import { createEdgeEverMathematics } from "@edgeever/shared/mathematics";
 import { PdfAttachment } from "@/components/editor/PdfAttachment";
 import { FileAttachment } from "@/components/editor/FileAttachment";
@@ -81,19 +80,16 @@ const SharedThemeBlock = Node.create({
 const SharedRichText = ({ content }: { content: PublicMemoShare["contentJson"] }) => {
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ codeBlock: false, link: { openOnClick: true } }),
-      TaskList,
-      TaskItem.configure({ nested: true }),
+      ...createEdgeEverDocumentExtensions({
+        mathematics: createEdgeEverMathematics(),
+        starterKit: { codeBlock: false, link: { openOnClick: true } },
+        image: SharedImage.configure({ allowBase64: false, inline: false }),
+        pdf: PdfAttachment,
+        file: FileAttachment,
+        table: { table: { renderWrapper: true } },
+      }),
       EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
-      MergeDivider,
-      PluginEmbed,
-      PdfAttachment,
-      FileAttachment,
-      ...createEdgeEverMathematics(),
       SharedThemeBlock,
-      ImageGallery,
-      SharedImage.configure({ allowBase64: false, inline: false }),
-      TableKit.configure({ table: { renderWrapper: true } }),
     ],
     content,
     editable: false,
@@ -113,7 +109,7 @@ const SharedDocument = ({
   share,
   token,
 }: {
-  locale: "zh-CN" | "en-US";
+  locale: "zh-CN" | "en-US" | "ja";
   share: PublicMemoShare;
   token: string;
 }) => {
@@ -134,6 +130,59 @@ const SharedDocument = ({
   return <SharedRichText content={body.content} />;
 };
 
+const isSharePasswordError = (error: unknown, code: string) =>
+  error instanceof ApiRequestError && error.code === code;
+
+const PublicSharePasswordForm = ({
+  token,
+  onUnlocked,
+}: {
+  token: string;
+  onUnlocked: () => Promise<unknown>;
+}) => {
+  const { t } = useTranslation();
+  const [password, setPassword] = useState("");
+  const unlockMutation = useMutation({
+    mutationFn: () => api.unlockPublicMemoShare(token, password),
+    onSuccess: () => onUnlocked(),
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!password.trim() || unlockMutation.isPending) return;
+    unlockMutation.mutate();
+  };
+  const errorKey = isSharePasswordError(unlockMutation.error, "share_unlock_rate_limited")
+    ? "sharing.passwordRateLimited"
+    : unlockMutation.error
+      ? "sharing.passwordInvalid"
+      : null;
+
+  return (
+    <main className="flex min-h-[100dvh] items-center justify-center bg-slate-50 px-5">
+      <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-card p-8 shadow-sm">
+        <LockKeyhole className="mx-auto h-9 w-9 text-slate-700" />
+        <h1 className="mt-4 text-center text-xl font-semibold text-slate-900">{t("sharing.passwordRequiredTitle")}</h1>
+        <p className="mt-2 text-center text-sm leading-6 text-slate-500">{t("sharing.passwordRequiredHint")}</p>
+        <form className="mt-6 space-y-3" onSubmit={submit}>
+          <Input
+            type="password"
+            value={password}
+            autoComplete="off"
+            autoFocus
+            aria-label={t("sharing.passwordLabel")}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+          <Button className="w-full" variant="solid" type="submit" disabled={!password.trim() || unlockMutation.isPending}>
+            {unlockMutation.isPending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
+            {t("sharing.passwordSubmit")}
+          </Button>
+          {errorKey ? <p className="text-sm text-rose-600" role="alert">{t(errorKey)}</p> : null}
+        </form>
+      </section>
+    </main>
+  );
+};
+
 export const PublicSharePage = () => {
   const { t, i18n } = useTranslation();
   const { token = "" } = useParams();
@@ -144,6 +193,21 @@ export const PublicSharePage = () => {
     retry: false,
   });
   const share = shareQuery.data?.share;
+  const passwordRequired = isSharePasswordError(shareQuery.error, "share_password_required");
+  const publishedBodyFont = share ? parsePublishedNoteBodyFont(share.bodyFont) : undefined;
+
+  useEffect(() => {
+    if (publishedBodyFont === undefined) return undefined;
+    if (!publishedBodyFont) {
+      delete document.documentElement.dataset.editorBodyFont;
+      document.documentElement.style.removeProperty("--editor-body-font-family");
+    } else {
+      applyEditorBodyFontPreference({ choice: publishedBodyFont, customFamily: "" });
+    }
+    return () => {
+      applyEditorBodyFontPreference();
+    };
+  }, [publishedBodyFont]);
 
   useEffect(() => {
     const previousTitle = document.title;
@@ -156,12 +220,17 @@ export const PublicSharePage = () => {
         `${share.title?.trim() || t("common.untitledMemo")} · EdgeEver`,
         { development: import.meta.env.DEV, profile: __EDGEEVER_DEVELOPMENT_PROFILE__ },
       );
+    } else if (passwordRequired) {
+      document.title = withEnvironmentTitlePrefix(t("sharing.passwordRequiredTitle"), {
+        development: import.meta.env.DEV,
+        profile: __EDGEEVER_DEVELOPMENT_PROFILE__,
+      });
     }
     return () => {
       document.title = previousTitle;
       robots.remove();
     };
-  }, [share, t]);
+  }, [passwordRequired, share, t]);
 
   if (shareQuery.isLoading) {
     return (
@@ -169,6 +238,10 @@ export const PublicSharePage = () => {
         <LoaderCircle className="h-6 w-6 animate-spin" aria-label={t("sharing.publicLoading")} />
       </main>
     );
+  }
+
+  if (passwordRequired) {
+    return <PublicSharePasswordForm token={token} onUnlocked={() => shareQuery.refetch()} />;
   }
 
   if (!share) {
@@ -188,7 +261,7 @@ export const PublicSharePage = () => {
       <article className="mx-auto max-w-4xl overflow-hidden rounded-2xl border border-slate-200 bg-card shadow-sm">
         <header className="border-b border-slate-200 px-5 py-6 sm:px-10 sm:py-8">
           <div className="mb-5 flex items-center justify-between gap-4 text-xs text-slate-500">
-            <span className="flex items-center gap-1.5 font-semibold text-emerald-700">
+            <span className="flex items-center gap-1.5 font-semibold text-slate-700">
               <ShieldCheck className="h-4 w-4" /> EdgeEver · {t("sharing.readOnly")}
             </span>
             <span className="flex items-center gap-1.5">

@@ -6,9 +6,15 @@ import {
   actionNeedsTargetLanguage,
   actionNeedsTone,
   canReplaceAiSource,
+  getAiAssistantLastActionScope,
   getDefaultAiAction,
   getDefaultAiTargetLanguage,
   parseDefaultAiPromptKey,
+  buildAiAssistantLastActionPreference,
+  readStoredAiAssistantLastActionPreference,
+  resolveAiAssistantLastAction,
+  resolveAiAssistantOpenAction,
+  writeStoredAiAssistantLastActionPreference,
   promptAllowsAppend,
   promptAllowsReplace,
   promptNeedsTargetLanguage,
@@ -34,27 +40,38 @@ export const getDefaultTargetLanguage = getDefaultAiTargetLanguage;
 export {
   actionNeedsTargetLanguage,
   actionNeedsTone,
+  buildAiAssistantLastActionPreference,
   canReplaceAiSource,
+  getAiAssistantLastActionScope,
   getDefaultAiAction,
   parseDefaultAiPromptKey,
   promptAllowsAppend,
   promptAllowsReplace,
   promptNeedsTargetLanguage,
   promptNeedsTone,
+  readStoredAiAssistantLastActionPreference,
+  resolveAiAssistantLastAction,
+  resolveAiAssistantOpenAction,
+  writeStoredAiAssistantLastActionPreference,
 };
 
 export const resolveAiAssistantComposerInput = ({
   composerText,
+  hasSelection,
   isFreeformCustom,
   noteContentMarkdown,
   noteTitle,
 }: {
   composerText: string;
+  hasSelection?: boolean;
   isFreeformCustom: boolean;
   noteContentMarkdown: string;
   noteTitle: string;
 }) => {
-  const usesComposerAsSource = !isFreeformCustom && Boolean(composerText.trim());
+  const usesComposerAsSource = !isFreeformCustom
+    && !hasSelection
+    && !noteContentMarkdown.trim()
+    && Boolean(composerText.trim());
   return {
     contentMarkdown: usesComposerAsSource ? composerText : noteContentMarkdown,
     customInstruction: isFreeformCustom ? composerText : "",
@@ -142,3 +159,25 @@ export const buildAiAssistantRequest = ({
 };
 
 export type { AiPromptParameterKind, AiPromptResultMode };
+
+export type AiAssistantMode = "instruction" | "ask";
+const AI_ASSISTANT_MODE_KEY = "edgeever.aiAssistant.mode";
+
+export function readStoredAiAssistantMode(): AiAssistantMode {
+  try {
+    const value = localStorage.getItem(AI_ASSISTANT_MODE_KEY);
+    if (value === "ask" || value === "organize") return "ask";
+    if (value === "instruction") return "instruction";
+  } catch {
+    // Ignore unavailable storage.
+  }
+  return "instruction";
+}
+
+export function writeStoredAiAssistantMode(mode: AiAssistantMode) {
+  try {
+    localStorage.setItem(AI_ASSISTANT_MODE_KEY, mode);
+  } catch {
+    // Ignore unavailable storage.
+  }
+}

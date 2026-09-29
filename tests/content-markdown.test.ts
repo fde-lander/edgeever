@@ -36,6 +36,31 @@ describe("shared Markdown conversion", () => {
     });
   });
 
+  test("preserves heading levels 1 through 6", () => {
+    const markdown = `# H1
+
+## H2
+
+### H3
+
+#### H4
+
+##### H5
+
+###### H6`;
+
+    const doc = markdownToDoc(markdown);
+    expect(doc.content.map((node) => [node.type, node.attrs?.level])).toEqual([
+      ["heading", 1],
+      ["heading", 2],
+      ["heading", 3],
+      ["heading", 4],
+      ["heading", 5],
+      ["heading", 6],
+    ]);
+    expect(docToMarkdown(doc)).toBe(markdown);
+  });
+
   test("serializes TipTap marks and block nodes back to Markdown", () => {
     const markdown = `# 标题
 
@@ -58,6 +83,16 @@ const answer = 42;
 
     const doc = markdownToDoc(markdown);
     expect(doc.content.map((node) => node.type)).toEqual(["codeBlock", "image"]);
+    expect(doc.content[1]?.attrs?.width).toBe(35);
+    expect(docToMarkdown(doc)).toBe(markdown);
+  });
+
+  test("groups consecutive images into one gallery and keeps a single image alone", () => {
+    const markdown = "正文\n\n![一](/a.png)\n\n![二](/b.png)\n\n![三](/c.png)\n\n来源";
+    const doc = markdownToDoc(markdown);
+    expect(doc.content.map((node) => node.type)).toEqual(["paragraph", "edgeeverImageGallery", "paragraph"]);
+    expect(doc.content[1]?.attrs).toEqual({ layout: "auto" });
+    expect(doc.content[1]?.content?.map((node) => node.attrs?.src)).toEqual(["/a.png", "/b.png", "/c.png"]);
     expect(docToMarkdown(doc)).toBe(markdown);
   });
 

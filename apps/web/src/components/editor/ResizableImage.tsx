@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import { NodeViewWrapper, ReactNodeViewRenderer, useEditorState, type NodeViewProps } from "@tiptap/react";
@@ -6,8 +6,8 @@ import { Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getImageReferrerPolicy, IMAGE_GALLERY_NODE_TYPE } from "@edgeever/shared";
 import {
-  DEFAULT_IMAGE_WIDTH_PERCENT,
   IMAGE_WIDTH_PRESETS,
+  NEW_IMAGE_WIDTH_PERCENT,
   clampImageWidth,
   parseImageWidth,
 } from "@edgeever/shared/image-display";
@@ -45,8 +45,9 @@ const ResizableImageNodeView = ({
 }: NodeViewProps) => {
   const { t } = useTranslation();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
-  const nodeWidth = parseImageWidth(node.attrs.width) ?? DEFAULT_IMAGE_WIDTH_PERCENT;
+  const nodeWidth = parseImageWidth(node.attrs.width) ?? NEW_IMAGE_WIDTH_PERCENT;
   const width = previewWidth ?? nodeWidth;
   const { editable, inGallery } = useEditorState({
     editor,
@@ -97,6 +98,17 @@ const ResizableImageNodeView = ({
   }, [editor, getPos]);
 
   const canGroupAdjacentImages = selected && Boolean(getAdjacentImageGroup());
+
+  useEffect(() => () => {
+    const image = imageRef.current;
+    if (!image) return;
+    const src = image.getAttribute("src") || image.src;
+    image.removeAttribute("src");
+    image.src = "";
+    if (src.startsWith("blob:")) {
+      URL.revokeObjectURL(src);
+    }
+  }, []);
 
   const groupAdjacentImages = useCallback(() => {
     const group = getAdjacentImageGroup();
@@ -220,6 +232,7 @@ const ResizableImageNodeView = ({
       }}
     >
       <img
+        ref={imageRef}
         src={src}
         alt={alt}
         title={title || undefined}

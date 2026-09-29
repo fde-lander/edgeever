@@ -5,12 +5,15 @@ import {
   AI_TARGET_LANGUAGES,
   AI_TONES,
   AI_WHOLE_NOTE_ACTIONS,
+  buildAiAssistantLastActionPreference,
   getDefaultAiTargetLanguage,
   promptAllowsAppend,
   promptAllowsReplace,
   promptNeedsTargetLanguage,
   promptNeedsTone,
+  resolveAiAssistantOpenAction,
   type AiAction,
+  type AiAssistantLastActionPreference,
   type AiTargetLanguage,
   type AiTone,
   type MemoDetail,
@@ -22,6 +25,7 @@ import { Check, ChevronDown, Copy, RefreshCw, Sparkles, Square, X } from "./icon
 import { Alert, Pressable, Text, TextInput } from "./LocalizedText";
 import { useMobileLocale } from "../lib/mobile-locale";
 import { useMobileTheme } from "../lib/mobile-theme";
+import { readMobileAiAssistantLastAction, writeMobileAiAssistantLastAction } from "../lib/preferences";
 import { useSession } from "../lib/session";
 
 type AssistantAction = AiAction;
@@ -48,7 +52,7 @@ export const MobileAiAssistantModal = ({
   const { resolvedLocale } = useMobileLocale();
   const { resolvedTheme } = useMobileTheme();
   const dark = resolvedTheme === "dark";
-  const tr = (zh: string, en: string) => resolvedLocale === "en-US" ? en : zh;
+  const tr = (zh: string, en: string) => resolvedLocale !== "zh-CN" ? en : zh;
   const [action, setAction] = useState<AssistantAction>("summarize");
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>(() => getDefaultAiTargetLanguage(resolvedLocale));
@@ -61,6 +65,9 @@ export const MobileAiAssistantModal = ({
   const [applying, setApplying] = useState(false);
   const [picker, setPicker] = useState<"action" | "language" | "tone" | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const storedPreferenceRef = useRef<AiAssistantLastActionPreference | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [initializedForOpen, setInitializedForOpen] = useState(false);
   const promptsQuery = useQuery({
     queryKey: ["ai-prompts", resolvedLocale],
     queryFn: async () => (await client!.listAiPrompts(resolvedLocale)).prompts,
@@ -75,17 +82,17 @@ export const MobileAiAssistantModal = ({
     ?? (["summarize", "extract-key-points", "extract-todos", "continue-writing"].includes(action) ? "append" : "both");
 
   const labels: Record<AssistantAction, string> = {
-    summarize: tr("总结", "Summarize"),
+    summarize: tr("精简总结", "Summarize"),
     "extract-key-points": tr("提炼要点", "Key points"),
     "extract-todos": tr("提取待办", "Extract tasks"),
-    "rewrite-proofread": tr("转为小红书风格", "Convert to Xiaohongshu style"),
-    "improve-writing": tr("改进写作", "Improve writing"),
+    "rewrite-proofread": tr("改写与校对", "Rewrite & proofread"),
+    "improve-writing": tr("润色表达", "Polish"),
     "fix-spelling-grammar": tr("修正拼写与语法", "Fix spelling & grammar"),
     "make-shorter": tr("精炼表达", "Make concise"),
     "make-longer": tr("扩写内容", "Make longer"),
-    "simplify-language": tr("转为推特风格", "Convert to X (Twitter) style"),
+    "simplify-language": tr("简化表达", "Simplify language"),
     "change-tone": tr("调整语气", "Change tone"),
-    translate: tr("翻译", "Translate"),
+    translate: tr("全文翻译", "Translate"),
     "continue-writing": tr("继续写作", "Continue writing"),
     custom: tr("自定义指令", "Custom prompt"),
   };
@@ -111,34 +118,47 @@ export const MobileAiAssistantModal = ({
 
   useEffect(() => () => controllerRef.current?.abort(), []);
   useEffect(() => {
-    if (visible) {
-      controllerRef.current?.abort();
-      setAction("summarize");
-      setSelectedPromptId(null);
-      setTargetLanguage(getDefaultAiTargetLanguage(resolvedLocale));
-      setTone("professional");
-      setCustomInstruction("");
-      setRefineInstruction("");
-      setOutput("");
-      setError(null);
-      setGenerating(false);
-      setApplying(false);
-      setPicker(null);
-    } else {
+    if (!visible) {
       controllerRef.current?.abort();
       setPicker(null);
+      setSessionReady(false);
+      setInitializedForOpen(false);
+      return;
     }
-  }, [memo.id, resolvedLocale, visible]);
-  useEffect(() => {
-    setTargetLanguage(getDefaultAiTargetLanguage(resolvedLocale));
-  }, [resolvedLocale]);
+    controllerRef.current?.abort();
+    setCustomInstruction("");
+    setRefineInstruction("");
+    setOutput("");
+    setError(null);
+    setGenerating(false);
+    setApplying(false);
+    setPicker(null);
+    setSessionReady(false);
+    setInitializedForOpen(false);
+    let cancelled = false;
+    void readMobileAiAssistantLastAction("wholeNote").then((preference) => {
+      if (cancelled) return;
+      storedPreferenceRef.current = preference;
+      setSessionReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [memo.id, visible]);
 
   useEffect(() => {
-    if (!visible || selectedPromptId || prompts.length === 0) return;
-    const preferred = prompts.find((prompt) => prompt.seedKey === "summarize") ?? prompts[0];
-    setSelectedPromptId(preferred.id);
-    setAction(preferred.action);
-  }, [prompts, selectedPromptId, visible]);
+    if (!visible || !sessionReady || initializedForOpen || promptsQuery.isLoading) return;
+    const resolved = resolveAiAssistantOpenAction({
+      hasSelection: false,
+      preference: storedPreferenceRef.current,
+      prompts,
+    });
+    setSelectedPromptId(resolved.selectedPromptId);
+    setAction(resolved.action);
+    setTargetLanguage(resolved.targetLanguage ?? getDefaultAiTargetLanguage(resolvedLocale));
+    setTone(resolved.tone ?? "professional");
+    setInitializedForOpen(true);
+  }, [initializedForOpen, prompts, promptsQuery.isLoading, resolvedLocale, sessionReady, visible]);
 
   const buildRequest = (source: string, refinement?: string) => {
     const base = {
@@ -157,8 +177,25 @@ export const MobileAiAssistantModal = ({
     };
   };
 
+  const persistLastAction = (
+    nextAction: AssistantAction,
+    nextPromptId: string | null,
+    nextLanguage = targetLanguage,
+    nextTone = tone,
+  ) => {
+    const prompt = nextPromptId ? prompts.find((item) => item.id === nextPromptId) : null;
+    void writeMobileAiAssistantLastAction("wholeNote", buildAiAssistantLastActionPreference({
+      action: nextAction,
+      promptId: nextPromptId,
+      seedKey: prompt?.seedKey ?? null,
+      targetLanguage: nextLanguage,
+      tone: nextTone,
+    }));
+  };
+
   const generate = async (source = memo.contentMarkdown, refinement?: string) => {
     if (!client || (!selectedPrompt && action === "custom" && !customInstruction.trim() && !refinement?.trim())) return;
+    if (!refinement?.trim()) persistLastAction(action, selectedPromptId);
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -248,14 +285,21 @@ export const MobileAiAssistantModal = ({
       controllerRef.current?.abort();
       const promptId = value.startsWith(PROMPT_PREFIX) ? value.slice(PROMPT_PREFIX.length) : null;
       const prompt = promptId ? prompts.find((item) => item.id === promptId) : null;
-      setSelectedPromptId(prompt?.id ?? null);
-      setAction(prompt?.action ?? (value as AssistantAction));
+      const nextAction = prompt?.action ?? (value as AssistantAction);
+      const nextPromptId = prompt?.id ?? null;
+      setSelectedPromptId(nextPromptId);
+      setAction(nextAction);
+      persistLastAction(nextAction, nextPromptId);
       setOutput("");
       setError(null);
     } else if (picker === "language") {
-      setTargetLanguage(value as TargetLanguage);
+      const nextLanguage = value as TargetLanguage;
+      setTargetLanguage(nextLanguage);
+      persistLastAction(action, selectedPromptId, nextLanguage);
     } else if (picker === "tone") {
-      setTone(value as Tone);
+      const nextTone = value as Tone;
+      setTone(nextTone);
+      persistLastAction(action, selectedPromptId, targetLanguage, nextTone);
     }
     setPicker(null);
   };

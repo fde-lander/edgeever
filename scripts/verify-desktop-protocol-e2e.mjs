@@ -133,6 +133,53 @@ const waitForDownloadedFile = async () => {
   throw new Error(`Resource download did not create ${downloadedPath}`);
 };
 
+const waitForRendererBootstrap = async () => {
+  const diagnosticLogPath = join(userDataDirectory, "logs", "desktop.log");
+  const deadline = Date.now() + (Number(process.env.EDGE_EVER_DESKTOP_E2E_TIMEOUT_MS) || 45_000);
+  while (Date.now() < deadline) {
+    if (existsSync(diagnosticLogPath)) {
+      const log = await readFile(diagnosticLogPath, "utf8");
+      if (log.includes("renderer.bootstrap-ready")) return;
+    }
+    if (child?.exitCode !== null) break;
+    await wait(100);
+  }
+  throw new Error("Renderer bootstrap did not complete before protocol e2e");
+};
+
+const attachFileToInput = async (filePath) => {
+  const deadline = Date.now() + 15_000;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const created = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          let input = document.querySelector("#edgeever-protocol-file-input");
+          if (!input) {
+            input = document.createElement("input");
+            input.id = "edgeever-protocol-file-input";
+            input.type = "file";
+            document.body.append(input);
+          }
+          return input;
+        })()`,
+      });
+      const objectId = created.result?.objectId;
+      if (!objectId) throw new Error("File input object is missing");
+      await cdp.send("DOM.setFileInputFiles", { objectId, files: [filePath] });
+      const hasFile = await evaluate(
+        `document.querySelector("#edgeever-protocol-file-input")?.files?.length === 1`,
+      );
+      if (hasFile) return;
+      lastError = new Error("File input did not retain the attached file");
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(200);
+  }
+  throw lastError ?? new Error("Could not attach a file to the protocol e2e input");
+};
+
 try {
   await mkdir(resourceCacheDirectory, { recursive: true });
   await mkdir(join(testDirectory, "downloads"), { recursive: true });
@@ -154,6 +201,7 @@ try {
   child.stdout?.on("data", (chunk) => processOutput.push(chunk.toString()));
   child.stderr?.on("data", (chunk) => processOutput.push(chunk.toString()));
 
+  await waitForRendererBootstrap();
   const target = await findRendererTarget(port);
   cdp = await connectCdp(target.webSocketDebuggerUrl);
   await cdp.send("Runtime.enable");
@@ -179,18 +227,7 @@ try {
     throw new Error(`Bundled marketplace fetch failed: ${JSON.stringify(appProtocol)}`);
   }
 
-  await evaluate(`(() => {
-    const input = document.createElement("input");
-    input.id = "edgeever-protocol-file-input";
-    input.type = "file";
-    document.body.append(input);
-  })()`);
-  const documentNode = await cdp.send("DOM.getDocument");
-  const inputNode = await cdp.send("DOM.querySelector", {
-    nodeId: documentNode.root.nodeId,
-    selector: "#edgeever-protocol-file-input",
-  });
-  await cdp.send("DOM.setFileInputFiles", { nodeId: inputNode.nodeId, files: [inputFixturePath] });
+  await attachFileToInput(inputFixturePath);
 
   const staged = await evaluate(`(async () => {
     const input = document.querySelector("#edgeever-protocol-file-input");
@@ -247,6 +284,34 @@ try {
     throw new Error(`Cached resource protocol failed: ${JSON.stringify(cachedResource)}`);
   }
 
+  const aliasedResource = await evaluate(`(async () => {
+    const bridge = window.edgeeverDesktop;
+    await bridge.recordStagedResourceAlias(${JSON.stringify(staged.id)}, "/api/v1/resources/${cachedResourceId}/blob");
+    await bridge.removeStagedResource(${JSON.stringify(staged.id)});
+    const [pending, aliases, response, bridged] = await Promise.all([
+      bridge.listStagedResources(),
+      bridge.listStagedResourceAliases("protocol-e2e-memo"),
+      fetch("edgeever-staged://${staged.id}"),
+      bridge.readStagedResource(${JSON.stringify(staged.id)}),
+    ]);
+    return {
+      pending: pending.some((item) => item.id === ${JSON.stringify(staged.id)}),
+      alias: aliases.find((item) => item.id === ${JSON.stringify(staged.id)})?.resourceId,
+      status: response.status,
+      text: await response.text(),
+      bridgeText: new TextDecoder().decode(bridged.bytes),
+    };
+  })()`);
+  if (
+    aliasedResource.pending
+    || aliasedResource.alias !== cachedResourceId
+    || aliasedResource.status !== 200
+    || aliasedResource.text !== fixtureText
+    || aliasedResource.bridgeText !== fixtureText
+  ) {
+    throw new Error(`Uploaded staged resource alias failed: ${JSON.stringify(aliasedResource)}`);
+  }
+
   await cdp.send("Browser.setDownloadBehavior", {
     behavior: "allow",
     downloadPath: join(testDirectory, "downloads"),
@@ -265,12 +330,11 @@ try {
   await waitForDownloadedFile();
   if (!(await readFile(downloadedPath)).equals(fixtureBytes)) throw new Error("Downloaded resource bytes changed");
 
-  await evaluate(`window.edgeeverDesktop.removeStagedResource(${JSON.stringify(staged.id)})`);
   console.log(JSON.stringify({
     ok: true,
     executablePath,
     origin: appProtocol.origin,
-    checks: ["app-assets", "file-input", "staged-resource", "cached-resource-range", "download"],
+    checks: ["app-assets", "file-input", "staged-resource", "cached-resource-range", "staged-resource-alias", "download"],
   }));
 } catch (error) {
   const details = processOutput.length > 0 ? `\n\nProcess output:\n${processOutput.join("")}` : "";

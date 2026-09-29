@@ -2,10 +2,10 @@ import { expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import { registerPluginCapabilityRoutes } from './plugin-capability-routes';
 
-function fixture({ kind = 'user', demo = false, fetch = async () => new Response('public data'), generate = async input => ({ text: input.prompt.toUpperCase() }) } = {}) {
+function fixture({ kind = 'user', demo = false, fetch = async () => new Response('public data'), generate = async input => ({ text: input.prompt.toUpperCase() }), loadCredentials } = {}) {
   const app = new Hono();
   app.use('*', async (c, next) => { if (kind) c.set('auth', { kind, workspaceId: 'workspace' }); await next(); });
-  registerPluginCapabilityRoutes(app, { isDemoMode: () => demo, aiStatus: async () => ({ configured: true, modelName: 'Test model' }), generate });
+  registerPluginCapabilityRoutes(app, { isDemoMode: () => demo, aiStatus: async () => ({ configured: true, modelName: 'Test model' }), generate, loadCredentials });
   const env = { publicNetworkFetch: fetch };
   return (path, body, signal) => app.request(`/api/v1/plugins/${path}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal } : {}, env);
 }
@@ -44,6 +44,20 @@ test('oversized and cancelled public responses fail without exposing upstream er
   expect((await cancelled('network/fetch', { url: 'https://example.org' }, controller.signal)).status).toBe(502);
 });
 
+test('generic AI prepare returns credentials without invoking the provider', async () => {
+  let generated = 0;
+  const call = fixture({
+    generate: async () => { generated++; return { text: 'nope' }; },
+    loadCredentials: async () => ({ provider: 'openai-compatible', baseUrl: 'https://api.example/v1', apiKey: 'plugin-key', modelId: 'model-a' }),
+  });
+  const response = await call('ai/generate/prepare', { system: 'Translate', prompt: 'hello', maxOutputTokens: 100 });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    apiKey: 'plugin-key', system: 'Translate', prompt: 'hello', maxOutputTokens: 100,
+  });
+  expect(generated).toBe(0);
+});
+
 test('generic AI validates ordinary prompts, returns text, and redacts provider errors', async () => {
   const call = fixture();
   expect(await (await call('ai/status')).json()).toEqual({ configured: true, modelName: 'Test model' });
@@ -52,6 +66,20 @@ test('generic AI validates ordinary prompts, returns text, and redacts provider 
   expect((await call('ai/generate', { system: '', prompt: 'x'.repeat(90001) })).status).toBe(400);
   const failed = fixture({ generate: async () => { throw new Error('Bearer dummy-provider-secret'); } });
   const response = await failed('ai/generate', { system: '', prompt: 'hello' }); expect(response.status).toBe(502); expect(await response.text()).not.toContain('dummy-provider-secret');
+});
+
+test('generic AI leaves output limits to the provider while requiring a positive integer', async () => {
+  const call = fixture({
+    generate: async input => ({ text: String(input.maxOutputTokens) }),
+    loadCredentials: async () => ({ provider: 'openai-compatible', baseUrl: 'https://api.example/v1', apiKey: 'plugin-key', modelId: 'model-a' }),
+  });
+  const input = { system: '', prompt: 'hello', maxOutputTokens: 1000000 };
+  expect(await (await call('ai/generate', input)).json()).toEqual({ text: '1000000' });
+  expect((await call('ai/generate/prepare', input)).status).toBe(200);
+  for (const maxOutputTokens of [0, -1, 1.5, '100']) {
+    expect((await call('ai/generate', { ...input, maxOutputTokens })).status).toBe(400);
+    expect((await call('ai/generate/prepare', { ...input, maxOutputTokens })).status).toBe(400);
+  }
 });
 
 test('concurrent requests are bounded and released after completion', async () => {

@@ -1,23 +1,27 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { getClientDisplaySizeParts } from "@edgeever/shared";
 import type { DeploymentMetadata } from "@edgeever/shared/deployment-metadata";
-import { Activity, CircleCheck, Cloud, Copy, ExternalLink, LoaderCircle, MonitorSmartphone, RefreshCw, RotateCcw } from "lucide-react";
+import { Activity, CircleCheck, CircleX, Cloud, Copy, ExternalLink, Info, LoaderCircle, MonitorSmartphone, RefreshCw, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { ClipboardCopyNotice } from "@/components/ClipboardCopyNotice";
 import { Button } from "@/components/ui/button";
 import { useDeployedUpdateNotice } from "@/hooks/useDeployedUpdateNotice";
 import { detectWebClientKind } from "@/lib/client-environment";
 import { api, getConfiguredDesktopApiBaseUrl, type InstanceHealth } from "@/lib/api";
+import { copyHtmlToClipboard } from "@/lib/clipboard";
 import { resolveSystemInfoDeploymentMetadata } from "@/lib/deployment-metadata";
 import { resolveDeploymentPlatform } from "@/lib/instance-runtime";
 import {
   getClientRuntimeDiagnostics,
   getClientSyncDiagnostics,
+  readBrowserClientDisplaySize,
   type ClientRuntimeDiagnostics,
   type ClientSyncDiagnostics,
 } from "@/lib/system-diagnostics";
+import { formatSystemInfoClipboard } from "@/lib/system-info-clipboard";
 import { cn } from "@/lib/utils";
-import { getReleaseTagForVersion } from "@/lib/version-check";
-import { copyTextToClipboard } from "./settings-utils";
+import { getReleaseTagForVersion, isClientAheadOfInstance } from "@/lib/version-check";
 
 export type SystemInfoItem = {
   label: string;
@@ -25,6 +29,7 @@ export type SystemInfoItem = {
   mono?: boolean;
   colSpan?: "full" | "two" | "double-sm";
   status?: "connected" | "connecting" | "failed" | "warning" | "error" | "default";
+  localOnly?: boolean;
 };
 
 type InstanceSystemDiagnostics = Pick<InstanceHealth, "build" | "containerImageSource" | "deployment" | "migration" | "objectStorageProvider" | "storage"> & {
@@ -34,6 +39,7 @@ type InstanceSystemDiagnostics = Pick<InstanceHealth, "build" | "containerImageS
 export type SystemInfoDiagnostics = {
   clientRuntime?: ClientRuntimeDiagnostics | null;
   instance?: Partial<InstanceSystemDiagnostics> | null;
+  instanceUrl?: string | null;
   instanceVersion?: string | null;
 };
 
@@ -85,12 +91,33 @@ const getColSpanClass = (colSpan?: SystemInfoItem["colSpan"]) => {
   return "col-span-1";
 };
 
-const getWebSystemInfoGroups = (
+const formatLastSuccessfulSync = (
   t: (key: string) => string,
+  language: string,
+  sync: ClientSyncDiagnostics | undefined,
+) => {
+  if (!sync) return t("systemInfo.unknown");
+  if (sync.lastSyncedAt) {
+    const lastSyncedDate = new Date(sync.lastSyncedAt);
+    if (Number.isFinite(lastSyncedDate.getTime())) {
+      return new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(lastSyncedDate);
+    }
+  }
+  const outstanding = sync.pending + sync.syncing + sync.error + sync.conflict;
+  return outstanding > 0 ? t("systemInfo.neverSynced") : t("systemInfo.nothingToSync");
+};
+
+const getWebSystemInfoGroups = (
+  t: (key: string, options?: Record<string, string>) => string,
   language: string,
   diagnostics: SystemInfoDiagnostics = {},
 ): SystemInfoGroup[] => {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || t("systemInfo.unknown");
+  const displaySize = (() => {
+    const metrics = readBrowserClientDisplaySize();
+    const parts = metrics ? getClientDisplaySizeParts(metrics) : null;
+    return parts ? t("systemInfo.screenResolutionValue", parts) : null;
+  })();
   const userAgent = navigator.userAgent;
   const clientKind = detectWebClientKind({
     desktopBridgeAvailable: window.edgeeverDesktop?.isAvailable === true,
@@ -107,6 +134,9 @@ const getWebSystemInfoGroups = (
     },
     clientKind !== "desktopApp",
   );
+  const instanceUrl = clientKind === "desktopApp"
+    ? (diagnostics.instanceUrl ?? getConfiguredDesktopApiBaseUrl()).trim()
+    : "";
 
   return [
     {
@@ -114,6 +144,14 @@ const getWebSystemInfoGroups = (
       title: t("systemInfo.cloudSection"),
       description: t("systemInfo.cloudSectionDescription"),
       items: [
+        ...(instanceUrl
+          ? [{
+              label: t("systemInfo.instanceUrl"),
+              value: instanceUrl,
+              colSpan: "full" as const,
+              localOnly: true,
+            }]
+          : []),
         {
           label: t("systemInfo.instanceVersion"),
           value: diagnostics.instanceVersion
@@ -183,6 +221,10 @@ const getWebSystemInfoGroups = (
             ?? t("systemInfo.unknown"),
         },
         {
+          label: t("systemInfo.deviceModel"),
+          value: diagnostics.clientRuntime?.deviceModel ?? t("systemInfo.unknown"),
+        },
+        {
           label: t("systemInfo.architecture"),
           value: diagnostics.clientRuntime?.architecture ?? t("systemInfo.unknown"),
           mono: true,
@@ -193,6 +235,12 @@ const getWebSystemInfoGroups = (
             ?? (clientKind === "desktopApp" ? t("systemInfo.unknown") : detectBrowser(userAgent) ?? t("systemInfo.unknown")),
         },
         { label: t("systemInfo.language"), value: navigator.language || language, mono: true },
+        {
+          label: t("systemInfo.screenResolution"),
+          value: displaySize ?? t("systemInfo.unknown"),
+          mono: true,
+          colSpan: "full",
+        },
         { label: t("systemInfo.timeZone"), value: timeZone, mono: true, colSpan: "double-sm" },
       ],
     },
@@ -200,16 +248,26 @@ const getWebSystemInfoGroups = (
 };
 
 export const getWebSystemInfoItems = (
-  t: (key: string) => string,
+  t: (key: string, options?: Record<string, string>) => string,
   language: string,
   diagnostics: SystemInfoDiagnostics = {},
 ): SystemInfoItem[] => getWebSystemInfoGroups(t, language, diagnostics)
   .flatMap((group) => group.items);
 
+export const getShareableWebSystemInfoItems = (
+  t: (key: string, options?: Record<string, string>) => string,
+  language: string,
+  diagnostics: SystemInfoDiagnostics = {},
+) => getWebSystemInfoItems(t, language, diagnostics)
+  .filter((item) => !item.localOnly)
+  .map(({ label, value }) => ({ label, value }));
+
 export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
   const { t, i18n } = useTranslation();
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const copyResetTimeoutRef = useRef<number | null>(null);
   const [desktopUpdateChecked, setDesktopUpdateChecked] = useState(false);
+  const [viewportRevision, setViewportRevision] = useState(0);
   const queryClient = useQueryClient();
   const { release } = useDeployedUpdateNotice();
   const desktopBridge = window.edgeeverDesktop;
@@ -247,6 +305,15 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
     refetchInterval: (query) => query.state.data?.state === "available" ? 1_000 : false,
     retry: 1,
   });
+  useEffect(() => {
+    if (!active) return;
+    const onResize = () => setViewportRevision((value) => value + 1);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [active]);
+  useEffect(() => () => {
+    if (copyResetTimeoutRef.current !== null) window.clearTimeout(copyResetTimeoutRef.current);
+  }, []);
   const desktopUpdateCheckMutation = useMutation({
     mutationFn: () => desktopBridge!.checkUpdate(),
     onSuccess: (status) => {
@@ -261,15 +328,10 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
     const groups = getWebSystemInfoGroups(t, i18n.language, {
       clientRuntime: clientRuntimeQuery.data,
       instance: healthQuery.data?.health,
+      instanceUrl: desktopAvailable ? instanceUrl : null,
       instanceVersion: release?.version,
     });
-    const lastSyncedAt = syncDiagnosticsQuery.data?.lastSyncedAt;
-    const lastSyncedDate = lastSyncedAt ? new Date(lastSyncedAt) : null;
-    const formattedLastSync = !syncDiagnosticsQuery.data
-      ? t("systemInfo.unknown")
-      : lastSyncedDate && Number.isFinite(lastSyncedDate.getTime())
-        ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(lastSyncedDate)
-        : t("systemInfo.neverSynced");
+    const formattedLastSync = formatLastSuccessfulSync(t, i18n.language, syncDiagnosticsQuery.data);
     const pendingCount = syncDiagnosticsQuery.data
       ? syncDiagnosticsQuery.data.pending + syncDiagnosticsQuery.data.syncing
       : null;
@@ -315,13 +377,16 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
     return groups;
   }, [
     clientRuntimeQuery.data,
+    desktopAvailable,
     healthQuery.data,
     healthQuery.isError,
     healthQuery.isSuccess,
     i18n.language,
+    instanceUrl,
     release?.version,
     syncDiagnosticsQuery.data,
     t,
+    viewportRevision,
   ]);
   const releaseTag = release ? getReleaseTagForVersion(release.version) : null;
   const releaseUrl = releaseTag
@@ -329,14 +394,34 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
     : "https://github.com/tianma-if/edgeever/releases/latest";
 
   const handleCopy = async () => {
-    const text = infoGroups
-      .map((group) => [group.title, ...group.items.map((item) => `${item.label}: ${item.value}`)].join("\n"))
-      .join("\n\n");
-    if (!(await copyTextToClipboard(text))) return;
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    const clipboard = formatSystemInfoClipboard({
+      title: t("systemInfo.title"),
+      fieldLabel: t("systemInfo.copyFieldLabel"),
+      valueLabel: t("systemInfo.copyValueLabel"),
+      groups: infoGroups,
+    });
+    let copied = false;
+    try {
+      await copyHtmlToClipboard(clipboard.html, clipboard.plainText);
+      copied = true;
+    } catch {
+      copied = false;
+    }
+    setCopyState(copied ? "copied" : "error");
+    if (copyResetTimeoutRef.current !== null) window.clearTimeout(copyResetTimeoutRef.current);
+    copyResetTimeoutRef.current = window.setTimeout(() => {
+      setCopyState("idle");
+      copyResetTimeoutRef.current = null;
+    }, copied ? 2200 : 3000);
   };
 
+  const clientAheadOfInstance = isClientAheadOfInstance(
+    clientRuntimeQuery.data?.appVersion ?? __EDGEEVER_APP_VERSION__,
+    release?.version,
+  );
+  const clientAheadHint = t(
+    `systemInfo.clientAheadOfInstanceByPlatform.${resolveDeploymentPlatform(healthQuery.data?.health?.runtime)}`,
+  );
   const desktopUpdateState = desktopUpdateStatusQuery.data?.state ?? "idle";
   const desktopAutoUpdateSupported = clientRuntimeQuery.data?.autoUpdateSupported !== false;
   const desktopUpdateBusy = desktopUpdateCheckMutation.isPending || desktopUpdateInstallMutation.isPending;
@@ -365,13 +450,25 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
         <Button
           size="sm"
           variant="outline"
-          className="h-7 gap-1.5 bg-card px-2.5 text-xs text-slate-700 shadow-xs hover:bg-slate-50"
+          className={cn(
+            "h-7 gap-1.5 bg-card px-2.5 text-xs text-slate-700 shadow-xs hover:bg-slate-50",
+            copyState === "copied" && "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+            copyState === "error" && "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-50",
+          )}
           type="button"
           onClick={() => void handleCopy()}
         >
-          {copied ? <CircleCheck className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5 text-slate-500" />}
-          <span className={copied ? "font-medium text-emerald-700" : ""}>
-            {copied ? t("common.copied") : t("systemInfo.copy")}
+          {copyState === "copied"
+            ? <CircleCheck className="h-3.5 w-3.5" />
+            : copyState === "error"
+              ? <CircleX className="h-3.5 w-3.5" />
+              : <Copy className="h-3.5 w-3.5 text-slate-500" />}
+          <span className={copyState === "idle" ? "" : "font-medium"}>
+            {copyState === "copied"
+              ? t("common.copied")
+              : copyState === "error"
+                ? t("systemInfo.copyFailed")
+                : t("systemInfo.copy")}
           </span>
         </Button>
       </div>
@@ -383,7 +480,7 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
           <section key={group.id} className="grid gap-2" aria-labelledby={headingId}>
             <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
               <div className="flex min-w-0 items-center gap-2">
-                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-emerald-100 bg-emerald-50 text-emerald-700">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-slate-100 text-slate-700">
                   {isCloud
                     ? <Cloud className="h-3.5 w-3.5" />
                     : isClient
@@ -430,13 +527,18 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                 </Button>
               ) : null}
             </div>
-            {isCloud && active && release ? (
-              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-200/80 bg-emerald-50/70 px-3 py-1.5 text-slate-800" role="status">
-                <CircleCheck className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
-                <div className="min-w-0 flex-1 text-xs font-medium text-emerald-950">
+            {isCloud && active && clientAheadOfInstance ? (
+              <p className="flex items-start gap-1.5 px-0.5 text-xs leading-4 text-slate-500" role="status">
+                <Info className="mt-0.5 h-3 w-3 shrink-0 text-slate-400" />
+                <span>{clientAheadHint}</span>
+              </p>
+            ) : isCloud && active && release ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-slate-800" role="status">
+                <CircleCheck className="h-3.5 w-3.5 shrink-0 text-slate-700" />
+                <div className="min-w-0 flex-1 text-xs font-medium text-slate-950">
                   {t("systemInfo.deployedUpdateTitle", { version: releaseTag?.replace(/^v/, "") ?? release.version })}
                 </div>
-                <a className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-900" href={releaseUrl} target="_blank" rel="noreferrer">
+                <a className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-slate-800 underline underline-offset-2 hover:text-slate-950" href={releaseUrl} target="_blank" rel="noreferrer">
                   {t("systemInfo.viewReleaseNotes")} <ExternalLink className="h-3 w-3" />
                 </a>
               </div>
@@ -462,10 +564,10 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                     key={item.label}
                     className={cn("min-w-0", getColSpanClass(item.colSpan))}
                   >
-                    <dt className="truncate text-[11px] font-normal text-slate-400">{item.label}</dt>
+                    <dt className="truncate text-xs font-normal text-slate-400">{item.label}</dt>
                     <dd className="mt-0.5 flex min-w-0 items-center gap-1.5">
                       {item.status === "connected" ? (
-                        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.5)]" />
+                        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-slate-950" />
                       ) : item.status === "connecting" ? (
                         <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500 animate-pulse" />
                       ) : item.status === "failed" ? (
@@ -492,6 +594,11 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
           </section>
         );
       })}
+      {copyState !== "idle" ? (
+        <ClipboardCopyNotice status={copyState}>
+          {t(copyState === "copied" ? "systemInfo.copySucceeded" : "systemInfo.copyFailed")}
+        </ClipboardCopyNotice>
+      ) : null}
     </div>
   );
 };

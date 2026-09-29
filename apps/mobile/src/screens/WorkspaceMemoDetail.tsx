@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { DEFAULT_MEMO_TITLE, parseDiagramDocument, type MemoDetail, type TiptapDoc } from "@edgeever/shared";
+import { DEFAULT_MEMO_TITLE, parseDiagramDocument, type MemoDetail, type Notebook, type TiptapDoc } from "@edgeever/shared";
 import {
   type NoteImageTheme,
   type NoteImageFontStyle,
@@ -7,18 +7,18 @@ import {
   type NoteImageCardWidth,
 } from "@edgeever/shared/note-image-card";
 import * as Clipboard from "expo-clipboard";
-import { Image as RNImage, Platform, ScrollView, StyleSheet, Text as RNText, View, type ImageStyle, type StyleProp, type TextStyle } from "react-native";
+import { Image as RNImage, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text as RNText, View, type ImageStyle, type StyleProp, type TextStyle } from "react-native";
 import { Modal } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { SvgXml } from "react-native-svg";
-import { ActivityIndicator, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, History, MoreHorizontal, Pencil, RotateCcw, Search, Share2, Sparkles, Tag, Trash2, X } from "../components/icons";
+import { ActivityIndicator, ChevronDown, ChevronLeft, ChevronUp, Copy, Download, History, MoreHorizontal, Pencil, RotateCcw, Search, Share2, Sparkles, Tag, Trash2, X } from "../components/icons";
 import { Alert, Pressable, Text, TextInput } from "../components/LocalizedText";
 import LocalTiptapEditor, { type LocalTiptapEditorRef } from "../components/LocalTiptapEditor";
 import { MobileAiAssistantModal } from "../components/MobileAiAssistantModal";
 import { MobileResourceActions } from "../components/MobileResourceActions";
 import { SAFE_DOM_WEBVIEW_PROPS } from "../lib/mobile-dom";
 import { getNextMobileNoteSearchIndex } from "../lib/mobile-note-search";
-import { hasMobileVisualDiagram, resolveMobileMemoViewerContent } from "../lib/mobile-diagram";
+import { hasMobileInfographic, hasMobileStructuredTable, hasMobileVisualDiagram, resolveMobileMemoViewerContent } from "../lib/mobile-diagram";
 import { safeDomCall } from "../lib/safe-dom-call";
 import {
   getMobileImageTarget,
@@ -34,12 +34,16 @@ import {
   loadProtectedResourceDataUrl,
   type ProtectedResourceLoadFailure,
 } from "../lib/mobile-protected-resources";
+import { useMobileRichEditor, type MobileMemoUpdateMutation } from "../hooks/useMobileRichEditor";
+import type { MobileMemoDraft } from "../lib/mobile-drafts";
+import { createMobileDataScope } from "../lib/local-mirror";
 import { useMobileTheme } from "../lib/mobile-theme";
 import { useSession } from "../lib/session";
 import { beginEditorStartup } from "../lib/startup-performance";
 import type { MobileSyncQueueItem } from "../lib/sync-queue";
-import { formatMemoDetailDate, getTextSearchMatches } from "./workspace-utils";
+import { formatMemoDetailDate, getTextSearchMatches, parseTags } from "./workspace-utils";
 import { styles } from "./workspace-styles";
+import { NotebookPickerModal, SmartTagButton, TagPickerModal } from "./WorkspacePickers";
 
 const ANDROID_SYSTEM_NAVIGATION_FALLBACK = 48;
 const RESOURCE_DATA_URL_CACHE_LIMIT = 32;
@@ -127,12 +131,12 @@ const loadAuthenticatedImageDataUrl = (
 };
 
 const alertProtectedImageLoadFailure = (
-  locale: "zh-CN" | "en-US",
+  locale: "zh-CN" | "en-US" | "ja",
   failure: ProtectedResourceLoadFailure
 ) => {
-  const statusLabel = failure.status != null ? String(failure.status) : locale === "en-US" ? "network error" : "网络错误";
+  const statusLabel = failure.status != null ? String(failure.status) : locale !== "zh-CN" ? "network error" : "网络错误";
   Alert.alert(
-    locale === "en-US" ? "Image failed to load" : "图片加载失败",
+    locale !== "zh-CN" ? "Image failed to load" : "图片加载失败",
     locale === "en-US"
       ? `Could not load a note image (${statusLabel}). Check the network and try again.`
       : `笔记中的图片未能加载（${statusLabel}）。请检查网络后重试。`
@@ -358,13 +362,6 @@ const DetailActionSheetItem = ({ danger = false, disabled = false, icon, label, 
   </Pressable>
 );
 
-const DetailActionButton = ({ children, disabled = false, label, onPress }: { children: ReactNode; disabled?: boolean; label: string; onPress: () => void }) => (
-  <Pressable disabled={disabled} onPress={onPress} style={[styles.actionButton, disabled && styles.buttonDisabled]}>
-    {children}
-    <Text style={styles.actionButtonText}>{label}</Text>
-  </Pressable>
-);
-
 const HighlightedMetadataText = ({
   activeIndex,
   matchOffset,
@@ -406,6 +403,8 @@ const HighlightedMetadataText = ({
 };
 
 export const MemoDetailModal = ({
+  editingSession,
+  imageCompressionEnabled,
   initialSearchQuery,
   isDeleting,
   isLoading,
@@ -414,9 +413,11 @@ export const MemoDetailModal = ({
   isSharing,
   memo,
   notebookName,
+  notebooks,
   onAdoptCloudVersion,
   onApplyAiDraft,
   onClose,
+  onCloseEditor,
   onCopyLocalDraft,
   onDelete,
   onDeleteResource,
@@ -429,8 +430,15 @@ export const MemoDetailModal = ({
   onShare,
   syncError,
   syncStatus,
+  updateMutation,
   visible,
 }: {
+  editingSession: {
+    draft: MobileMemoDraft | null;
+    initialFocus: "body" | "title";
+    memo: MemoDetail;
+  } | null;
+  imageCompressionEnabled: boolean;
   initialSearchQuery: string;
   isDeleting: boolean;
   isLoading: boolean;
@@ -439,9 +447,11 @@ export const MemoDetailModal = ({
   isSharing: boolean;
   memo: MemoDetail | null;
   notebookName: string;
+  notebooks: Notebook[];
   onAdoptCloudVersion: (memo: MemoDetail) => void;
   onApplyAiDraft: (memo: MemoDetail, draft: string, mode: "append" | "replace") => Promise<void>;
   onClose: () => void;
+  onCloseEditor: () => void;
   onCopyLocalDraft: (memo: MemoDetail) => void;
   onDelete: (memo: MemoDetail) => void;
   onDeleteResource: (memo: MemoDetail, target: MobileResourceTarget) => Promise<void>;
@@ -454,6 +464,7 @@ export const MemoDetailModal = ({
   onShare: (memo: MemoDetail) => void;
   syncError: string | null;
   syncStatus: MobileSyncQueueItem["status"] | null;
+  updateMutation: MobileMemoUpdateMutation;
   visible: boolean;
 }) => {
   const { client, session } = useSession();
@@ -481,6 +492,7 @@ export const MemoDetailModal = ({
   const [imageShareTags, setImageShareTags] = useState(false);
   const [imageShareUpdatedAt, setImageShareUpdatedAt] = useState(true);
   const [imageShareBranding, setImageShareBranding] = useState(true);
+  const [viewerNotebookPickerOpen, setViewerNotebookPickerOpen] = useState(false);
   const [preparedNoteImage, setPreparedNoteImage] = useState<MobilePreparedNoteImage | null>(null);
   const viewerRef = useRef<LocalTiptapEditorRef>(null);
   const imageExportIntentRef = useRef<"preview" | "share">("share");
@@ -505,30 +517,75 @@ export const MemoDetailModal = ({
     () => (memo ? hasMobileVisualDiagram(memo.contentMarkdown) : false),
     [memo]
   );
+  const isStructuredTable = useMemo(
+    () => (memo ? hasMobileStructuredTable(memo.contentMarkdown) : false),
+    [memo]
+  );
+  const locksRichTextEdit = isVisualDiagram || isStructuredTable || Boolean(memo && hasMobileInfographic(memo.contentMarkdown));
   const visualDiagramJson = useMemo(() => {
     const diagram = memo ? parseDiagramDocument(memo.contentMarkdown) : null;
     return diagram ? JSON.stringify(diagram) : undefined;
   }, [memo]);
+  const isEditing = Boolean(editingSession);
+  const noteBodyDom = useMemo(() => ({
+    ...SAFE_DOM_WEBVIEW_PROPS,
+    bounces: true,
+    contentInsetAdjustmentBehavior: "never" as const,
+    overScrollMode: "never" as const,
+    scrollEnabled: false,
+    style: [
+      detailLayoutStyles.viewer,
+      resolvedTheme === "dark" ? detailLayoutStyles.viewerDark : null,
+    ],
+  }), [resolvedTheme]);
+  const editor = useMobileRichEditor({
+    active: isEditing,
+    alreadyReady: viewerReady,
+    baseUrl,
+    editorRef: viewerRef,
+    handleHardwareBack: false,
+    imageCompressionEnabled,
+    initialDraft: editingSession?.draft ?? null,
+    initialFocus: editingSession?.initialFocus ?? "body",
+    memo: editingSession?.memo ?? memo,
+    notebooks,
+    onClose: onCloseEditor,
+    updateMutation,
+  });
 
   const downloadResource = useCallback(async (target: MobileResourceTarget) => {
-    if (!client) throw new Error(resolvedLocale === "en-US" ? "The resource client is unavailable." : "当前无法读取资源。");
+    if (!client) throw new Error(resolvedLocale !== "zh-CN" ? "The resource client is unavailable." : "当前无法读取资源。");
     try {
       await openMobileResource(client, target, { baseUrl, token: session?.token });
     } catch (error) {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Unable to open resource" : "无法打开资源",
-        error instanceof Error ? error.message : (resolvedLocale === "en-US" ? "Try again later." : "请稍后重试。")
+        resolvedLocale !== "zh-CN" ? "Unable to open resource" : "无法打开资源",
+        error instanceof Error ? error.message : (resolvedLocale !== "zh-CN" ? "Try again later." : "请稍后重试。")
       );
       throw error;
     }
   }, [baseUrl, client, resolvedLocale, session?.token]);
+  const handleViewerNotebookSelect = useCallback((nextNotebookId: string) => {
+    setViewerNotebookPickerOpen(false);
+    if (
+      !memo
+      || memo.isDeleted
+      || !nextNotebookId
+      || nextNotebookId === "all"
+      || nextNotebookId === memo.notebookId
+    ) {
+      return;
+    }
+    updateMutation.mutate({ memo, payload: { notebookId: nextNotebookId } });
+  }, [memo, updateMutation]);
+
   const saveResourceAs = useCallback(async (target: MobileResourceTarget) => {
-    if (!client) throw new Error(resolvedLocale === "en-US" ? "The resource client is unavailable." : "当前无法读取资源。");
+    if (!client) throw new Error(resolvedLocale !== "zh-CN" ? "The resource client is unavailable." : "当前无法读取资源。");
     const result = await saveMobileResourceAs(client, target, { baseUrl, token: session?.token });
     if (result.kind === "saf") {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Downloaded" : "下载成功",
-        resolvedLocale === "en-US" ? `Saved ${result.filename}` : `已保存：${result.filename}`
+        resolvedLocale !== "zh-CN" ? "Downloaded" : "下载成功",
+        resolvedLocale !== "zh-CN" ? `Saved ${result.filename}` : `已保存：${result.filename}`
       );
     }
   }, [baseUrl, client, resolvedLocale, session?.token]);
@@ -614,6 +671,21 @@ export const MemoDetailModal = ({
   ) + 16;
 
   useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+    setActionsOpen(false);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setBodySearchMatchCount(0);
+    setActiveMatchIndex(0);
+    setImagePreview(null);
+    setAiAssistantOpen(false);
+    setViewerNotebookPickerOpen(false);
+    safeDomCall(() => viewerRef.current?.search("", -1));
+  }, [isEditing]);
+
+  useEffect(() => {
     const normalizedInitialSearchQuery = initialSearchQuery.trim();
     setViewerReady(false);
     setSearchOpen(Boolean(normalizedInitialSearchQuery));
@@ -622,6 +694,7 @@ export const MemoDetailModal = ({
     setActiveMatchIndex(0);
     setImagePreview(null);
     setResourceTarget(null);
+    setViewerNotebookPickerOpen(false);
     resourceDataUrlCacheRef.current.clear();
   }, [initialSearchQuery, memo?.id]);
 
@@ -653,6 +726,13 @@ export const MemoDetailModal = ({
     }
     setActiveMatchIndex((current) => getNextMobileNoteSearchIndex(current, direction, searchMatchCount));
   };
+  const closeNoteSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setBodySearchMatchCount(0);
+    setActiveMatchIndex(0);
+    safeDomCall(() => viewerRef.current?.search("", -1));
+  };
 
   const closeActionsAndRun = (action: () => void) => {
     setActionsOpen(false);
@@ -665,13 +745,13 @@ export const MemoDetailModal = ({
     try {
       await Clipboard.setStringAsync(memo.id);
       Alert.alert(
-        resolvedLocale === "en-US" ? "Note ID copied" : "笔记 ID 已复制",
+        resolvedLocale !== "zh-CN" ? "Note ID copied" : "笔记 ID 已复制",
         memo.id
       );
     } catch {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Could not copy note ID" : "复制笔记 ID 失败",
-        resolvedLocale === "en-US" ? "Please try again." : "请稍后重试。"
+        resolvedLocale !== "zh-CN" ? "Could not copy note ID" : "复制笔记 ID 失败",
+        resolvedLocale !== "zh-CN" ? "Please try again." : "请稍后重试。"
       );
     }
   };
@@ -693,8 +773,8 @@ export const MemoDetailModal = ({
       imageExportRequestRef.current = null;
       setIsExportingImage(false);
       Alert.alert(
-        resolvedLocale === "en-US" ? "Image export failed" : "导出笔记图片失败",
-        event.message || (resolvedLocale === "en-US" ? "Try again later." : "请稍后重试。")
+        resolvedLocale !== "zh-CN" ? "Image export failed" : "导出笔记图片失败",
+        event.message || (resolvedLocale !== "zh-CN" ? "Try again later." : "请稍后重试。")
       );
       return;
     }
@@ -722,7 +802,7 @@ export const MemoDetailModal = ({
         setPreparedNoteImage(prepared);
       } else {
         const Sharing = await import("expo-sharing");
-        if (!(await Sharing.isAvailableAsync())) throw new Error(resolvedLocale === "en-US" ? "Sharing is unavailable on this device." : "当前设备无法打开系统分享面板。");
+        if (!(await Sharing.isAvailableAsync())) throw new Error(resolvedLocale !== "zh-CN" ? "Sharing is unavailable on this device." : "当前设备无法打开系统分享面板。");
         await Sharing.shareAsync(file.uri, {
           dialogTitle: event.filename,
           mimeType: event.mimeType,
@@ -730,8 +810,8 @@ export const MemoDetailModal = ({
       }
     } catch (error) {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Image export failed" : "导出笔记图片失败",
-        error instanceof Error ? error.message : (resolvedLocale === "en-US" ? "Try again later." : "请稍后重试。")
+        resolvedLocale !== "zh-CN" ? "Image export failed" : "导出笔记图片失败",
+        error instanceof Error ? error.message : (resolvedLocale !== "zh-CN" ? "Try again later." : "请稍后重试。")
       );
     } finally {
       imageExportChunksRef.current = [];
@@ -764,8 +844,8 @@ export const MemoDetailModal = ({
     safeDomCall(() => viewerRef.current?.exportImage(JSON.stringify({
       requestId,
       format,
-      title: memo.title?.trim() || (resolvedLocale === "en-US" ? "Untitled note" : "无标题笔记"),
-      fallbackTitle: resolvedLocale === "en-US" ? "Untitled note" : "无标题笔记",
+      title: memo.title?.trim() || (resolvedLocale !== "zh-CN" ? "Untitled note" : "无标题笔记"),
+      fallbackTitle: resolvedLocale !== "zh-CN" ? "Untitled note" : "无标题笔记",
       notebook: options.showNotebook === false ? "" : notebookName,
       tags: options.showTags === false ? [] : memo.tags,
       updatedAt: options.showUpdatedAt === false ? "" : new Date(memo.updatedAt).toLocaleString(resolvedLocale),
@@ -784,12 +864,12 @@ export const MemoDetailModal = ({
   const sharePreparedNoteImage = useCallback(async (prepared: MobilePreparedNoteImage) => {
     try {
       const Sharing = await import("expo-sharing");
-      if (!(await Sharing.isAvailableAsync())) throw new Error(resolvedLocale === "en-US" ? "Sharing is unavailable on this device." : "当前设备无法打开系统分享面板。");
+      if (!(await Sharing.isAvailableAsync())) throw new Error(resolvedLocale !== "zh-CN" ? "Sharing is unavailable on this device." : "当前设备无法打开系统分享面板。");
       await Sharing.shareAsync(prepared.uri, { dialogTitle: prepared.filename, mimeType: prepared.mimeType });
     } catch (shareError) {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Share failed" : "分享失败",
-        shareError instanceof Error ? shareError.message : (resolvedLocale === "en-US" ? "Try again later." : "请稍后重试。")
+        resolvedLocale !== "zh-CN" ? "Share failed" : "分享失败",
+        shareError instanceof Error ? shareError.message : (resolvedLocale !== "zh-CN" ? "Try again later." : "请稍后重试。")
       );
     }
   }, [resolvedLocale]);
@@ -797,9 +877,9 @@ export const MemoDetailModal = ({
   const copyPreparedNoteImage = useCallback(async (prepared: MobilePreparedNoteImage) => {
     try {
       await Clipboard.setImageAsync(prepared.base64);
-      Alert.alert(resolvedLocale === "en-US" ? "Copied" : "复制成功", resolvedLocale === "en-US" ? "The image is on your clipboard." : "图片已复制到剪贴板。");
+      Alert.alert(resolvedLocale !== "zh-CN" ? "Copied" : "复制成功", resolvedLocale !== "zh-CN" ? "The image is on your clipboard." : "图片已复制到剪贴板。");
     } catch {
-      Alert.alert(resolvedLocale === "en-US" ? "Copy failed" : "复制失败", resolvedLocale === "en-US" ? "Try saving the image instead." : "请尝试保存图片。" );
+      Alert.alert(resolvedLocale !== "zh-CN" ? "Copy failed" : "复制失败", resolvedLocale !== "zh-CN" ? "Try saving the image instead." : "请尝试保存图片。" );
     }
   }, [resolvedLocale]);
 
@@ -816,18 +896,45 @@ export const MemoDetailModal = ({
       await FileSystem.StorageAccessFramework.writeAsStringAsync(destination, prepared.base64, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      Alert.alert(resolvedLocale === "en-US" ? "Saved" : "保存成功", prepared.filename);
+      Alert.alert(resolvedLocale !== "zh-CN" ? "Saved" : "保存成功", prepared.filename);
     } catch (saveError) {
       Alert.alert(
-        resolvedLocale === "en-US" ? "Save failed" : "保存失败",
-        saveError instanceof Error ? saveError.message : (resolvedLocale === "en-US" ? "Try again later." : "请稍后重试。")
+        resolvedLocale !== "zh-CN" ? "Save failed" : "保存失败",
+        saveError instanceof Error ? saveError.message : (resolvedLocale !== "zh-CN" ? "Try again later." : "请稍后重试。")
       );
     }
   }, [resolvedLocale]);
 
   return (
-    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen" visible={visible}>
-      <SafeAreaView style={styles.modalSafeArea}>
+    <Modal animationType="slide" onRequestClose={isEditing ? () => void editor.requestClose() : onClose} presentationStyle="fullScreen" visible={visible}>
+      {/* Unmount the DomWebView with the modal. Updating its props after RN hides
+          the native view rejects injectJavaScript as an uncaught promise. */}
+      {visible ? (
+      <SafeAreaView style={isEditing ? styles.richEditorSafeArea : styles.modalSafeArea}>
+        <KeyboardAvoidingView
+          behavior="height"
+          enabled={Platform.OS === "android" && isEditing}
+          style={styles.richEditorKeyboardAvoiding}
+        >
+        {isEditing ? (
+          <View style={styles.createMemoHeader}>
+            <Pressable accessibilityLabel="返回" accessibilityRole="button" disabled={editor.uploading} onPress={() => void editor.requestClose()} style={styles.createMemoBackButton}>
+              <ChevronLeft color={editor.uploading ? "#cbd5e1" : "#0f172a"} size={30} />
+            </Pressable>
+            <View style={styles.createMemoHeaderActions}>
+              <Text numberOfLines={1} style={[styles.createMemoStatus, styles.richEditorHeaderStatus, (editor.saving || editor.uploading || editor.dirty) && styles.createMemoStatusActive, editor.error && styles.richEditorStatusError]}>{editor.saveLabel}</Text>
+              <Pressable
+                accessibilityLabel="完成编辑"
+                accessibilityRole="button"
+                disabled={editor.uploading || !editor.ready}
+                onPress={() => void editor.requestClose()}
+                style={[styles.createMemoDoneButton, (editor.uploading || !editor.ready) && styles.createMemoDoneButtonDisabled]}
+              >
+                {editor.saving ? <ActivityIndicator color="#64748b" size="small" /> : <Text style={[styles.createMemoDoneText, (editor.uploading || !editor.ready) && styles.createMemoDoneTextDisabled]}>完成</Text>}
+              </Pressable>
+            </View>
+          </View>
+        ) : (
         <View style={styles.detailHeader}>
           <Pressable accessibilityLabel="返回列表" accessibilityRole="button" onPress={onClose} style={styles.detailHeaderButton}>
             <ChevronLeft color="#475569" size={21} />
@@ -896,8 +1003,9 @@ export const MemoDetailModal = ({
             ) : null}
           </View>
         </View>
+        )}
 
-        {syncStatus === "conflict" && memo ? (
+        {!isEditing && syncStatus === "conflict" && memo ? (
           <View style={styles.conflictBanner}>
             <Text style={styles.conflictBannerText}>
               云端笔记已在其他标签页、设备，或离线期间被更新。可先复制本地草稿，再采用云端版本后继续编辑。
@@ -932,7 +1040,7 @@ export const MemoDetailModal = ({
           </View>
         ) : null}
 
-        {(syncStatus === "error" || syncStatus === "pending") && memo ? (
+        {!isEditing && (syncStatus === "error" || syncStatus === "pending") && memo ? (
           <View style={syncStatus === "error" ? styles.syncErrorBanner : styles.syncPendingBanner}>
             <Text style={syncStatus === "error" ? styles.syncErrorBannerText : styles.syncPendingBannerText}>
               {syncStatus === "error"
@@ -968,8 +1076,49 @@ export const MemoDetailModal = ({
           </View>
         ) : memo ? (
           <View style={detailLayoutStyles.body}>
+            {isEditing ? (
+              <View style={{ paddingHorizontal: 12, paddingTop: 8 }}>
+                <TextInput
+                  autoFocus={editingSession?.initialFocus === "title"}
+                  onChangeText={(value) => {
+                    editor.setTitle(value);
+                    editor.markDirty();
+                  }}
+                  placeholder={DEFAULT_MEMO_TITLE}
+                  placeholderTextColor="#94a3b8"
+                  selectTextOnFocus={editingSession?.initialFocus === "title"}
+                  style={styles.createMemoTitleInput}
+                  value={editor.title}
+                />
+                <View style={[styles.createMemoMetaRow, styles.richStandaloneMetaRow]}>
+                  <Pressable accessibilityLabel="所在笔记本" accessibilityRole="button" onPress={() => editor.setNotebookPickerOpen(true)} style={styles.createMemoNotebookButton}>
+                    <Text numberOfLines={1} style={styles.createMemoNotebookText}>{editor.notebookLabel}</Text>
+                    <ChevronDown color="#64748b" size={14} />
+                  </Pressable>
+                  <Pressable accessibilityLabel="选择笔记标签" accessibilityRole="button" onPress={() => editor.setTagPickerOpen(true)} style={[styles.createMemoTagsButton, styles.richStandaloneTagsInput]}>
+                    <Text numberOfLines={1} style={[styles.createMemoTagsInput, !editor.tagsText && styles.createMemoTagsPlaceholder]}>
+                      {editor.tagsText || "添加标签"}
+                    </Text>
+                    <ChevronDown color="#94a3b8" size={14} />
+                  </Pressable>
+                  <SmartTagButton
+                    client={client}
+                    contentMarkdown={editor.contentMarkdown}
+                    disabled={editor.saving || editor.uploading}
+                    onChange={(nextTags) => {
+                      editor.setTagsText(nextTags.join(", "));
+                      editor.markDirty();
+                    }}
+                    selectedTags={parseTags(editor.tagsText)}
+                    title={editor.title}
+                  />
+                </View>
+                {editor.draftRestored ? <Text style={styles.richEditorDraftNotice}>已恢复上次未完成的本地草稿</Text> : null}
+                {editor.error ? <Text style={styles.richEditorInlineError}>{editor.error}</Text> : null}
+              </View>
+            ) : (
             <View style={detailLayoutStyles.meta}>
-              {!memo.isDeleted && !isVisualDiagram ? (
+              {!memo.isDeleted && !locksRichTextEdit ? (
                 <Pressable
                   accessibilityHint="进入编辑并聚焦标题"
                   accessibilityLabel="编辑笔记标题"
@@ -997,10 +1146,24 @@ export const MemoDetailModal = ({
                 />
               )}
               <View style={styles.detailMetaRow}>
+                {memo.isDeleted ? (
                 <View style={styles.detailNotebookButton}>
                   <Text numberOfLines={1} selectable style={styles.detailNotebookName}>{notebookName}</Text>
                   <ChevronDown color="#94a3b8" size={14} />
                 </View>
+                ) : (
+                <Pressable
+                  accessibilityHint="更改笔记所属笔记本"
+                  accessibilityLabel="所在笔记本"
+                  accessibilityRole="button"
+                  disabled={isSaving}
+                  onPress={() => setViewerNotebookPickerOpen(true)}
+                  style={styles.detailNotebookButton}
+                >
+                  <Text numberOfLines={1} style={styles.detailNotebookName}>{notebookName}</Text>
+                  <ChevronDown color="#94a3b8" size={14} />
+                </Pressable>
+                )}
                 <View style={styles.detailTagsGroup}>
                   <Tag color="#64748b" size={16} />
                   <HighlightedMetadataText
@@ -1014,80 +1177,94 @@ export const MemoDetailModal = ({
                 </View>
               </View>
               <Text selectable style={styles.detailTimestamps}>
-                {resolvedLocale === "en-US" ? "Created" : "创建于"} {formatMemoDetailDate(memo.createdAt, resolvedLocale)}
+                {resolvedLocale !== "zh-CN" ? "Created" : "创建于"} {formatMemoDetailDate(memo.createdAt, resolvedLocale)}
                 {" · "}
-                {resolvedLocale === "en-US" ? "Updated" : "更新于"} {formatMemoDetailDate(memo.updatedAt, resolvedLocale)}
+                {resolvedLocale !== "zh-CN" ? "Updated" : "更新于"} {formatMemoDetailDate(memo.updatedAt, resolvedLocale)}
               </Text>
               {searchOpen ? (
                 <View style={styles.noteSearchPanel}>
-                  <View style={styles.searchBox}>
-                    <Search color="#64748b" size={18} />
-                    <TextInput
-                      accessibilityLabel="在当前笔记内搜索"
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      onChangeText={(value) => {
-                        setSearchQuery(value);
-                        setBodySearchMatchCount(0);
-                        setActiveMatchIndex(0);
-                      }}
-                      placeholder="在当前笔记内搜索"
-                      placeholderTextColor="#94a3b8"
-                      style={styles.searchInput}
-                      value={searchQuery}
-                    />
-                    <Text style={[styles.noteSearchCount, searchQuery.trim() && searchMatchCount === 0 && styles.noteSearchCountEmpty]}>{searchMatchLabel}</Text>
-                  </View>
-                  <View style={styles.richEditorSearchActions}>
-                    <DetailActionButton disabled={searchMatchCount === 0} label="上一个搜索结果" onPress={() => moveSearchMatch(-1)}>
-                      <ChevronLeft color={searchMatchCount === 0 ? "#cbd5e1" : "#0f172a"} size={16} />
-                    </DetailActionButton>
-                    <DetailActionButton disabled={searchMatchCount === 0} label="下一个搜索结果" onPress={() => moveSearchMatch(1)}>
-                      <ChevronRight color={searchMatchCount === 0 ? "#cbd5e1" : "#0f172a"} size={16} />
-                    </DetailActionButton>
-                    <DetailActionButton label="关闭搜索" onPress={() => {
-                      setSearchOpen(false);
-                      setSearchQuery("");
+                  <Search color="#64748b" size={16} />
+                  <TextInput
+                    accessibilityLabel="在当前笔记内搜索"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    onChangeText={(value) => {
+                      setSearchQuery(value);
                       setBodySearchMatchCount(0);
                       setActiveMatchIndex(0);
-                      safeDomCall(() => viewerRef.current?.search("", -1));
-                    }}>
-                      <X color="#0f172a" size={16} />
-                    </DetailActionButton>
-                  </View>
+                    }}
+                    onSubmitEditing={() => moveSearchMatch(1)}
+                    placeholder="搜索"
+                    placeholderTextColor="#94a3b8"
+                    returnKeyType="search"
+                    style={styles.noteSearchInput}
+                    value={searchQuery}
+                  />
+                  <Text
+                    accessibilityLiveRegion="polite"
+                    style={[styles.noteSearchCount, searchQuery.trim() && searchMatchCount === 0 && styles.noteSearchCountEmpty]}
+                  >
+                    {searchMatchLabel}
+                  </Text>
+                  <Pressable
+                    accessibilityLabel="上一个搜索结果"
+                    accessibilityRole="button"
+                    disabled={searchMatchCount === 0}
+                    hitSlop={4}
+                    onPress={() => moveSearchMatch(-1)}
+                    style={[styles.noteSearchIconButton, searchMatchCount === 0 && styles.buttonDisabled]}
+                  >
+                    <ChevronUp color={searchMatchCount === 0 ? "#cbd5e1" : "#0f172a"} size={18} />
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="下一个搜索结果"
+                    accessibilityRole="button"
+                    disabled={searchMatchCount === 0}
+                    hitSlop={4}
+                    onPress={() => moveSearchMatch(1)}
+                    style={[styles.noteSearchIconButton, searchMatchCount === 0 && styles.buttonDisabled]}
+                  >
+                    <ChevronDown color={searchMatchCount === 0 ? "#cbd5e1" : "#0f172a"} size={18} />
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="关闭搜索"
+                    accessibilityRole="button"
+                    hitSlop={4}
+                    onPress={closeNoteSearch}
+                    style={styles.noteSearchIconButton}
+                  >
+                    <X color="#0f172a" size={16} />
+                  </Pressable>
                 </View>
               ) : null}
               <View style={styles.detailDivider} />
             </View>
+            )}
             {baseUrl ? (
               <LocalTiptapEditor
                 key={memo.id}
+                aiPromptsJson={isEditing ? editor.aiPromptsJson : undefined}
+                autoFocus={isEditing && editingSession?.initialFocus === "body"}
                 baseUrl={baseUrl}
                 content={viewerContent}
-                dom={{
-                  ...SAFE_DOM_WEBVIEW_PROPS,
-                  bounces: true,
-                  contentInsetAdjustmentBehavior: "never",
-                  overScrollMode: "never",
-                  scrollEnabled: false,
-                  style: [
-                    detailLayoutStyles.viewer,
-                    resolvedTheme === "dark" ? detailLayoutStyles.viewerDark : null,
-                  ],
-                }}
+                dom={noteBodyDom}
                 locale={resolvedLocale}
-                mode="viewer"
-                onImagePreview={onImagePreview}
-                onDoublePress={isVisualDiagram ? undefined : async () => {
+                mode={isEditing ? "editor" : "viewer"}
+                onAiCancel={isEditing ? editor.cancelSelectionAi : undefined}
+                onAiRequest={isEditing ? editor.requestSelectionAi : undefined}
+                onChange={isEditing ? editor.persistDraft : undefined}
+                onImagePreview={isEditing ? undefined : onImagePreview}
+                onDoublePress={isEditing || locksRichTextEdit ? undefined : async () => {
                   beginEditorStartup();
                   onRichEdit(memo, "body");
                 }}
                 onImageExportEvent={handleImageExportEvent}
-                onLoadResource={loadViewerResource}
+                onLoadResource={isEditing ? editor.loadEditorResource : loadViewerResource}
+                onPickImage={isEditing ? editor.pickAndUploadImage : undefined}
                 onReady={async () => {
                   setViewerReady(true);
                 }}
-                onResourcePress={onResourcePress}
+                onResourcePress={isEditing ? editor.selectResource : onResourcePress}
                 onSearchResult={async (count, _index, resultQuery) => {
                   if (resultQuery === searchQuery) {
                     setBodySearchMatchCount(count);
@@ -1095,12 +1272,12 @@ export const MemoDetailModal = ({
                 }}
                 ref={viewerRef}
                 theme={resolvedTheme}
-                visualDiagramJson={visualDiagramJson}
-                visualDiagramNote={isVisualDiagram}
+                visualDiagramJson={isEditing ? undefined : visualDiagramJson}
+                visualDiagramNote={!isEditing && isVisualDiagram}
               />
             ) : (
               <View style={styles.centerState}>
-                <Text style={styles.errorText}>{resolvedLocale === "en-US" ? "Not signed in." : "未登录。"}</Text>
+                <Text style={styles.errorText}>{resolvedLocale !== "zh-CN" ? "Not signed in." : "未登录。"}</Text>
               </View>
             )}
             {!viewerReady ? (
@@ -1114,7 +1291,7 @@ export const MemoDetailModal = ({
             <Text style={styles.errorText}>笔记加载失败</Text>
           </View>
         )}
-        {memo && !memo.isDeleted && !isVisualDiagram ? (
+        {memo && !memo.isDeleted && !locksRichTextEdit && !isEditing ? (
           <Pressable
             accessibilityLabel="编辑笔记"
             accessibilityRole="button"
@@ -1127,16 +1304,17 @@ export const MemoDetailModal = ({
             <Pencil color="#ffffff" size={20} />
           </Pressable>
         ) : null}
+        </KeyboardAvoidingView>
         {memo ? (
           <Modal animationType="fade" onRequestClose={() => setActionsOpen(false)} transparent visible={actionsOpen}>
             <Pressable onPress={() => setActionsOpen(false)} style={styles.actionSheetBackdrop}>
               <Pressable style={styles.actionSheet}>
                 <View style={styles.actionSheetHandle} />
-                <Text style={styles.actionSheetTitle}>{resolvedLocale === "en-US" ? "Note actions" : "笔记操作"}</Text>
-                {!memo.isDeleted && !isVisualDiagram ? (
+                <Text style={styles.actionSheetTitle}>{resolvedLocale !== "zh-CN" ? "Note actions" : "笔记操作"}</Text>
+                {!memo.isDeleted && !locksRichTextEdit ? (
                   <DetailActionSheetItem
                     icon={<Sparkles color="#16A06E" size={18} />}
-                    label={resolvedLocale === "en-US" ? "AI note assistant" : "AI 笔记助手"}
+                    label={resolvedLocale !== "zh-CN" ? "AI note assistant" : "AI 笔记助手"}
                     onPress={() => closeActionsAndRun(() => setAiAssistantOpen(true))}
                   />
                 ) : null}
@@ -1144,28 +1322,28 @@ export const MemoDetailModal = ({
                   disabled={!canCopyMemoId}
                   icon={<Copy color="#0f172a" size={18} />}
                   label={canCopyMemoId
-                    ? (resolvedLocale === "en-US" ? "Copy note ID" : "复制笔记 ID")
-                    : (resolvedLocale === "en-US" ? "Copy note ID after sync" : "同步后可复制笔记 ID")}
+                    ? (resolvedLocale !== "zh-CN" ? "Copy note ID" : "复制笔记 ID")
+                    : (resolvedLocale !== "zh-CN" ? "Copy note ID after sync" : "同步后可复制笔记 ID")}
                   onPress={() => closeActionsAndRun(() => void copyMemoId())}
                 />
                 <DetailActionSheetItem
                   disabled={isExportingImage || !viewerReady}
                   icon={isExportingImage ? <ActivityIndicator color="#16A06E" size="small" /> : <Share2 color="#0f172a" size={18} />}
                   label={isExportingImage
-                    ? (resolvedLocale === "en-US" ? "Generating share image" : "正在生成分享图片")
-                    : (resolvedLocale === "en-US" ? "Share as image" : "分享为图片")}
+                    ? (resolvedLocale !== "zh-CN" ? "Generating share image" : "正在生成分享图片")
+                    : (resolvedLocale !== "zh-CN" ? "Share as image" : "分享为图片")}
                   onPress={() => closeActionsAndRun(() => setImageShareOptionsOpen(true))}
                 />
                 <DetailActionSheetItem
                   disabled={isExportingImage || !viewerReady}
                   icon={<Download color="#0f172a" size={18} />}
-                  label={resolvedLocale === "en-US" ? "Advanced export PNG" : "高级导出 PNG"}
+                  label={resolvedLocale !== "zh-CN" ? "Advanced export PNG" : "高级导出 PNG"}
                   onPress={() => closeActionsAndRun(() => exportMemoImage("png"))}
                 />
                 <DetailActionSheetItem
                   disabled={isExportingImage || !viewerReady}
                   icon={<Download color="#0f172a" size={18} />}
-                  label={resolvedLocale === "en-US" ? "Advanced export JPEG" : "高级导出 JPEG"}
+                  label={resolvedLocale !== "zh-CN" ? "Advanced export JPEG" : "高级导出 JPEG"}
                   onPress={() => closeActionsAndRun(() => exportMemoImage("jpeg"))}
                 />
                 {memo.isDeleted ? (
@@ -1187,14 +1365,14 @@ export const MemoDetailModal = ({
           <Pressable onPress={() => setImageShareOptionsOpen(false)} style={styles.actionSheetBackdrop}>
             <Pressable style={[styles.actionSheet, imageShareStyles.sheetContainer]}>
               <View style={styles.actionSheetHandle} />
-              <Text style={styles.actionSheetTitle}>{resolvedLocale === "en-US" ? "Share as image" : "分享为图片"}</Text>
+              <Text style={styles.actionSheetTitle}>{resolvedLocale !== "zh-CN" ? "Share as image" : "分享为图片"}</Text>
               <ScrollView contentContainerStyle={imageShareStyles.optionsContent} showsVerticalScrollIndicator={false} style={imageShareStyles.optionsScroll}>
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Theme" : "主题风格"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Theme" : "主题风格"}</Text>
               <View style={imageShareStyles.themeGrid}>
                 {MOBILE_THEME_OPTIONS.map((item) => {
                   const isSelected = imageShareTheme === item.id;
-                  const label = resolvedLocale === "en-US" ? item.labelEn : item.labelZh;
+                  const label = resolvedLocale !== "zh-CN" ? item.labelEn : item.labelZh;
                   return (
                     <Pressable
                       key={item.id}
@@ -1215,12 +1393,12 @@ export const MemoDetailModal = ({
                 })}
               </View>
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Font size" : "字号大小"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Font size" : "字号大小"}</Text>
               <View style={imageShareStyles.choiceRow}>
                 {([
-                  ["sm", resolvedLocale === "en-US" ? "Compact" : "紧凑"],
-                  ["md", resolvedLocale === "en-US" ? "Standard" : "标准"],
-                  ["lg", resolvedLocale === "en-US" ? "Comfortable" : "舒适"],
+                  ["sm", resolvedLocale !== "zh-CN" ? "Compact" : "紧凑"],
+                  ["md", resolvedLocale !== "zh-CN" ? "Standard" : "标准"],
+                  ["lg", resolvedLocale !== "zh-CN" ? "Comfortable" : "舒适"],
                 ] as const).map(([value, label]) => (
                   <Pressable key={value} accessibilityRole="button" onPress={() => setImageShareFontSize(value)} style={[imageShareStyles.choice, imageShareFontSize === value && imageShareStyles.choiceActive]}>
                     <Text style={[imageShareStyles.choiceText, imageShareFontSize === value && imageShareStyles.choiceTextActive]}>{label}</Text>
@@ -1228,12 +1406,12 @@ export const MemoDetailModal = ({
                 ))}
               </View>
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Card width" : "卡片宽度"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Card width" : "卡片宽度"}</Text>
               <View style={imageShareStyles.choiceRow}>
                 {([
-                  ["compact", resolvedLocale === "en-US" ? "Compact" : "紧凑"],
-                  ["standard", resolvedLocale === "en-US" ? "Standard" : "标准"],
-                  ["wide", resolvedLocale === "en-US" ? "Wide" : "宽屏"],
+                  ["compact", resolvedLocale !== "zh-CN" ? "Compact" : "紧凑"],
+                  ["standard", resolvedLocale !== "zh-CN" ? "Standard" : "标准"],
+                  ["wide", resolvedLocale !== "zh-CN" ? "Wide" : "宽屏"],
                 ] as const).map(([value, label]) => (
                   <Pressable key={value} accessibilityRole="button" onPress={() => setImageShareCardWidth(value)} style={[imageShareStyles.choice, imageShareCardWidth === value && imageShareStyles.choiceActive]}>
                     <Text style={[imageShareStyles.choiceText, imageShareCardWidth === value && imageShareStyles.choiceTextActive]}>{label}</Text>
@@ -1241,11 +1419,11 @@ export const MemoDetailModal = ({
                 ))}
               </View>
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Typography" : "字体风格"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Typography" : "字体风格"}</Text>
               <View style={imageShareStyles.choiceRow}>
                 {MOBILE_FONT_OPTIONS.map((item) => {
                   const isSelected = imageShareFontStyle === item.id;
-                  const label = resolvedLocale === "en-US" ? item.labelEn : item.labelZh;
+                  const label = resolvedLocale !== "zh-CN" ? item.labelEn : item.labelZh;
                   return (
                     <Pressable
                       key={item.id}
@@ -1262,13 +1440,13 @@ export const MemoDetailModal = ({
                 })}
               </View>
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Content Elements" : "显示内容"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Content Elements" : "显示内容"}</Text>
               {([
-                [resolvedLocale === "en-US" ? "Title" : "笔记标题", imageShareTitle, setImageShareTitle],
-                [resolvedLocale === "en-US" ? "Notebook" : "笔记本", imageShareNotebook, setImageShareNotebook],
-                [resolvedLocale === "en-US" ? "Tags" : "标签", imageShareTags, setImageShareTags],
-                [resolvedLocale === "en-US" ? "Updated time" : "更新时间", imageShareUpdatedAt, setImageShareUpdatedAt],
-                [resolvedLocale === "en-US" ? "EdgeEver branding" : "EdgeEver 品牌标识", imageShareBranding, setImageShareBranding],
+                [resolvedLocale !== "zh-CN" ? "Title" : "笔记标题", imageShareTitle, setImageShareTitle],
+                [resolvedLocale !== "zh-CN" ? "Notebook" : "笔记本", imageShareNotebook, setImageShareNotebook],
+                [resolvedLocale !== "zh-CN" ? "Tags" : "标签", imageShareTags, setImageShareTags],
+                [resolvedLocale !== "zh-CN" ? "Updated time" : "更新时间", imageShareUpdatedAt, setImageShareUpdatedAt],
+                [resolvedLocale !== "zh-CN" ? "EdgeEver branding" : "EdgeEver 品牌标识", imageShareBranding, setImageShareBranding],
               ] as const).map(([label, selected, setSelected]) => (
                 <Pressable key={label} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => setSelected(!selected)} style={imageShareStyles.optionRow}>
                   <Text style={imageShareStyles.optionLabel}>{label}</Text>
@@ -1276,14 +1454,14 @@ export const MemoDetailModal = ({
                 </Pressable>
               ))}
 
-              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale === "en-US" ? "Format" : "格式"}</Text>
+              <Text style={styles.actionSheetSectionTitle}>{resolvedLocale !== "zh-CN" ? "Format" : "格式"}</Text>
               <View style={imageShareStyles.choiceRow}>
                 {(["png", "jpeg"] as const).map((value) => (
                   <Pressable key={value} accessibilityRole="button" onPress={() => setImageShareFormat(value)} style={[imageShareStyles.formatChoice, imageShareFormat === value && imageShareStyles.choiceActive]}>
                     <Text style={[imageShareStyles.choiceText, imageShareFormat === value && imageShareStyles.choiceTextActive]}>
                       {value === "png"
-                        ? (resolvedLocale === "en-US" ? "PNG · Crisp text" : "PNG · 超清无损")
-                        : (resolvedLocale === "en-US" ? "JPEG · Smaller file" : "JPEG · 体积小")}
+                        ? (resolvedLocale !== "zh-CN" ? "PNG · Crisp text" : "PNG · 超清无损")
+                        : (resolvedLocale !== "zh-CN" ? "JPEG · Smaller file" : "JPEG · 体积小")}
                     </Text>
                   </Pressable>
                 ))}
@@ -1311,7 +1489,7 @@ export const MemoDetailModal = ({
               >
                 <Share2 color="#ffffff" size={18} />
                 <Text style={imageShareStyles.shareButtonText}>
-                  {resolvedLocale === "en-US" ? "Generate preview" : "生成预览"}
+                  {resolvedLocale !== "zh-CN" ? "Generate preview" : "生成预览"}
                 </Text>
               </Pressable>
               </ScrollView>
@@ -1321,8 +1499,8 @@ export const MemoDetailModal = ({
         <Modal animationType="slide" onRequestClose={() => setPreparedNoteImage(null)} presentationStyle="fullScreen" visible={Boolean(preparedNoteImage)}>
           <SafeAreaView style={imageShareStyles.previewSafeArea}>
             <View style={imageShareStyles.previewHeader}>
-              <Text style={imageShareStyles.previewTitle}>{resolvedLocale === "en-US" ? "Image preview" : "图片预览"}</Text>
-              <Pressable accessibilityLabel={resolvedLocale === "en-US" ? "Close preview" : "关闭预览"} accessibilityRole="button" onPress={() => setPreparedNoteImage(null)} style={imageShareStyles.previewCloseButton}>
+              <Text style={imageShareStyles.previewTitle}>{resolvedLocale !== "zh-CN" ? "Image preview" : "图片预览"}</Text>
+              <Pressable accessibilityLabel={resolvedLocale !== "zh-CN" ? "Close preview" : "关闭预览"} accessibilityRole="button" onPress={() => setPreparedNoteImage(null)} style={imageShareStyles.previewCloseButton}>
                 <X color="#0f172a" size={22} />
               </Pressable>
             </View>
@@ -1357,15 +1535,15 @@ export const MemoDetailModal = ({
                 <View style={imageShareStyles.previewActions}>
                   <Pressable accessibilityRole="button" onPress={() => void copyPreparedNoteImage(preparedNoteImage)} style={imageShareStyles.previewSecondaryButton}>
                     <Copy color="#0f172a" size={18} />
-                    <Text style={imageShareStyles.previewSecondaryButtonText}>{resolvedLocale === "en-US" ? "Copy" : "复制图片"}</Text>
+                    <Text style={imageShareStyles.previewSecondaryButtonText}>{resolvedLocale !== "zh-CN" ? "Copy" : "复制图片"}</Text>
                   </Pressable>
                   <Pressable accessibilityRole="button" onPress={() => void savePreparedNoteImage(preparedNoteImage)} style={imageShareStyles.previewSecondaryButton}>
                     <Download color="#0f172a" size={18} />
-                    <Text style={imageShareStyles.previewSecondaryButtonText}>{resolvedLocale === "en-US" ? "Save" : "保存图片"}</Text>
+                    <Text style={imageShareStyles.previewSecondaryButtonText}>{resolvedLocale !== "zh-CN" ? "Save" : "保存图片"}</Text>
                   </Pressable>
                   <Pressable accessibilityRole="button" onPress={() => void sharePreparedNoteImage(preparedNoteImage)} style={imageShareStyles.previewPrimaryButton}>
                     <Share2 color="#ffffff" size={18} />
-                    <Text style={imageShareStyles.previewPrimaryButtonText}>{resolvedLocale === "en-US" ? "Share" : "系统分享"}</Text>
+                    <Text style={imageShareStyles.previewPrimaryButtonText}>{resolvedLocale !== "zh-CN" ? "Share" : "系统分享"}</Text>
                   </Pressable>
                 </View>
               </>
@@ -1384,8 +1562,8 @@ export const MemoDetailModal = ({
           <View style={resourceImageStyles.previewBackdrop}>
             {imagePreview ? (
               <Pressable
-                accessibilityHint={resolvedLocale === "en-US" ? "Long press for image actions" : "长按打开图片操作"}
-                accessibilityLabel={imagePreview.alt || (resolvedLocale === "en-US" ? "Image preview" : "图片预览")}
+                accessibilityHint={resolvedLocale !== "zh-CN" ? "Long press for image actions" : "长按打开图片操作"}
+                accessibilityLabel={imagePreview.alt || (resolvedLocale !== "zh-CN" ? "Image preview" : "图片预览")}
                 accessibilityRole="image"
                 delayLongPress={400}
                 onLongPress={() => {
@@ -1409,7 +1587,7 @@ export const MemoDetailModal = ({
               </Pressable>
             ) : null}
             <Pressable
-              accessibilityLabel={resolvedLocale === "en-US" ? "Close image preview" : "关闭图片预览"}
+              accessibilityLabel={resolvedLocale !== "zh-CN" ? "Close image preview" : "关闭图片预览"}
               accessibilityRole="button"
               onPress={() => setImagePreview(null)}
               style={resourceImageStyles.previewClose}
@@ -1420,20 +1598,69 @@ export const MemoDetailModal = ({
         </Modal>
         <MobileResourceActions
           canMutate={Boolean(memo && !memo.isDeleted && !memo.id.startsWith("local:"))}
-          onClose={() => setResourceTarget(null)}
+          onClose={() => isEditing ? editor.setResourceTarget(null) : setResourceTarget(null)}
           onDelete={async (target) => {
+            if (isEditing) {
+              await editor.deleteResource(target);
+              return;
+            }
             if (!memo) return;
             await onDeleteResource(memo, target);
           }}
-          onDownload={downloadResource}
+          onDownload={isEditing ? editor.downloadResource : downloadResource}
           onRename={async (target, filename) => {
+            if (isEditing) {
+              await editor.renameResource(target, filename);
+              return;
+            }
             if (!memo) return;
             await onRenameResource(memo, target, filename);
           }}
-          onSaveAs={saveResourceAs}
-          target={resourceTarget}
+          onSaveAs={isEditing ? editor.saveResourceAs : saveResourceAs}
+          target={isEditing ? editor.resourceTarget : resourceTarget}
         />
+        {isEditing ? (
+          <>
+            <NotebookPickerModal
+              activeNotebookId={editor.notebookId}
+              includeAllNotes={false}
+              notebooks={notebooks}
+              onClose={() => editor.setNotebookPickerOpen(false)}
+              onSelect={(nextNotebookId) => {
+                if (!nextNotebookId || nextNotebookId === "all") {
+                  editor.setNotebookPickerOpen(false);
+                  return;
+                }
+                editor.setNotebookId(nextNotebookId);
+                editor.setNotebookPickerOpen(false);
+                editor.markDirty();
+              }}
+              visible={editor.notebookPickerOpen}
+            />
+            <TagPickerModal
+              dataScope={createMobileDataScope(session?.baseUrl ?? baseUrl, session?.user?.id)}
+              onChange={(nextTags) => {
+                editor.setTagsText(nextTags.join(", "));
+                editor.markDirty();
+              }}
+              onClose={() => editor.setTagPickerOpen(false)}
+              selectedTags={parseTags(editor.tagsText)}
+              visible={editor.tagPickerOpen}
+            />
+            {editor.uploadSourcePicker}
+          </>
+        ) : (
+          <NotebookPickerModal
+            activeNotebookId={memo?.notebookId ?? ""}
+            includeAllNotes={false}
+            notebooks={notebooks}
+            onClose={() => setViewerNotebookPickerOpen(false)}
+            onSelect={handleViewerNotebookSelect}
+            visible={viewerNotebookPickerOpen}
+          />
+        )}
       </SafeAreaView>
+      ) : null}
     </Modal>
   );
 };

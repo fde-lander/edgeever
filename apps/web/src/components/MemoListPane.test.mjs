@@ -10,13 +10,32 @@ describe("memo context menu", () => {
     expect(source).toContain("<DropdownMenuSubContent");
     expect(source).not.toContain("contextMoveOpen");
   });
+
+  test("opens the card menu without a modal scroll lock so the list does not hitch", () => {
+    const source = readFileSync(new URL("./MemoListPane.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("<DropdownMenu modal={false} open={true}");
+    expect(source).toContain("data-[state=open]:animate-none");
+    expect(source).toContain("onCloseAutoFocus={(event) => event.preventDefault()}");
+  });
 });
 
 describe("desktop memo list spacing", () => {
   test("reserves matching desktop scrollbar gutters on both sides", () => {
     const source = readFileSync(new URL("./MemoListPane.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("lg:px-0 lg:pb-3 lg:[scrollbar-gutter:stable_both-edges]");
+    expect(source).toContain("lg:px-2 lg:py-2 lg:pb-3 lg:[scrollbar-gutter:stable_both-edges]");
+  });
+});
+
+describe("memo list windowing", () => {
+  test("renders only virtualized memo cards instead of mapping the whole loaded list", () => {
+    const source = readFileSync(new URL("./MemoListPane.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("useVirtualizer");
+    expect(source).toContain("memoListVirtualizer.getVirtualItems()");
+    expect(source).toContain("memoListVirtualizer.measureElement");
+    expect(source).not.toContain("{memos.map((memo) => (");
   });
 });
 
@@ -26,5 +45,19 @@ describe("empty memo list creation", () => {
 
     expect(source).toContain('onClick={() => onCreateMemo()} disabled={isCreating}');
     expect(source).not.toContain('onClick={onCreateMemo} disabled={isCreating}');
+  });
+});
+
+describe("desktop bulk move", () => {
+  test("keeps a user-chosen notebook instead of snapping back to the current notebook", () => {
+    const memoListSource = readFileSync(new URL("./MemoListPane.tsx", import.meta.url), "utf8");
+    const workspaceSource = readFileSync(new URL("./WorkspaceApp.tsx", import.meta.url), "utf8");
+
+    expect(memoListSource).toContain("resolveSelectionMoveTargetNotebookId");
+    expect(memoListSource).toContain("disabled={selectedCount === 0 || !moveTargetNotebookId || isMoving || isTrashView || !canMove}");
+    expect(workspaceSource).toContain("resolveSelectionMoveTargetNotebookId");
+    expect(workspaceSource).toContain("canMove={canMoveSelectedMemos}");
+    expect(workspaceSource).not.toContain("setSelectionMoveTargetNotebookId(selectedNotebook.id)");
+    expect(memoListSource).not.toContain("setMoveTargetNotebookId(notebook.id)");
   });
 });

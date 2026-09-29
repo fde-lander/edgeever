@@ -2,7 +2,6 @@ import type { PluginPanelAction, PluginPanelActionVariant, PluginPanelChrome, Pl
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 
 const actionVariant = (variant?: PluginPanelActionVariant): "outline" | "solid" | "ghost" => {
@@ -42,18 +41,21 @@ const ToolbarItem = ({ item, onAction, onChange }: {
   }
   if (item.type === "tabs") {
     return (
-      <ToggleGroup
-        type="single"
-        value={item.value}
-        className="flex-wrap gap-1"
-        onValueChange={(value) => { if (value) onChange?.(item.key, value); }}
-      >
+      <div className="flex flex-wrap gap-1" role="tablist">
         {item.options.map((option) => (
-          <ToggleGroupItem key={option.value} value={option.value} variant="outline" size="sm">
+          <Button
+            key={option.value}
+            type="button"
+            size="sm"
+            variant={item.value === option.value ? "solid" : "outline"}
+            className="h-8 px-2.5 text-xs"
+            aria-selected={item.value === option.value}
+            onClick={() => onChange?.(item.key, option.value)}
+          >
             {option.label}
-          </ToggleGroupItem>
+          </Button>
         ))}
-      </ToggleGroup>
+      </div>
     );
   }
   if (item.type === "select") {
@@ -80,7 +82,7 @@ export const PluginPanelHeaderActions = ({ chrome }: { chrome: PluginPanelChrome
   const actions = chrome.header?.actions ?? [];
   if (!actions.length) return null;
   return (
-    <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-wrap items-center justify-end gap-2">
       {actions.map((action) => <ActionButton key={action.id} action={action} onAction={chrome.onAction} />)}
     </div>
   );
@@ -102,7 +104,7 @@ export const PluginPanelEmpty = ({ chrome }: { chrome: PluginPanelChrome }) => {
   return (
     <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-2 px-6 py-16 text-center">
       <p className="text-sm font-medium text-slate-800">{chrome.empty.title}</p>
-      {chrome.empty.description ? <p className="max-w-md text-sm text-slate-500">{chrome.empty.description}</p> : null}
+      {chrome.empty.description ? <p className="max-w-md text-xs leading-5 text-slate-500">{chrome.empty.description}</p> : null}
       {chrome.empty.action ? <ActionButton action={chrome.empty.action} onAction={chrome.onAction} /> : null}
     </div>
   );

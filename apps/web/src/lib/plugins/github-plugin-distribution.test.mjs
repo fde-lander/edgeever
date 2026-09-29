@@ -1,5 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { downloadGithubExtension, downloadPinnedGithubExtension, loadGithubInstallableManifest, loadGithubRepositoryManifest, parseGithubRepositoryUrl } from "./github-plugin-distribution.ts";
+import { stubUnavailableGithubInstance } from "./github-plugin-test-api.mjs";
+
+let restoreGithubInstance;
+beforeAll(() => { restoreGithubInstance = stubUnavailableGithubInstance(); });
+afterAll(() => { restoreGithubInstance?.(); });
 
 const manifest = {
   type: "plugin",
@@ -63,6 +68,30 @@ describe("GitHub plugin distribution", () => {
     expect(calls).toContain("https://api.github.com/repos/example/edgeever-plugin/contents/manifest.json");
     expect(calls).toContain("https://api.github.com/repos/example/edgeever-plugin/releases/tags/1.2.3");
     expect(calls).not.toContain("https://api.github.com/assets/1");
+  });
+
+  test("downloads public release assets when GitHub's REST API rate-limits the browser", async () => {
+    const request = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/contents/manifest.json")) return Response.json(manifest);
+      if (url.includes("/releases/tags/")) return new Response("rate limited", { status: 403 });
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const calls = [];
+    const downloadAsset = async (_coordinates, releaseTag, asset) => {
+      calls.push([releaseTag, asset.name]);
+      if (releaseTag === "1.2.3") throw new Error(`GitHub asset ${asset.name} failed with HTTP 404.`);
+      return new TextEncoder().encode(
+        asset.name === "manifest.json" ? JSON.stringify(manifest) : "export default { activate() {} };",
+      ).buffer;
+    };
+
+    const downloaded = await downloadGithubExtension("https://github.com/example/edgeever-plugin", request, downloadAsset);
+
+    expect(downloaded.releaseTag).toBe("v1.2.3");
+    expect(downloaded.pluginPackage?.mainJs).toContain("activate");
+    expect(calls[0]).toEqual(["1.2.3", "manifest.json"]);
+    expect(calls).toContainEqual(["v1.2.3", "main.js"]);
   });
 
   test("rejects a release without a bundled main.js asset", async () => {
@@ -197,6 +226,29 @@ describe("GitHub plugin distribution", () => {
     expect(calls[0]).toEqual(["1.2.3", "manifest.json"]);
     expect(calls).toContainEqual(["1.2.3", "main.js"]);
     expect(calls).toContainEqual(["1.2.3", "styles.css"]);
+  });
+
+  test("falls back to a v-prefixed marketplace release tag when the instance reports the GitHub release was not found", async () => {
+    const calls = [];
+    const assets = {
+      "manifest.json": new TextEncoder().encode(JSON.stringify(manifest)).buffer,
+      "main.js": new TextEncoder().encode("export default { activate() {} };").buffer,
+    };
+    const downloadAsset = async (_coordinates, releaseTag, asset) => {
+      calls.push([releaseTag, asset.name]);
+      if (releaseTag === "1.2.3") throw new Error("GitHub release was not found.");
+      const buffer = assets[asset.name];
+      if (!buffer) throw new Error(`GitHub asset ${asset.name} failed with HTTP 404.`);
+      return buffer;
+    };
+
+    const downloaded = await downloadPinnedGithubExtension("https://github.com/example/edgeever-plugin", "1.2.3", {
+      downloadAssetBytes: downloadAsset,
+    });
+
+    expect(downloaded.releaseTag).toBe("v1.2.3");
+    expect(calls[0]).toEqual(["1.2.3", "manifest.json"]);
+    expect(calls).toContainEqual(["v1.2.3", "main.js"]);
   });
 
   test("falls back to a v-prefixed marketplace release tag when the unprefixed tag is missing", async () => {

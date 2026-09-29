@@ -28,6 +28,14 @@ describe("desktop release workflow", () => {
     ].join("\n"));
     expect(desktopBuilderConfig).toContain("schemes:\n      - edgeever");
     expect(desktopBuilderConfig).not.toContain("edgeever-app");
+    expect(desktopBuilderConfig).toContain("PlugIns/EdgeEverShare.appex");
+    expect(desktopBuilderConfig).toContain("sign: ./scripts/sign-share-extension.cjs");
+    expect(desktopBuilderConfig).not.toContain("afterSign:");
+    const shareSigner = readFileSync(new URL("../apps/desktop/scripts/sign-share-extension.cjs", import.meta.url), "utf8");
+    expect(shareSigner).toContain("await signApp(opts)");
+    expect(shareSigner).not.toContain("await sign(opts)");
+    expect(shareSigner).toContain('"runtime"');
+    expect(shareSigner).toContain('"--timestamp"');
   });
 
   test("gates Draft release assets on the full project suite in Ubuntu", () => {
@@ -37,8 +45,10 @@ describe("desktop release workflow", () => {
     const releasePlan = mobileWorkflow.indexOf("      - name: Compare with previous formal release");
     expect(regressionTests).toBeGreaterThanOrEqual(0);
     expect(regressionTests).toBeLessThan(releasePlan);
-    expect(workflow).toContain('gh release view "$CURRENT_TAG"');
-    expect(mobileWorkflow).toContain('gh release view "$CURRENT_TAG"');
+    expect(workflow).toContain('gh release view "$CURRENT_TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl');
+    expect(mobileWorkflow).toContain('gh release view "$CURRENT_TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl');
+    expect(workflow).toContain("gh api \"$release_api\" --jq '.assets[].name'");
+    expect(mobileWorkflow).toContain("gh api \"$release_api\" --jq '.assets[].name'");
     expect(workflow).not.toContain('releases/tags/${CURRENT_TAG}');
     expect(mobileWorkflow).not.toContain('releases/tags/${CURRENT_TAG}');
   });
@@ -64,7 +74,7 @@ describe("desktop release workflow", () => {
   test("runs architecture-independent checks once", () => {
     for (const name of [
       "Cache Bun dependencies for shared validation",
-      "Verify Web precache budget",
+      "Verify Web performance budget",
       "Run project type checks",
       "Build debug sidecar for integration tests",
       "Run desktop regression tests",
@@ -116,11 +126,16 @@ describe("desktop release workflow", () => {
     expect(protocolE2eVerifier).toContain('fetch("edgeever-staged://" + pending.id)');
     expect(protocolE2eVerifier).toContain('const url = "edgeever-resource://resource/${cachedResourceId}"');
     expect(protocolE2eVerifier).toContain('DOM.setFileInputFiles');
+    expect(protocolE2eVerifier).toContain("renderer.bootstrap-ready");
+    expect(protocolE2eVerifier).toContain("objectId");
+    expect(protocolE2eVerifier).not.toContain("documentNode.root.nodeId");
     expect(protocolE2eVerifier).toContain('Browser.setDownloadBehavior');
     expect(packagedStartupVerifier).toContain('new Set(["renderer.origin-ready", "sidecar.ready", "renderer.bootstrap-ready"])');
     expect(packagedStartupVerifier).toContain('"renderer.origin-ready"');
     expect(packagedStartupVerifier).toContain('startsWith("edgeever-app://app/")');
     expect(desktopPackageVerifier).toContain("isVisualCppRuntimeDll");
+    expect(desktopPackageVerifier).toContain("EdgeEverShare.appex");
+    expect(desktopPackageVerifier).toContain("com\\.apple\\.share-services");
     expect(cargoConfig).toContain('target.x86_64-pc-windows-msvc');
     expect(cargoConfig).toContain('target-feature=+crt-static');
     expect(desktopBuilderConfig).toContain([

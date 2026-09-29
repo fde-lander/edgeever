@@ -25,6 +25,14 @@ const iosWorkspaceViewSource = readFileSync(
   new URL("../apps/ios/EdgeEver/Features/Workspace/WorkspaceView.swift", import.meta.url),
   "utf8"
 );
+const iosMemoDetailSource = readFileSync(
+  new URL("../apps/ios/EdgeEver/Features/Workspace/MemoDetailView.swift", import.meta.url),
+  "utf8"
+);
+const mobilePickersSource = readFileSync(
+  new URL("../apps/mobile/src/screens/WorkspacePickers.tsx", import.meta.url),
+  "utf8"
+);
 const mobileTagsSource = readFileSync(
   new URL("../apps/mobile/src/lib/mobile-tags.ts", import.meta.url),
   "utf8"
@@ -90,9 +98,26 @@ describe("mobile app scope", () => {
   });
 
   test("renders note detail body with the shared read-only TipTap viewer", () => {
-    expect(memoDetailSource).toContain('mode="viewer"');
+    expect(memoDetailSource).toContain('mode={isEditing ? "editor" : "viewer"}');
     expect(memoDetailSource).toContain("LocalTiptapEditor");
     expect(memoDetailSource).not.toContain("react-native-markdown-display");
+  });
+
+  test("opens existing-note editing in place without a blocking getMemo", () => {
+    const openRichEditorSource = workspaceSource.slice(
+      workspaceSource.indexOf("const openRichEditor ="),
+      workspaceSource.indexOf("const memos = useMemo"),
+    );
+    expect(openRichEditorSource).not.toContain("client.getMemo");
+    expect(openRichEditorSource).not.toContain("listMobileSyncQueueItems");
+    expect(openRichEditorSource).not.toContain("setSelectedMemoId(null)");
+    expect(openRichEditorSource).toContain("setRichEditingSession");
+    expect(workspaceSource).not.toContain("return <RichEditorModal");
+    expect(memoDetailSource).toContain("useMobileRichEditor");
+    expect(localTiptapEditorSource).toContain("editor.setEditable(!isViewer)");
+    expect(memoDetailSource).toContain("{visible ? (");
+    expect(memoDetailSource).toContain(") : null}");
+    expect(memoDetailSource).toContain('accessibilityLabel="返回" accessibilityRole="button" disabled={editor.uploading}');
   });
 
   test("carries workspace search into note detail and scrolls active matches", () => {
@@ -101,6 +126,20 @@ describe("mobile app scope", () => {
     expect(memoDetailSource).toContain("const retryTimers = [120, 360]");
     expect(localTiptapEditorSource).toContain("createMobileNoteSearchHighlightPlugin");
     expect(localTiptapEditorSource).toContain("scrollEditorPositionIntoView(editor, match.from");
+  });
+
+  test("keeps in-note search on one icon row", () => {
+    expect(memoDetailSource).toContain('accessibilityLabel="上一个搜索结果"');
+    expect(memoDetailSource).toContain('accessibilityLabel="下一个搜索结果"');
+    expect(memoDetailSource).toContain('accessibilityLabel="关闭搜索"');
+    expect(memoDetailSource).not.toContain("label=\"上一个搜索结果\"");
+    expect(memoDetailSource).not.toContain("label=\"下一个搜索结果\"");
+    expect(memoDetailSource).not.toContain("label=\"关闭搜索\"");
+    const stylesSource = readFileSync(
+      new URL("../apps/mobile/src/screens/workspace-styles.ts", import.meta.url),
+      "utf8",
+    );
+    expect(stylesSource).toMatch(/noteSearchPanel: \{[\s\S]*?flexDirection: "row"/);
   });
 
   test("keeps the Android editor caret visible while the keyboard viewport changes", () => {
@@ -177,6 +216,19 @@ describe("mobile app scope", () => {
     expect(localTiptapEditorSource).toContain('import("beautiful-mermaid")');
     expect(localTiptapEditorSource).toContain('import("html-to-image")');
     expect(localTiptapEditorSource).not.toContain('import "mermaid/dist/mermaid.min.js"');
+  });
+
+  test("lets view-mode change the note notebook without entering the editor", () => {
+    expect(memoDetailSource).toContain('setViewerNotebookPickerOpen(true)');
+    expect(memoDetailSource).toContain("payload: { notebookId: nextNotebookId }");
+    expect(memoDetailSource).toContain("includeAllNotes={false}");
+    expect(memoDetailSource).toContain('accessibilityLabel="所在笔记本"');
+    expect(memoDetailSource).toContain("handleViewerNotebookSelect");
+    expect(mobilePickersSource).toContain("includeAllNotes = true");
+    expect(iosMemoDetailSource).toContain("showNotebookPicker = true");
+    expect(iosMemoDetailSource).toContain("moveMemoToNotebook");
+    expect(iosMemoDetailSource).toContain("EditNotebookPickerSheet");
+    expect(iosMemoDetailSource).toContain("notebookAffiliationControl");
   });
 
   test("declares iOS privacy strings and full-screen phone-on-iPad presentation", () => {

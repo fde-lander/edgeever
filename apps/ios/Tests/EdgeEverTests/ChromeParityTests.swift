@@ -149,6 +149,9 @@ final class ChromeParityTests: XCTestCase {
         XCTAssertTrue(src.contains("DetailMemoChrome.history"), "missing history action")
         XCTAssertTrue(src.contains("DetailMemoChrome.metaRow"), "missing meta row")
         XCTAssertTrue(src.contains("DetailMemoChrome.title"), "missing detail title")
+        XCTAssertTrue(src.contains("showNotebookPicker"), "view-mode notebook affiliation must be tappable")
+        XCTAssertTrue(src.contains("moveMemoToNotebook"), "view-mode notebook change must persist without entering edit")
+        XCTAssertTrue(src.contains("EditNotebookPickerSheet"), "view-mode notebook picker must reuse the editor sheet")
         XCTAssertTrue(src.contains("TipTapWebView"), "viewer wiring must remain")
         // Edit is requested via callback; presentation is owned by WorkspaceView (reliable).
         XCTAssertTrue(src.contains("onEdit"), "detail requests edit via onEdit callback")
@@ -204,7 +207,8 @@ final class ChromeParityTests: XCTestCase {
             src.contains("mode: .create(") || src.contains("MemoEditView(mode: .create"),
             "create wiring"
         )
-        XCTAssertTrue(src.contains("fullScreenCover(isPresented: $showSettings)"), "Me full screen")
+        XCTAssertTrue(src.contains("SettingsView(onClose: { showSettings = false })"), "Me uses workspace chrome")
+        XCTAssertTrue(src.contains("active: showSettings"), "Me selects the persistent bottom tab")
     }
 
     /// Bottom chrome must be one bar: nav height + home-indicator padding (Android parity).

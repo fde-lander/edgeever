@@ -23,10 +23,23 @@ interface EdgeEverDesktopBridge {
   getSessionToken(): string;
   copyText(value: string): Promise<boolean>;
   copyHtml(html: string, plainText: string): Promise<boolean>;
+  copyImage(bytes: Uint8Array): Promise<boolean>;
   setSessionToken(value: string): Promise<{ stored: boolean }>;
   clearSessionToken(): Promise<{ stored: false }>;
   publicNetworkFetch(requestId: string, input: import("@edgeever/shared").PluginPublicFetchRequest): Promise<import("@edgeever/shared").PluginPublicFetchResponse>;
   cancelPublicNetworkFetch(requestId: string): Promise<void>;
+  openAiProviderStream(requestId: string, input: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body: string;
+  }): Promise<{ status: number; headers: Record<string, string> }>;
+  cancelAiProviderStream(requestId: string): void;
+  onAiProviderStreamChunk(callback: (requestId: string, chunk: {
+    type: "data" | "end" | "error";
+    bytes?: ArrayBuffer | Uint8Array;
+    message?: string;
+  }) => void): () => void;
   clearLocalData(): Promise<
     { scheduled: true }
     | { scheduled: false; errorCode: DesktopLocalDataResetErrorCode }
@@ -40,10 +53,12 @@ interface EdgeEverDesktopBridge {
     autoUpdateSupported: boolean;
     platform: string;
     architecture: string;
+    deviceModel: string;
     osVersion: string;
     osRelease: string;
     electron: string;
     chrome: string;
+    dataDir: string;
   }>;
   setAccountScope(accountId: string | null): Promise<{ ready: true; scope: string }>;
   updateStatus(): Promise<DesktopUpdateStatus>;
@@ -57,18 +72,37 @@ interface EdgeEverDesktopBridge {
   completeStagedResource(id: string): Promise<{ id: string }>;
   abortStagedResource(id: string): Promise<void>;
   listStagedResources(): Promise<Array<{ id: string; memoId: string; name: string; type: string; size: number }>>;
+  listStagedResourceAliases?(memoId?: string): Promise<Array<{ id: string; memoId: string; resourceId: string }>>;
+  recordStagedResourceAlias?(id: string, uploadedUrl: string): Promise<{ id: string; resourceId: string }>;
   remapStagedResourceMemoIds?(mappings: Array<[string, string]>): Promise<{ updated: number }>;
   readStagedResource(id: string): Promise<{ name: string; type: string; bytes: Uint8Array }>;
   readStagedResourcePart(id: string, start: number, length: number): Promise<ArrayBuffer>;
   readResource(id: string): Promise<{ type: string; bytes: Uint8Array }>;
   removeStagedResource(id: string): Promise<void>;
   onCommand(callback: (command: string) => void): () => void;
+  onHibernatePrepare?(callback: () => void | Promise<void>): () => void;
   syncScheduledTasks(tasks: import("@edgeever/shared").ScheduledTask[]): Promise<{ scheduled: number }>;
   onScheduledTask(callback: (payload: {
     task: import("@edgeever/shared").ScheduledTask;
     scheduledFor: string;
   }) => void | Promise<void>): () => void;
   onImportMarkdown(callback: (payload: { name: string; content: string }) => void): () => void;
+  onImportScreenshot?(callback: (payload: { captureId?: string; name: string; type: string; title?: string; bytes: Uint8Array }) => void): () => void;
+  readWeChatImportMedia?(importId: string, mediaId: string): Promise<{ filename: string; mimeType: string; bytes: Uint8Array }>;
+  finishWeChatImport?(importId: string, success: boolean): Promise<void>;
+  retryWeChatImport?(importId: string): Promise<boolean>;
+  onImportWeChatChat?(callback: (payload: {
+    ok: boolean;
+    kind?: "file";
+    reason?: string;
+    importId?: string;
+    title?: string;
+    filename?: string;
+    mimeType?: string;
+    byteSize?: number;
+    markdown?: string;
+    media?: Array<{ id: string; filename: string; mimeType: string; byteSize: number }>;
+  }) => void): () => void;
 }
 
 interface DesktopUpdateStatus {

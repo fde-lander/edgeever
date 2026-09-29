@@ -89,6 +89,137 @@ describe("notebook identity", () => {
     }
   });
 
+  test("migration 0053 collapses a second inbox created beside a historical slug inbox", () => {
+    const sqlite = new Database(":memory:");
+    try {
+      sqlite.exec("PRAGMA foreign_keys = ON");
+      for (const file of globSync("migrations/*.sql").sort().filter((file) => file.split("/").at(-1) < "0046")) {
+        sqlite.exec(readFileSync(file, "utf8"));
+      }
+      sqlite.exec(`
+        INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, icon, color, sort_order)
+        VALUES (
+          'nb_7f802977e3cc4e8eb30ef3665955ed39',
+          'ws_default',
+          NULL,
+          '等待分类',
+          'inbox',
+          'notebook',
+          '#0f766e',
+          10
+        );
+        UPDATE memos SET notebook_id = 'nb_7f802977e3cc4e8eb30ef3665955ed39' WHERE notebook_id = 'nb_inbox';
+        DELETE FROM notebooks WHERE id = 'nb_inbox';
+        INSERT INTO memos (id, workspace_id, notebook_id, title, excerpt)
+        VALUES (
+          'memo_historical_inbox',
+          'ws_default',
+          'nb_7f802977e3cc4e8eb30ef3665955ed39',
+          'Kept',
+          'kept'
+        );
+      `);
+      sqlite.exec(readFileSync("migrations/0046_restore_workspace_inbox_identity.sql", "utf8"));
+      expect(
+        sqlite.query(`
+          SELECT id, is_deleted FROM notebooks
+          WHERE workspace_id = 'ws_default'
+            AND (slug = 'inbox' OR id = 'nb_inbox' OR id = workspace_id || '_inbox')
+          ORDER BY id
+        `).all(),
+      ).toEqual([
+        { id: "nb_7f802977e3cc4e8eb30ef3665955ed39", is_deleted: 0 },
+        { id: "ws_default_inbox", is_deleted: 0 },
+      ]);
+
+      sqlite.exec(readFileSync("migrations/0053_collapse_duplicate_inbox_notebooks.sql", "utf8"));
+      sqlite.exec(readFileSync("migrations/0053_collapse_duplicate_inbox_notebooks.sql", "utf8"));
+
+      expect(
+        sqlite.query(`
+          SELECT id, is_deleted FROM notebooks
+          WHERE workspace_id = 'ws_default'
+            AND (slug = 'inbox' OR id = 'nb_inbox' OR id = workspace_id || '_inbox')
+          ORDER BY is_deleted, id
+        `).all(),
+      ).toEqual([
+        { id: "nb_7f802977e3cc4e8eb30ef3665955ed39", is_deleted: 0 },
+        { id: "ws_default_inbox", is_deleted: 1 },
+      ]);
+      expect(
+        sqlite.query(`
+          SELECT notebook_id, COUNT(*) AS count
+          FROM memos
+          WHERE workspace_id = 'ws_default' AND is_deleted = 0
+          GROUP BY notebook_id
+        `).all(),
+      ).toEqual([
+        { notebook_id: "nb_7f802977e3cc4e8eb30ef3665955ed39", count: 2 },
+      ]);
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM notebooks WHERE is_deleted = 0 AND slug = 'inbox'").get()).toEqual({
+        count: 1,
+      });
+      expect(
+        sqlite.query(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'index' AND name = 'idx_notebooks_one_active_inbox'
+        `).get(),
+      ).toEqual({ name: "idx_notebooks_one_active_inbox" });
+      expect(() => sqlite.exec(`
+        INSERT INTO notebooks (id, workspace_id, name, slug)
+        VALUES ('nb_second_inbox', 'ws_default', '等待分类', 'inbox')
+      `)).toThrow(/unique/i);
+      expect(sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  test("migration 0053 moves notes off the empty duplicate and keeps child notebooks", () => {
+    const sqlite = new Database(":memory:");
+    try {
+      sqlite.exec("PRAGMA foreign_keys = ON");
+      for (const file of globSync("migrations/*.sql").sort().filter((file) => file.split("/").at(-1) < "0053")) {
+        sqlite.exec(readFileSync(file, "utf8"));
+      }
+      sqlite.exec(`
+        INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, icon, color, sort_order)
+        VALUES
+          ('ws_default_inbox', 'ws_default', NULL, '等待分类', 'inbox', 'notebook', '#0f766e', 10),
+          ('nb_under_duplicate', 'ws_default', 'ws_default_inbox', 'Nested', 'nested', 'notebook', '#0f766e', 20);
+        INSERT INTO memos (id, workspace_id, notebook_id, title, excerpt)
+        VALUES
+          ('memo_on_original', 'ws_default', 'nb_inbox', 'Keep me', 'keep'),
+          ('memo_on_duplicate', 'ws_default', 'ws_default_inbox', 'Move me', 'move');
+      `);
+      sqlite.exec(readFileSync("migrations/0053_collapse_duplicate_inbox_notebooks.sql", "utf8"));
+
+      expect(
+        sqlite.query(`
+          SELECT id FROM notebooks
+          WHERE workspace_id = 'ws_default' AND is_deleted = 0
+            AND (slug = 'inbox' OR id = 'nb_inbox' OR id = workspace_id || '_inbox')
+        `).all(),
+      ).toEqual([{ id: "nb_inbox" }]);
+      expect(
+        sqlite.query("SELECT notebook_id FROM memos WHERE id IN ('memo_on_duplicate', 'memo_on_original') ORDER BY id").all(),
+      ).toEqual([
+        { notebook_id: "nb_inbox" },
+        { notebook_id: "nb_inbox" },
+      ]);
+      expect(sqlite.query("SELECT parent_id, is_deleted FROM notebooks WHERE id = 'nb_under_duplicate'").get()).toEqual({
+        parent_id: "nb_inbox",
+        is_deleted: 0,
+      });
+      expect(sqlite.query("SELECT is_deleted FROM notebooks WHERE id = 'ws_default_inbox'").get()).toEqual({
+        is_deleted: 1,
+      });
+      expect(sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      sqlite.close();
+    }
+  });
+
   test("rejects deleting a workspace inbox after it was renamed", async () => {
     const fixture = createFixture();
     try {
@@ -99,6 +230,52 @@ describe("notebook identity", () => {
       expect(
         fixture.sqlite.query("SELECT is_deleted, slug FROM notebooks WHERE id = 'ws_1_inbox'").get(),
       ).toEqual({ is_deleted: 0, slug: "inbox" });
+    } finally {
+      fixture.sqlite.close();
+    }
+  });
+
+  test("deletes an empty notebook together with its empty descendants", async () => {
+    const fixture = createFixture();
+    try {
+      fixture.sqlite.exec(`
+        UPDATE notebooks SET name = '注册考试', slug = NULL WHERE id = 'nb_notes';
+        INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, is_deleted, created_at, updated_at) VALUES
+          ('nb_law', 'ws_1', 'nb_notes', '法律法规', NULL, 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z'),
+          ('nb_history', 'ws_1', 'nb_notes', '建筑史', 'history', 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z'),
+          ('nb_outline', 'ws_1', 'nb_history', '大纲', 'outline', 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z');
+        INSERT INTO memos (id, workspace_id, notebook_id, title, is_deleted, updated_at)
+        VALUES ('memo_trashed', 'ws_1', 'nb_law', '已删除', 1, '2026-09-10T00:00:00.000Z');
+      `);
+
+      await deleteNotebookRecord(fixture.db, "ws_1", "nb_notes", actor);
+
+      expect(
+        fixture.sqlite.query("SELECT id FROM notebooks WHERE workspace_id = 'ws_1' AND is_deleted = 0 ORDER BY id").all(),
+      ).toEqual([{ id: "ws_1_inbox" }]);
+      await expect(deleteNotebookRecord(fixture.db, "ws_1", "nb_notes", actor)).resolves.toBeUndefined();
+    } finally {
+      fixture.sqlite.close();
+    }
+  });
+
+  test("keeps the whole notebook tree when any descendant still has a note", async () => {
+    const fixture = createFixture();
+    try {
+      fixture.sqlite.exec(`
+        INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, is_deleted, created_at, updated_at) VALUES
+          ('nb_child', 'ws_1', 'nb_notes', '子笔记本', 'child', 0, '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z');
+        INSERT INTO memos (id, workspace_id, notebook_id, title, is_deleted, updated_at)
+        VALUES ('memo_keep', 'ws_1', 'nb_child', '还在', 0, '2026-09-10T00:00:00.000Z');
+      `);
+
+      await expect(deleteNotebookRecord(fixture.db, "ws_1", "nb_notes", actor)).rejects.toMatchObject({
+        code: "notebook_not_empty",
+        status: 409,
+      });
+      expect(
+        fixture.sqlite.query("SELECT id FROM notebooks WHERE workspace_id = 'ws_1' AND is_deleted = 1").all(),
+      ).toEqual([]);
     } finally {
       fixture.sqlite.close();
     }

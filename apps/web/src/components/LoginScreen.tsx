@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { LockKeyhole } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { resolveInstanceUrlInput } from "@edgeever/shared";
+import { normalizeInstanceUrl } from "@edgeever/shared";
 import { Button } from "@/components/ui/button";
 import { GitHubRepositoryLink } from "@/components/GitHubRepositoryLink";
 import { Input } from "@/components/ui/input";
@@ -22,7 +22,7 @@ const getDefaultLoginCredentials = () => {
   const hostname = window.location.hostname;
   const isDemoHost = hostname === "demo.edgeever.org" || hostname.startsWith("edgeever-demo.");
 
-  return isDemoHost ? DEMO_LOGIN_CREDENTIALS : { username: "admin", password: "" };
+  return isDemoHost ? DEMO_LOGIN_CREDENTIALS : { username: "", password: "" };
 };
 
 export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitting, onSubmit }: LoginScreenProps) => {
@@ -39,7 +39,7 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
     }
 
     onSubmit({
-      ...(initialInstanceUrl !== undefined ? { instanceUrl: resolveInstanceUrlInput(instanceUrl) } : {}),
+      ...(initialInstanceUrl !== undefined ? { instanceUrl: normalizeInstanceUrl(instanceUrl) } : {}),
       username: username.trim(),
       password,
     });
@@ -48,9 +48,9 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
   return (
     <main className="flex h-[100dvh] items-center justify-center bg-[var(--workspace-canvas)] px-4 py-8 text-slate-950">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_15%,rgb(var(--brand-green-rgb)/0.045),transparent_42%)]" />
-      <GitHubRepositoryLink className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] z-10 h-10 w-10 justify-center rounded-full border border-slate-200 bg-card/85 text-slate-600 shadow-[0_4px_16px_rgb(var(--slate-900-rgb)/0.05)] backdrop-blur transition hover:border-slate-300 hover:bg-card hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60" iconClassName="h-5 w-5" />
-      
-      <section className="relative w-full max-w-[400px] rounded-2xl border border-slate-200 bg-card/95 p-8 shadow-[0_20px_50px_rgb(var(--slate-900-rgb)/0.08)] backdrop-blur-md">
+      <GitHubRepositoryLink className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] z-10 h-10 w-10 justify-center rounded-full border border-slate-200 bg-card/85 text-slate-600 backdrop-blur transition hover:border-slate-300 hover:bg-card hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/20" iconClassName="h-5 w-5" />
+
+      <section className="relative w-full max-w-[400px] rounded-2xl border border-slate-200 bg-card/95 p-8 shadow-[0_20px_50px_rgb(0_0_0/0.08)] backdrop-blur-md">
         <div className="mb-8 flex items-center gap-4">
           <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-[0_8px_18px_-8px_rgb(var(--brand-green-rgb)/0.45)]">
             <LockKeyhole className="h-5.5 w-5.5" />
@@ -68,11 +68,11 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
               role="alert"
             >
               <p className="text-sm font-medium leading-6">{error.message}</p>
-              <p className="mt-1 font-mono text-[11px] text-rose-500">
+              <p className="mt-1 font-mono text-xs text-rose-500">
                 {t("login.diagnosticCode", { code: error.diagnosticCode })}
               </p>
               {error.rayId ? (
-                <p className="mt-0.5 break-all font-mono text-[11px] text-rose-500">
+                <p className="mt-0.5 break-all font-mono text-xs text-rose-500">
                   {t("login.cloudflareRayId", { id: error.rayId })}
                 </p>
               ) : null}
@@ -83,11 +83,14 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
             <label className="block">
               <span className="mb-2 block text-sm font-semibold text-slate-700">{t("login.desktopInstanceUrl")}</span>
               <Input
+                autoCapitalize="none"
                 autoComplete="url"
-                className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-emerald-500/20"
+                autoCorrect="off"
+                className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-slate-900/10"
+                inputMode="url"
                 placeholder={t("login.instanceUrlPlaceholder")}
                 required
-                type="url"
+                spellCheck={false}
                 value={instanceUrl}
                 onChange={(event) => setInstanceUrl(event.target.value)}
               />
@@ -98,7 +101,7 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
             <span className="mb-2 block text-sm font-semibold text-slate-700">{t("login.username")}</span>
             <Input
               autoComplete="username"
-              className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-emerald-500/20"
+              className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-slate-900/10"
               required
               value={username}
               onChange={(event) => setUsername(event.target.value)}
@@ -109,7 +112,7 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
             <span className="mb-2 block text-sm font-semibold text-slate-700">{t("login.password")}</span>
             <Input
               autoComplete="current-password"
-              className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-emerald-500/20"
+              className="h-11 rounded-lg bg-slate-50/50 px-3.5 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-slate-900/10"
               required
               type="password"
               value={password}
@@ -117,11 +120,11 @@ export const LoginScreen = ({ error, instanceUrl: initialInstanceUrl, isSubmitti
             />
           </label>
 
-          <Button 
+          <Button
             className="h-11 w-full justify-center rounded-lg bg-emerald-500 font-semibold text-white shadow-[0_8px_20px_-8px_rgb(var(--brand-green-rgb)/0.35)] transition-colors duration-200 hover:bg-emerald-600"
-            size="md" 
-            type="submit" 
-            variant="solid" 
+            size="md"
+            type="submit"
+            variant="solid"
             disabled={isSubmitting}
           >
             <LockKeyhole className="h-4 w-4 mr-1" />

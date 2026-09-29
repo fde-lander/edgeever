@@ -20,11 +20,14 @@ describe("copy current note ID", () => {
     expect(webEditorSource).toContain("<ClipboardCopyNotice");
     expect(webCopyNoticeSource).toContain("createPortal(");
     expect(webCopyNoticeSource).toContain("document.body");
+    expect(webCopyNoticeSource).toContain('status === "copied" ? "bg-slate-900 text-slate-50" : "bg-rose-600 text-rose-50"');
+    expect(webCopyNoticeSource).not.toContain("bg-emerald-");
+    expect(webCopyNoticeSource).not.toContain("text-white");
   });
 
   test("copies the raw memo ID from both native mobile clients", () => {
     expect(androidDetailSource).toContain("Clipboard.setStringAsync(memo.id)");
-    expect(androidDetailSource).toContain('resolvedLocale === "en-US" ? "Copy note ID" : "复制笔记 ID"');
+    expect(androidDetailSource).toContain('resolvedLocale !== "zh-CN" ? "Copy note ID" : "复制笔记 ID"');
     expect(androidDetailSource).toContain("disabled={!canCopyMemoId}");
     expect(iosDetailSource).toContain("UIPasteboard.general.string = memo.id");
     expect(iosDetailSource).toContain('env.preferences.t("复制笔记 ID", en: "Copy note ID")');

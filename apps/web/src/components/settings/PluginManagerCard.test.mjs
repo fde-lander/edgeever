@@ -13,10 +13,29 @@ describe("plugin manager card layout", () => {
     expect(source).not.toContain("md:grid-cols-2");
   });
 
+  test("does not dump every plugin panel onto marketplace cards", () => {
+    expect(catalogCard).not.toContain("onOpenPanel");
+    expect(catalogCard).toContain("isPluginCardCommand");
+    expect(catalogCard).toContain("commands.filter(isPluginCardCommand)");
+  });
+
+  test("does not present informational capability declarations as plugin permissions", () => {
+    expect(source).not.toContain("plugins.details.permissions");
+    expect(source).not.toContain("manifest.permissions.map");
+    expect(catalogCard).not.toContain("manifest.permissions");
+  });
+
   test("uses GitHub icon links for marketplace and installed extension repositories", () => {
     expect(catalogCard.match(/<GitHubRepositoryLink/g)).toHaveLength(1);
     expect(catalogCard).toContain("showTooltip={false}");
     expect(catalogCard).toContain("getPluginCatalogRepositoryUrl(item)");
+  });
+
+  test("keeps marketplace description below the title row instead of beside header actions", () => {
+    expect(source).toContain("{t(\"plugins.syncDescription\")}");
+    expect(source).toContain('<div className="flex items-center justify-between gap-3">');
+    expect(source).toContain('<p className="text-xs leading-5 text-slate-500">{t("plugins.syncDescription")}</p>');
+    expect(source).not.toContain("flex items-start justify-between gap-3");
   });
 
   test("shows update checks when marketplace plugins exist without installed extensions", () => {

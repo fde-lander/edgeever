@@ -27,12 +27,12 @@ export const ExecutionCenterButton = ({ onClick, className }: ExecutionCenterBut
             variant="ghost"
             aria-label={t("executionHistory.openCenter")}
             className={cn(
-              "h-9 w-9 shrink-0 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-emerald-500/70",
+              "h-9 w-9 shrink-0 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-900/20",
               className,
             )}
             onClick={onClick}
           >
-            <FileClock className="h-5 w-5" strokeWidth={2.1} />
+            <FileClock className="h-4 w-4" strokeWidth={1.75} />
           </Button>
         </TooltipTrigger>
         <TooltipContent side="bottom">{t("executionHistory.openCenter")}</TooltipContent>

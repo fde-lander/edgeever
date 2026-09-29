@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, type ClipboardEvent as ReactClipboardEvent } from "react";
 import CodeMirror, {
   EditorView,
   type ReactCodeMirrorRef,
@@ -6,7 +6,7 @@ import CodeMirror, {
 } from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import {
-  githubLight,
+  githubLightInit,
   githubDark,
   atomone,
   tokyoNight,
@@ -14,18 +14,22 @@ import {
   dracula,
   nord,
   monokai,
-  solarizedLight,
+  solarizedLightInit,
   solarizedDark,
   vscodeDark,
-  xcodeLight,
+  xcodeLightInit,
   sublime,
-  duotoneLight,
+  duotoneLightInit,
   duotoneDark,
   gruvboxDark,
 } from "@uiw/codemirror-themes-all";
 import type { MarkdownThemeName } from "../ThemeProvider";
 import { getAiSlashCommandStart } from "@/lib/editor-shortcuts";
+import { lightMarkdownHighlightStyles } from "@/lib/markdown-source-highlight";
 import { cn } from "@/lib/utils";
+import { getResourceFilesFromDataTransfer } from "./editor-pane-helpers";
+
+type PendingPaste = { from: number; to: number; originalText: string };
 
 export interface MarkdownSourceEditorRef {
   getScrollContainer: () => HTMLElement | null;
@@ -37,8 +41,10 @@ export interface MarkdownSourceEditorRef {
 }
 
 export interface MarkdownSourceEditorProps {
+  memoId: string;
   value: string;
   onChange: (value: string) => void;
+  onPasteFiles?: (files: File[]) => Promise<string>;
   themeName: MarkdownThemeName;
   readOnly?: boolean;
   placeholder?: string;
@@ -49,7 +55,7 @@ export interface MarkdownSourceEditorProps {
 }
 
 export const CODE_MIRROR_THEME_MAP: Record<MarkdownThemeName, Extension> = {
-  "github-light": githubLight,
+  "github-light": githubLightInit({ styles: lightMarkdownHighlightStyles }),
   "github-dark": githubDark,
   "one-dark": atomone,
   "tokyo-night": tokyoNight,
@@ -57,12 +63,12 @@ export const CODE_MIRROR_THEME_MAP: Record<MarkdownThemeName, Extension> = {
   dracula,
   nord,
   monokai,
-  "solarized-light": solarizedLight,
+  "solarized-light": solarizedLightInit({ styles: lightMarkdownHighlightStyles }),
   "solarized-dark": solarizedDark,
   "vscode-dark": vscodeDark,
-  "xcode-light": xcodeLight,
+  "xcode-light": xcodeLightInit({ styles: lightMarkdownHighlightStyles }),
   sublime,
-  "duotone-light": duotoneLight,
+  "duotone-light": duotoneLightInit({ styles: lightMarkdownHighlightStyles }),
   "duotone-dark": duotoneDark,
   "gruvbox-dark": gruvboxDark,
 };
@@ -82,8 +88,13 @@ const baseEditorTheme = EditorView.theme({
     fontFamily: "inherit",
   },
   ".cm-content": {
-    padding: "16px 24px 64px",
+    padding: "16px var(--editor-reading-gutter, 24px) 64px",
     minHeight: "100%",
+  },
+  "@media (min-width: 1024px)": {
+    ".cm-scroller": {
+      scrollbarGutter: "stable both-edges",
+    },
   },
   ".cm-line": {
     padding: "0",
@@ -100,8 +111,10 @@ const baseEditorTheme = EditorView.theme({
 export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, MarkdownSourceEditorProps>(
   (
     {
+      memoId,
       value,
       onChange,
+      onPasteFiles,
       themeName,
       readOnly = false,
       placeholder,
@@ -113,6 +126,9 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
     ref,
   ) => {
     const cmRef = useRef<ReactCodeMirrorRef | null>(null);
+    const memoIdRef = useRef(memoId);
+    memoIdRef.current = memoId;
+    const pendingPastesRef = useRef(new Set<PendingPaste>());
 
     useImperativeHandle(
       ref,
@@ -180,8 +196,47 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
         markdown(),
         EditorView.lineWrapping,
         baseEditorTheme,
+        EditorView.updateListener.of((update) => {
+          if (!update.docChanged) return;
+          for (const pending of pendingPastesRef.current) {
+            pending.from = update.changes.mapPos(pending.from, -1);
+            pending.to = update.changes.mapPos(pending.to, 1);
+          }
+        }),
       ];
     }, []);
+
+    const handlePasteCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+      if (readOnly || !onPasteFiles) return;
+      const files = getResourceFilesFromDataTransfer(event.clipboardData);
+      if (!files.length) return;
+      const view = cmRef.current?.view;
+      if (!view) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const selection = view.state.selection.main;
+      const pending: PendingPaste = {
+        from: selection.from,
+        to: selection.to,
+        originalText: view.state.doc.sliceString(selection.from, selection.to),
+      };
+      const targetMemoId = memoId;
+      pendingPastesRef.current.add(pending);
+      void onPasteFiles(files).then((markdown) => {
+        pendingPastesRef.current.delete(pending);
+        if (!markdown || cmRef.current?.view !== view || memoIdRef.current !== targetMemoId) return;
+        const unchanged = view.state.doc.sliceString(pending.from, pending.to) === pending.originalText;
+        const from = unchanged ? pending.from : pending.to;
+        const shouldMoveCursor = view.hasFocus && view.state.selection.main.from === pending.to
+          && view.state.selection.main.to === pending.to;
+        view.dispatch({
+          changes: { from, to: pending.to, insert: markdown },
+          ...(shouldMoveCursor ? { selection: { anchor: from + markdown.length }, scrollIntoView: true } : {}),
+        });
+      }).catch(() => {
+        pendingPastesRef.current.delete(pending);
+      });
+    }, [memoId, onPasteFiles, readOnly]);
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent | KeyboardEvent) => {
@@ -247,6 +302,7 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
           className,
         )}
         aria-label={ariaLabel}
+        onPasteCapture={handlePasteCapture}
       >
         <CodeMirror
           ref={cmRef}
@@ -272,7 +328,10 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
             autocompletion: false,
             rectangularSelection: false,
             crosshairCursor: false,
-            highlightSelectionMatches: true,
+            // Occurrence highlighting paints other copies of the selected
+            // text with a selection-like color, so a short phrase also
+            // lights up later list items and looks like extra selection.
+            highlightSelectionMatches: false,
             closeBracketsKeymap: true,
             searchKeymap: true,
             foldKeymap: false,

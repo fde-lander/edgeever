@@ -57,20 +57,38 @@ describe("store delivery command", () => {
 
     expect(workflow).not.toContain("bunx eas-cli");
     expect(workflow.match(/uses: expo\/expo-github-action@v8/g)).toHaveLength(
-      2,
+      1,
     );
-    expect(workflow.match(/eas-version: 21\.4\.0/g)).toHaveLength(2);
-    expect(workflow.match(/packager: npm/g)).toHaveLength(2);
+    expect(workflow.match(/eas-version: 21\.4\.0/g)).toHaveLength(1);
+    expect(workflow.match(/packager: npm/g)).toHaveLength(1);
     expect(workflow).toContain("for attempt in 1 2 3");
     expect(workflow).toContain("Dependency install failed on attempt ${attempt}/3");
     expect(
       workflow.match(
         /edgeever-bun-cache-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/g,
       ),
-    ).toHaveLength(3);
-    expect(workflow).toContain("inputs.ios_build_number == ''");
+    ).toHaveLength(2);
+    expect(workflow).not.toContain("eas build");
+    expect(workflow).not.toContain("--platform ios");
+    expect(workflow).toContain("working-directory: apps/ios");
     expect(workflow).toContain(
-      "APP_STORE_BUILD_NUMBER: ${{ inputs.ios_build_number || steps.build.outputs.build_number }}",
+      "group: edgeever-store-delivery-${{ inputs.release_tag }}-${{ inputs.platform }}",
+    );
+    expect(workflow).toContain(".edgeever-ci/scripts/xcode-cloud-control.py");
+    expect(workflow).toContain("--wait-valid");
+    expect(workflow).not.toContain("--require-sha");
+    expect(workflow).not.toContain("--git-ref");
+    expect(workflow).toContain("git show \"$source_sha:apps/ios/Config/Version.xcconfig\"");
+    expect(workflow).toContain("cloud_version");
+    expect(workflow).toContain("grep -E '^(build_number|app_store_build_id|build_run_id|source_sha|processing_state)='");
+    expect(workflow).toContain('refs/tags/${RELEASE_TAG}');
+    expect(workflow).toContain(
+      "APP_STORE_BUILD_NUMBER: ${{ steps.ios_build.outputs.build_number }}",
+    );
+    expect(workflow).toContain("APP_STORE_RELEASE_NOTES_EN:");
+    expect(workflow).toContain("missing Japanese What's New");
+    expect(workflow).not.toContain(
+      "Pass ios_build_number; do not build from apps/mobile or EAS.",
     );
     expect(workflow).toContain(
       "APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.EDGEEVER_APPLE_API_ISSUER }}",
@@ -90,10 +108,11 @@ describe("store delivery command", () => {
     );
     expect(workflow).toContain("retrying in 60 seconds (${attempt}/20)");
     const fastfile = readFileSync(
-      new URL("../apps/mobile/fastlane/Fastfile", import.meta.url),
+      new URL("../apps/ios/fastlane/Fastfile", import.meta.url),
       "utf8",
     );
     expect(fastfile).toContain("precheck_include_in_app_purchases: false");
+    expect(fastfile).toContain("APP_STORE_RELEASE_NOTES_JA is required");
   });
 
   test("replaces the GitHub APK with the Play-signed universal APK", () => {

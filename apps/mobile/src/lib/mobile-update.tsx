@@ -47,7 +47,7 @@ export const MobileUpdateProvider = ({ children }: { children: ReactNode }) => {
   const activeCheckRef = useRef<Promise<void> | null>(null);
   const lastAutomaticCheckRef = useRef(0);
   const isSupported = !__DEV__ && Updates.isEnabled;
-  const english = resolvedLocale === "en-US";
+  const english = resolvedLocale !== "zh-CN";
   const installedVersion = Updates.runtimeVersion ?? Constants.expoConfig?.version ?? null;
 
   const showLinkError = useCallback(() => {
@@ -59,8 +59,8 @@ export const MobileUpdateProvider = ({ children }: { children: ReactNode }) => {
 
   const openManualUpdateSource = useCallback((source: MobileInstallUpdateSource) => {
     void openMobileInstallUpdateSource(source, {
+      linking: Linking,
       openGooglePlayDetails,
-      openUrl: Linking.openURL,
     }).then((result) => {
       if (result.status !== "google-play-unavailable") {
         return;

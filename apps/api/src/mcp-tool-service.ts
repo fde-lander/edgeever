@@ -6,9 +6,13 @@ import {
   TemplateUpdateSchema,
   docToText,
   markdownToDoc,
+  getTableSummary,
+  hasTableDocumentMarker,
   parseDiagramDocument,
+  parseTableDocument,
   serializeDiagramDocument,
   stripDiagramDocumentMarker,
+  stripTableDocumentMarker,
   type DiagramDocument,
   type DiagramNodeShape,
   type MemoDetail,
@@ -276,7 +280,7 @@ const parseDiagramMemoIr = (args: Record<string, unknown>): DiagramIr => {
   if (args.edges !== undefined && (!Array.isArray(args.edges) || args.edges.length > 400)) {
     throw new AppError("invalid_params", "edges must be an array with at most 400 items", 400);
   }
-  if (args.theme !== undefined && !["brand", "sun", "wa", "island", "rose", "mint", "cosmos", "tea", "naive", "macaron", "ocean", "ink", "classic", "paper"].includes(String(args.theme))) {
+  if (args.theme !== undefined && !["plain", "brand", "sun", "wa", "island", "rose", "mint", "cosmos", "tea", "naive", "macaron", "ocean", "ink", "classic", "paper"].includes(String(args.theme))) {
     throw new AppError("invalid_params", "theme is not a supported diagram color scheme", 400);
   }
   if (args.structure !== undefined && !["map", "line", "capsule", "box", "circle", "ellipse", "hexagon", "logic", "tree", "brace", "org", "timeline", "fishbone"].includes(String(args.structure))) {
@@ -383,6 +387,12 @@ const memoWithoutDiagramPayload = (memo: MemoDetail) => {
   return { ...memo, contentMarkdown, contentJson, contentText: docToText(contentJson) };
 };
 
+const memoWithoutTablePayload = (memo: MemoDetail) => {
+  const contentMarkdown = stripTableDocumentMarker(memo.contentMarkdown);
+  const contentJson = markdownToDoc(contentMarkdown);
+  return { ...memo, contentMarkdown, contentJson, contentText: docToText(contentJson) };
+};
+
 type MutableDiagramEdge = ReturnType<typeof diagramSemanticGraph>["edges"][number];
 
 const applyDiagramOperations = async (
@@ -451,8 +461,8 @@ const applyDiagramOperations = async (
       const index = findNodeIndex(nodeId);
       const previous = nodes[index];
       const candidate: Record<string, unknown> = { ...previous, ...operation.changes, id: nodeId };
-      if (operation.changes.parentId === null) delete candidate.parentId;
-      if (operation.changes.resourceIcon === null) delete candidate.resourceIcon;
+      if (operation.changes.parentId === null || operation.changes.parentId === "") delete candidate.parentId;
+      if (operation.changes.resourceIcon === null || operation.changes.resourceIcon === "") delete candidate.resourceIcon;
       const next = parseDiagramNode(candidate, operationIndex);
       nodes[index] = next;
       if (operation.changes.label !== undefined || operation.changes.type !== undefined) resizedNodeIds.add(nodeId);
@@ -514,8 +524,8 @@ const applyDiagramOperations = async (
       const index = findEdgeIndex(edgeId);
       const candidate: Record<string, unknown> = { ...edges[index], ...operation.changes };
       delete candidate.id;
-      if (operation.changes.label === null) delete candidate.label;
-      if (operation.changes.type === null) delete candidate.type;
+      if (operation.changes.label === null || operation.changes.label === "") delete candidate.label;
+      if (operation.changes.type === null || operation.changes.type === "") delete candidate.type;
       if (operation.changes.bidirectional === null) delete candidate.bidirectional;
       edges[index] = { id: edgeId, ...parseDiagramEdge(candidate, operationIndex) };
       counts.updatedEdges += 1;
@@ -683,9 +693,10 @@ export const callMcpTool = async (
       }
 
       const diagram = parseDiagramDocument(memo.contentMarkdown);
-      return diagram
-        ? { memo: memoWithoutDiagramPayload(memo), diagram: diagramSemanticGraph(diagram) }
-        : { memo };
+      if (diagram) return { memo: memoWithoutDiagramPayload(memo), diagram: diagramSemanticGraph(diagram) };
+      const table = parseTableDocument(memo.contentMarkdown);
+      if (table) return { memo: memoWithoutTablePayload(memo), structuredTable: getTableSummary(memo.contentMarkdown).tablePreview };
+      return { memo };
     }
     case "create_memo": {
       assertScope(auth, "write:memos");
@@ -793,6 +804,13 @@ export const callMcpTool = async (
           throw new AppError(
             "diagram_update_required",
             "Diagram content cannot be replaced through update_memo. Use update_diagram for semantic changes.",
+            400,
+          );
+        }
+        if (existing && hasTableDocumentMarker(existing.contentMarkdown)) {
+          throw new AppError(
+            "table_update_required",
+            "Structured table content cannot be replaced through update_memo.",
             400,
           );
         }

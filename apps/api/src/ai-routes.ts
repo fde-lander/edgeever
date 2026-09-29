@@ -1,16 +1,21 @@
 import {
   AiDefaultModelUpdateSchema,
   AiGenerateSchema,
+  InfographicAgentRequestSchema,
   AiModelConfigCreateSchema,
   AiProviderConfigCreateSchema,
   AiProviderConfigUpdateSchema,
   AiProviderConnectionTestSchema,
-  AiTagSuggestionPromptUpdateSchema,
   AiTagSuggestionsRequestSchema,
-  MAX_AI_TAG_SUGGESTIONS,
-  normalizeTags,
+  buildAiTagSuggestionRequest,
+  getDefaultAiTagSuggestionPrompt,
+  finalizeAiTagSuggestions,
   promptNeedsTargetLanguage,
   promptNeedsTone,
+  type AiAction,
+  type AiAttachmentInput,
+  type AiTargetLanguage,
+  type AiTone,
 } from "@edgeever/shared";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
@@ -26,13 +31,15 @@ import {
   getAiModelConfig,
   getAiProviderConfig,
   getAiSettings,
-  getAiTagSuggestionPrompt,
   getDefaultAiModelId,
   generateAiGeneration,
   generateAiTagSuggestions,
+  getDefaultAiDirectTarget,
   loadDefaultAiModel,
+  loadDefaultAiModelCredentials,
   normalizeAiGenerationText,
   normalizeAiBaseUrl,
+  prepareAiGeneration,
   resolvePrimaryAiCredentialEncryptionKey,
   streamAiGeneration,
   testAiModel,
@@ -84,7 +91,6 @@ const readSettings = (context: AppContext, dependencies: AiRouteDependencies) =>
   getWorkspaceId(context),
   encryptionConfigured(context),
   dependencies.isDemoMode(context.env),
-  context.req.query("locale"),
   context.env,
 );
 
@@ -127,6 +133,63 @@ const withAiError = (context: AppContext, error: unknown, fallbackCode: string) 
     return apiError(context, error.code, error.message, error.status);
   }
   return apiError(context, fallbackCode, providerErrorMessage(error), 400);
+};
+
+const resolveAiGenerateFields = async (context: AppContext, input: {
+  action: AiAction;
+  promptId?: string;
+  locale?: string;
+  instruction?: string;
+  targetLanguage?: AiTargetLanguage;
+  tone?: AiTone;
+  contentMarkdown: string;
+  attachments?: AiAttachmentInput[];
+}) => {
+  const workspaceId = getWorkspaceId(context);
+  const selectedPrompt = input.promptId
+    ? await getAiPromptTemplate(
+      context.env.storage.db,
+      workspaceId,
+      input.promptId,
+      input.locale,
+    )
+    : null;
+  if (input.promptId && !selectedPrompt) {
+    throw new AppError("ai_prompt_not_found", "The selected prompt no longer exists.", 404);
+  }
+
+  const action = selectedPrompt?.action ?? input.action;
+  const needsTargetLanguage = selectedPrompt
+    ? promptNeedsTargetLanguage(selectedPrompt.parameterKind)
+    : action === "translate";
+  const needsTone = selectedPrompt
+    ? promptNeedsTone(selectedPrompt.parameterKind)
+    : action === "change-tone";
+  if (needsTargetLanguage && !input.targetLanguage) {
+    throw new AppError("ai_target_language_required", "Choose a target language for this prompt.", 400);
+  }
+  if (needsTone && !input.tone) {
+    throw new AppError("ai_tone_required", "Choose a tone for this prompt.", 400);
+  }
+
+  const instruction = selectedPrompt?.instruction
+    || input.instruction?.trim()
+    || await resolveWorkspaceActionInstruction(
+      context.env.storage.db,
+      workspaceId,
+      action,
+      input.locale,
+    )
+    || undefined;
+
+  return {
+    action,
+    instruction,
+    targetLanguage: needsTargetLanguage ? input.targetLanguage : undefined,
+    tone: needsTone ? input.tone : undefined,
+    contentMarkdown: input.contentMarkdown,
+    attachments: input.attachments,
+  };
 };
 
 export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDependencies) => {
@@ -474,35 +537,46 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
     },
   );
 
-  app.put(
-    "/api/v1/ai/tag-suggestion-prompt",
-    zValidator("json", AiTagSuggestionPromptUpdateSchema),
+  app.post(
+    "/api/v1/ai/tag-suggestions/prepare",
+    zValidator("json", AiTagSuggestionsRequestSchema),
     async (context) => {
-      const denied = denyMutation(context, dependencies);
+      const denied = requireUser(context);
       if (denied) return denied;
-      const input = context.req.valid("json");
-      const workspaceId = getWorkspaceId(context);
-      const now = isoNow();
-      await context.env.storage.db.batch([
-        context.env.storage.db.prepare(
-          `INSERT INTO ai_workspace_settings (
-             workspace_id, tag_suggestion_prompt, created_at, updated_at
-           ) VALUES (?, ?, ?, ?)
-           ON CONFLICT(workspace_id) DO UPDATE SET
-             tag_suggestion_prompt = excluded.tag_suggestion_prompt,
-             updated_at = excluded.updated_at`,
-        ).bind(workspaceId, input.prompt, now, now),
-        auditStatement(
+      try {
+        const input = context.req.valid("json");
+        const workspaceId = getWorkspaceId(context);
+        const tagSummaries = await listTagSummaries(context.env.storage.db, workspaceId);
+        const allCanonicalTags = new Map(
+          tagSummaries.map((tag) => [tag.name.toLocaleLowerCase(), tag.name]),
+        );
+        const popularTags = [...tagSummaries]
+          .sort((left, right) => right.memoCount - left.memoCount || left.name.localeCompare(right.name))
+          .slice(0, 200)
+          .map((tag) => tag.name);
+        const existingTags = Array.from(new Set([
+          ...input.currentTags.map((tag) => allCanonicalTags.get(tag.toLocaleLowerCase()) ?? tag),
+          ...popularTags,
+        ]));
+        const credentials = await loadDefaultAiModelCredentials(
           context.env.storage.db,
-          "user",
-          context.get("auth").actorId,
-          "workspace.ai_tag_suggestion_prompt.update",
-          "workspace",
           workspaceId,
-          { customized: input.prompt !== null },
-        ),
-      ]);
-      return context.json(await readSettings(context, dependencies));
+          context.env,
+        );
+        const fields = buildAiTagSuggestionRequest({
+          ...input,
+          existingTags,
+          instruction: getDefaultAiTagSuggestionPrompt(input.locale),
+        });
+        return context.json({
+          ...credentials,
+          ...fields,
+          currentTags: input.currentTags,
+          canonicalTags: Object.fromEntries(allCanonicalTags),
+        });
+      } catch (error) {
+        return withAiError(context, error, "ai_tag_suggestions_failed");
+      }
     },
   );
 
@@ -527,29 +601,91 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
           ...input.currentTags.map((tag) => allCanonicalTags.get(tag.toLocaleLowerCase()) ?? tag),
           ...popularTags,
         ]));
+        const canonicalTags = Object.fromEntries(allCanonicalTags);
         const rawSuggestions = dependencies.suggestTags
           ? await dependencies.suggestTags({ ...input, existingTags })
           : await generateAiTagSuggestions({
             ...input,
             existingTags,
-            instruction: await getAiTagSuggestionPrompt(context.env.storage.db, workspaceId, input.locale),
+            instruction: getDefaultAiTagSuggestionPrompt(input.locale),
             model: await loadDefaultAiModel(context.env.storage.db, workspaceId, context.env),
             abortSignal: context.req.raw.signal,
           });
-        const currentTagKeys = new Set(input.currentTags.map((tag) => tag.toLocaleLowerCase()));
-        const suggestionNames = normalizeTags(
-          normalizeTags(rawSuggestions)
-            .filter((name) => !currentTagKeys.has(name.toLocaleLowerCase()))
-            .map((name) => allCanonicalTags.get(name.toLocaleLowerCase()) ?? name),
-        ).slice(0, MAX_AI_TAG_SUGGESTIONS);
-        const suggestions = suggestionNames
-          .map((name) => {
-            const canonicalName = allCanonicalTags.get(name.toLocaleLowerCase());
-            return { name: canonicalName ?? name, existing: Boolean(canonicalName) };
-          });
-        return context.json({ suggestions });
+        return context.json({ suggestions: finalizeAiTagSuggestions(rawSuggestions, input.currentTags, canonicalTags) });
       } catch (error) {
         return withAiError(context, error, "ai_tag_suggestions_failed");
+      }
+    },
+  );
+
+  app.get(
+    "/api/v1/ai/direct-target",
+    async (context) => {
+      const denied = requireUser(context);
+      if (denied) return denied;
+      try {
+        return context.json(await getDefaultAiDirectTarget(
+          context.env.storage.db,
+          getWorkspaceId(context),
+          context.env,
+        ));
+      } catch (error) {
+        return withAiError(context, error, "ai_generation_failed");
+      }
+    },
+  );
+
+  app.post(
+    "/api/v1/ai/generate/prepare",
+    validateAiGeneration,
+    async (context) => {
+      const denied = requireUser(context);
+      if (denied) return denied;
+      try {
+        const input = context.req.valid("json");
+        const fields = await resolveAiGenerateFields(context, input);
+        const credentials = await loadDefaultAiModelCredentials(
+          context.env.storage.db,
+          getWorkspaceId(context),
+          context.env,
+        );
+        return context.json(prepareAiGeneration({ ...fields, credentials }));
+      } catch (error) {
+        return withAiError(context, error, "ai_generation_failed");
+      }
+    },
+  );
+
+  app.post(
+    "/api/v1/ai/infographic-agent",
+    zValidator("json", InfographicAgentRequestSchema),
+    async (context) => {
+      const denied = requireUser(context);
+      if (denied) return denied;
+      try {
+        const input = context.req.valid("json");
+        const model = await loadDefaultAiModel(context.env.storage.db, getWorkspaceId(context), context.env);
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const send = (event: import("@edgeever/shared").InfographicAgentEvent) => {
+              try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); }
+              catch { /* The client may have disconnected. */ }
+            };
+            send({ type: "start" });
+            try {
+              const { runInfographicAgent } = await import("./infographic-agent");
+              await runInfographicAgent({ input, model, signal: context.req.raw.signal, onEvent: send });
+            } catch (error) {
+              send({ type: "error", message: providerErrorMessage(error) });
+            } finally {
+              try { controller.close(); } catch { /* The client may have disconnected. */ }
+            }
+          },
+        });
+        return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" } });
+      } catch (error) {
+        return withAiError(context, error, "ai_generation_failed");
       }
     },
   );
@@ -562,54 +698,16 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
       if (denied) return denied;
       try {
         const input = context.req.valid("json");
-        const workspaceId = getWorkspaceId(context);
-        const selectedPrompt = input.promptId
-          ? await getAiPromptTemplate(
-            context.env.storage.db,
-            workspaceId,
-            input.promptId,
-            input.locale,
-          )
-          : null;
-        if (input.promptId && !selectedPrompt) {
-          throw new AppError("ai_prompt_not_found", "The selected prompt no longer exists.", 404);
-        }
-
-        const action = selectedPrompt?.action ?? input.action;
-        const needsTargetLanguage = selectedPrompt
-          ? promptNeedsTargetLanguage(selectedPrompt.parameterKind)
-          : action === "translate";
-        const needsTone = selectedPrompt
-          ? promptNeedsTone(selectedPrompt.parameterKind)
-          : action === "change-tone";
-        if (needsTargetLanguage && !input.targetLanguage) {
-          throw new AppError("ai_target_language_required", "Choose a target language for this prompt.", 400);
-        }
-        if (needsTone && !input.tone) {
-          throw new AppError("ai_tone_required", "Choose a tone for this prompt.", 400);
-        }
-
-        const resolvedInstruction = selectedPrompt?.instruction
-          || input.instruction?.trim()
-          || await resolveWorkspaceActionInstruction(
-            context.env.storage.db,
-            workspaceId,
-            action,
-            input.locale,
-          )
-          || undefined;
+        const fields = await resolveAiGenerateFields(context, input);
         const model = await loadDefaultAiModel(
           context.env.storage.db,
-          workspaceId,
+          getWorkspaceId(context),
           context.env,
         );
         const resultBoundary = createAiGenerationResultBoundary();
         const generationInput = {
           ...input,
-          action,
-          instruction: resolvedInstruction,
-          targetLanguage: needsTargetLanguage ? input.targetLanguage : undefined,
-          tone: needsTone ? input.tone : undefined,
+          ...fields,
           model,
           resultBoundary,
           abortSignal: context.req.raw.signal,

@@ -41,15 +41,26 @@ describe("native mobile AI note assistant", () => {
   });
 
   test("streams AI output from the shared workspace configuration on both clients", () => {
+    expect(androidAssistantSource).toContain("resolveAiAssistantOpenAction");
+    expect(androidAssistantSource).toContain("readMobileAiAssistantLastAction");
+    expect(androidEditorSource).toContain("readStoredAiAssistantLastActionPreference");
+    expect(androidEditorSource).toContain("resolveAiAssistantOpenAction");
+    expect(iosAssistantSource).toContain("lastAiAssistantAction");
+    expect(iosAssistantSource).toContain("applyStoredOrDefaultAction");
+    expect(readSource("../apps/ios/EdgeEver/Data/Preferences/PreferencesStore.swift")).toContain("edgeever.aiAssistant.lastAction");
+
     expect(androidAssistantSource).toContain("client!.listAiPrompts(resolvedLocale)");
     expect(androidAssistantSource).toContain("client.streamAiGeneration(");
     expect(androidAssistantSource).toContain("promptId: selectedPrompt.id");
     expect(androidWorkspaceSource).toContain("aiPromptsJson={aiPromptsJson}");
     expect(androidEditorSource).toContain("...(promptId ? { promptId } : {})");
     expect(androidSessionSource).toContain("fetch: expoFetch as typeof fetch");
+    expect(androidSessionSource).toContain("directAiGeneration: true");
     expect(iosAssistantSource).toContain("env.session.client.listAiPrompts(locale: locale)");
     expect(iosAssistantSource).toContain("client.streamAiGeneration(input)");
     expect(iosAssistantSource).toContain("promptId: selectedPrompt?.id");
+    expect(iosApiSource).toContain('path: "/api/v1/ai/generate/prepare"');
+    expect(iosApiSource).toContain("streamDirectProvider");
     expect(iosApiSource).toContain('makeURL(path: "/api/v1/ai/generate")');
     expect(iosApiSource).toContain("for try await line in bytes.lines");
   });
@@ -68,7 +79,7 @@ describe("native mobile AI note assistant", () => {
   });
 
   test("keeps the assistant reachable from each native note action menu", () => {
-    expect(androidDetailSource).toContain('label={resolvedLocale === "en-US" ? "AI note assistant" : "AI 笔记助手"}');
+    expect(androidDetailSource).toContain('label={resolvedLocale !== "zh-CN" ? "AI note assistant" : "AI 笔记助手"}');
     expect(androidDetailSource).toContain("setAiAssistantOpen(true)");
     expect(androidDetailSource).toContain("<MobileAiAssistantModal");
     expect(iosDetailSource).toContain('env.preferences.t("AI 笔记助手", en: "AI note assistant")');

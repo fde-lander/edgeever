@@ -26,6 +26,16 @@ enum TipTapContentSource: Sendable {
             if markdown.contains("<!-- edgeever-diagram-v1:") {
                 return Decision(useJSON: false, payload: markdown, fingerprint: "md:\(markdown)")
             }
+            // Structured tables keep their JSON record model in the same comment.
+            // The viewer shows the readable Markdown table and never the marker.
+            if markdown.contains("<!-- edgeever-table-v1:") {
+                let stripped = stripStructuredTableMarker(markdown)
+                return Decision(useJSON: false, payload: stripped, fingerprint: "table:\(stripped)")
+            }
+            if markdown.contains("<!-- edgeever-infographic-v1:") {
+                let stripped = stripInfographicMarker(markdown)
+                return Decision(useJSON: false, payload: stripped, fingerprint: "infographic:\(stripped)")
+            }
             if jsonUsable {
                 if jsonHasImageWidth(json) {
                     return Decision(useJSON: true, payload: documentJSON, fingerprint: "json:\(json)")
@@ -51,6 +61,22 @@ enum TipTapContentSource: Sendable {
             return Decision(useJSON: true, payload: documentJSON, fingerprint: "json:\(json)")
         }
         return Decision(useJSON: false, payload: markdown, fingerprint: "md:\(markdown)")
+    }
+
+    static func stripStructuredTableMarker(_ markdown: String) -> String {
+        markdown.replacingOccurrences(
+            of: #"<!--\s*edgeever-table-v1:[\s\S]*?-->"#,
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func stripInfographicMarker(_ markdown: String) -> String {
+        markdown.replacingOccurrences(
+            of: #"<!--\s*edgeever-infographic-v1:[\s\S]*?-->"#,
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// True when TipTap JSON stores at least one image `width` (25–100 display size).

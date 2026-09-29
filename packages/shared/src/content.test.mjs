@@ -8,6 +8,7 @@ import {
   MERGE_DIVIDER_NODE_TYPE,
   FILE_ATTACHMENT_NODE_TYPE,
   PDF_ATTACHMENT_NODE_TYPE,
+  resolveFileDisplayMode,
   PLUGIN_EMBED_NODE_TYPE,
   pluginEmbedToMarkdown,
   mergeMemoDocs,
@@ -153,6 +154,30 @@ describe("file attachment Markdown compatibility", () => {
   test("keeps an ordinary standalone web link as text", () => {
     const doc = markdownToDoc("[EdgeEver](https://edgeever.org)");
     expect(doc.content[0]?.content?.[0]?.type).toBe("text");
+  });
+
+  test("preserves an empty external link through Markdown and JSON", () => {
+    const markdown = "Before [](https://example.com/path) and [named](https://example.com).";
+    const doc = markdownToDoc(markdown);
+    expect(doc.content[0]?.content?.[1]).toMatchObject({
+      type: "edgeeverEmptyExternalLink",
+      attrs: { href: "https://example.com/path" },
+    });
+    expect(docToMarkdown(doc)).toBe(markdown);
+    expect(markdownToDoc("`[](https://example.com)`").content[0]?.content?.[0]?.type).toBe("text");
+  });
+
+  test("recovers an empty link from older content JSON", () => {
+    const markdown = "Read [](https://example.com) here";
+    const oldDoc = markdownToDoc("Read  here");
+    expect(resolveMemoContentDoc(oldDoc, markdown)).toEqual(markdownToDoc(markdown));
+  });
+
+  test("keeps video preview expanded unless compact display mode is stored", () => {
+    expect(resolveFileDisplayMode(undefined)).toBe("inline");
+    expect(resolveFileDisplayMode("inline")).toBe("inline");
+    expect(resolveFileDisplayMode("compact")).toBe("compact");
+    expect(resolveFileDisplayMode("hidden")).toBe("inline");
   });
 
   test("upgrades a legacy standalone attachment link from rich content", () => {
@@ -400,6 +425,202 @@ describe("Theme block compatibility", () => {
     const markdown = docToMarkdown(doc);
     expect(markdown).toContain("\\[intro\\]");
     expect(markdown).toContain("Read this first");
+  });
+});
+
+describe("details fold blocks", () => {
+  test("parses GitHub details HTML and round-trips through Markdown", () => {
+    const markdown = `<details>
+<summary>展开看图</summary>
+
+hello **world**
+
+</details>`;
+    const doc = markdownToDoc(markdown);
+
+    expect(doc.content[0]).toMatchObject({
+      type: "details",
+      content: [
+        {
+          type: "detailsSummary",
+          content: [{ type: "text", text: "展开看图" }],
+        },
+        {
+          type: "detailsContent",
+          content: [{
+            type: "paragraph",
+            content: [
+              { type: "text", text: "hello " },
+              { type: "text", text: "world", marks: [{ type: "bold" }] },
+            ],
+          }],
+        },
+      ],
+    });
+
+    const serialized = docToMarkdown(doc);
+    expect(serialized).toContain("<details>");
+    expect(serialized).toContain("<summary>展开看图</summary>");
+    expect(serialized).toContain("hello **world**");
+    expect(markdownToDoc(serialized)).toEqual(doc);
+  });
+
+  test("converts an HTML image inside details into an image node", () => {
+    const markdown = `<details>
+<summary> </summary>
+<img src="https://example.com/a.png" alt="pic" title="t" width=45% />
+</details>`;
+    const doc = markdownToDoc(markdown);
+    expect(doc.content[0]?.content?.[1]?.content?.[0]).toMatchObject({
+      type: "image",
+      attrs: { src: "https://example.com/a.png", alt: "pic", title: "t", width: 45 },
+    });
+    const serialized = docToMarkdown(doc);
+    expect(serialized).toContain('<img src="https://example.com/a.png" alt="pic" title="t" width="45%" />');
+    expect(serialized).not.toContain("![pic]");
+    expect(markdownToDoc(serialized).content[0]?.content?.[1]?.content?.[0]).toMatchObject({
+      type: "image",
+      attrs: { src: "https://example.com/a.png", alt: "pic", title: "t", width: 45 },
+    });
+  });
+
+  test("keeps an image inside a details block and writes it back as HTML", () => {
+    const markdown = `<details>
+<summary>图</summary>
+
+![pic](https://example.com/a.png)
+
+</details>`;
+    const doc = markdownToDoc(markdown);
+    expect(doc.content[0]?.type).toBe("details");
+    expect(doc.content[0]?.content?.[1]?.content?.[0]).toMatchObject({
+      type: "image",
+      attrs: { src: "https://example.com/a.png", alt: "pic", width: 35 },
+    });
+    expect(docToMarkdown(doc)).toContain('<img src="https://example.com/a.png" alt="pic" width="35%" />');
+  });
+
+  test("plays a remote video inside details through the existing attachment", () => {
+    const markdown = `<details>
+<summary>片段</summary>
+<video src="https://cdn.example.com/watch/clip.mp4" controls alt=" " title=" " width=45%></video>
+<video src="https://cdn.example.com/player?id=1" controls /></video>
+<video src="javascript:alert(1)" controls></video>
+</details>`;
+    const doc = markdownToDoc(markdown);
+    const body = doc.content[0]?.content?.[1]?.content || [];
+    expect(body).toHaveLength(2);
+    expect(body[0]?.content?.[0]).toMatchObject({
+      type: FILE_ATTACHMENT_NODE_TYPE,
+      attrs: {
+        url: "https://cdn.example.com/watch/clip.mp4",
+        filename: "clip.mp4",
+        mimeType: "video/mp4",
+        displayMode: "inline",
+      },
+    });
+    expect(body[1]?.content?.[0]).toMatchObject({
+      type: FILE_ATTACHMENT_NODE_TYPE,
+      attrs: {
+        url: "https://cdn.example.com/player?id=1",
+        mimeType: "video/mp4",
+        displayMode: "inline",
+      },
+    });
+
+    const serialized = docToMarkdown(doc);
+    expect(serialized).toContain('<video src="https://cdn.example.com/watch/clip.mp4" controls></video>');
+    expect(serialized).toContain('<video src="https://cdn.example.com/player?id=1" controls></video>');
+    expect(serialized).not.toContain("javascript:");
+    expect(serialized).not.toContain("width=");
+    expect(markdownToDoc(serialized).content[0]?.content?.[1]?.content?.[0]?.content?.[0]).toMatchObject({
+      type: FILE_ATTACHMENT_NODE_TYPE,
+      attrs: { url: "https://cdn.example.com/watch/clip.mp4", mimeType: "video/mp4" },
+    });
+  });
+
+  test("keeps an uploaded video attachment inside details as a resource link", () => {
+    const doc = {
+      type: "doc",
+      content: [{
+        type: "details",
+        content: [
+          { type: "detailsSummary", content: [{ type: "text", text: "片段" }] },
+          {
+            type: "detailsContent",
+            content: [{
+              type: "paragraph",
+              content: [{
+                type: FILE_ATTACHMENT_NODE_TYPE,
+                attrs: {
+                  url: "/api/v1/resources/res_video/blob",
+                  label: "附件：clip.mp4",
+                  filename: "clip.mp4",
+                  mimeType: "video/mp4",
+                  displayMode: "inline",
+                },
+              }],
+            }],
+          },
+        ],
+      }],
+    };
+
+    const serialized = docToMarkdown(doc);
+    expect(serialized).toContain("[附件：clip.mp4](/api/v1/resources/res_video/blob)");
+    expect(serialized).not.toContain("<video");
+  });
+
+  test("leaves a video sample inside a details code fence untouched", () => {
+    const markdown = `<details>
+<summary>示例</summary>
+
+\`\`\`html
+<video src="https://cdn.example.com/clip.mp4" controls></video>
+\`\`\`
+
+</details>`;
+    const serialized = docToMarkdown(markdownToDoc(markdown));
+    expect(serialized).toContain('<video src="https://cdn.example.com/clip.mp4" controls></video>');
+    expect(serialized).toContain("```html");
+  });
+
+  test("recovers details from Markdown when JSON only kept the tags as text", () => {
+    const markdown = `<details>
+<summary>提示</summary>
+
+hidden
+
+</details>`;
+    const legacyDoc = {
+      type: "doc",
+      content: [{
+        type: "paragraph",
+        content: [{ type: "text", text: markdown }],
+      }],
+    };
+
+    expect(resolveMemoContentDoc(legacyDoc, markdown).content[0]?.type).toBe("details");
+  });
+});
+
+describe("extra blank lines", () => {
+  test("keeps two visual blank lines as an empty paragraph", () => {
+    const doc = markdownToDoc("A\n\n\nB");
+    const emptyParagraphs = doc.content.filter((node) =>
+      node.type === "paragraph" && (!node.content || node.content.length === 0)
+    );
+
+    expect(emptyParagraphs).toHaveLength(1);
+    expect(doc.content.map((node) => node.type)).toEqual(["paragraph", "paragraph", "paragraph"]);
+  });
+
+  test("does not rewrite extra blank lines inside fenced code", () => {
+    const markdown = "before\n\n```\nline\n\n\nline\n```\n\nafter";
+    const doc = markdownToDoc(markdown);
+    const code = doc.content.find((node) => node.type === "codeBlock");
+
+    expect(code?.content?.[0]?.text).toBe("line\n\n\nline");
   });
 });
 
