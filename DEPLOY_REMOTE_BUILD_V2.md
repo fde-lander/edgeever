@@ -1,15 +1,18 @@
-# EdgeEver 远端 Git Clone + Build 部署教程（V2.7 — 远端 git clone + docker build）
+# EdgeEver 远端 Git Clone + Build 部署教程（V2.8 — 远端 git clone + docker build）
 
-> 📅 2026-09-29 | 本次部署目标：**分支 fde-v1.90.0.1（上游 merge v1.90.0 + table_forms 隔离修复）**
-> 回滚锚点：**tag fde-v1.65.0.1（05c8062f）** 首选 / **tag fde-v1.50.0.3（33f53658）** 次选 | 适用本次及未来所有版本
+> 📅 2026-11-08 | 本次部署目标：**分支 fde-v2.23.0.1（上游 merge v2.23.0 + A 点 wrapper 修复 + poster_render_jobs 隔离 + Plan D poster guard）**
+> 回滚锚点：**tag fde-v1.90.0.1（292718d0）** 首选 / **tag fde-v1.65.0.1（05c8062f）** 次选 / **tag fde-v1.50.0.3（33f53658）** 三选 | 适用本次及未来所有版本
+
+> ⚠️⚠️ **本版最大风险：37 个新 migration（0056-0092），其中 5 个会改写既有数据 + 1 个会 DROP 表。**
+> **没有备份 = 不可回滚。升级前必须先做第 9.1 章嘅 DATA 备份并校验通过，否则唔准升级。** ⚠️⚠️
 
 > 🔄 **交付方式定案（2026-09-04，以后一律照此）**：本地 build → `docker save` → tar.zst → scp 传输**永久废弃**。
 > 唯一流程：**远端 git pull → 远端 docker build → 本地镜像 → compose 使用**。实测 clone 体积约 35MB。
 > AI 交付物只有两样：**commit hash + 面向用户嘅变更说明**，唔再交任何镜像文件。
-> （旧 tar 文件 edgeever-fde-v1.50.0.1.tar.zst 同旧教程 DEPLOY_V1.50.0.1.md 已于 2026-09-04 删除。）
 
 > **版本变更记录**
 >
+> - **V2.8（2026-11-08）**：目标版本 v1.90.0.1 → **v2.23.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**超大版本 merge**（v1.90.0 → v2.23.0，上游 **964 commits / 2402 files / 跨 33 个 minor**）。**新增 37 个 migration（0056-0092）**，其中 ⚠️ **5 个会改历史数据**（0058 / 0059 / 0070 / 0071 / 0078）+ ⚠️ **0064 会 DROP 5 张表**（video transcription 退役，属上游未发布功能）—— 升级前**必须**备份 data（见第 9.1 章 HARD-GATE）。⚠️ **build stage 新增 chromium + nodejs 安装**（上游 Dockerfile，仅 build 机器用；**runtime 镜像零 chromium 零 node**）→ 首次 build 会下载约 200-250MB、慢 +3-8 分钟属正常。本 fork 额外加 **Plan D pre-flight guard**（`RUN bun run check:poster:thumbnails`）：若 poster 缩图 stale，build 会在几秒内 fail-fast 并打印修复指引。本版 FDE 修复：**A 点** `isReadQuery()` 不再把 `WITH...UPDATE` 误判为读查询（TDD 10 断言）+ **Q4** `poster_render_jobs` 加入 hiding wrapper（S11）。验证矩阵新增 **V9 = poster_render_jobs 隔离验证**。
 > - **V2.7（2026-09-29）**：目标版本 v1.65.0.1 → **v1.90.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**大版本 merge**（v1.65.0 → v1.90.0，上游 25 个 release / 391 commits / 785 files）。**新增 9 个 migration（0047-0055）**，其中 ⚠️ **0047 改 AI prompts seed（升级后 AI 行为会变）** + ⚠️ **0053 一次性 DDL 动 inbox 表** —— 升级前必须备份 data（V2.5 铁律）。新泄露面 `table_forms`（0055）已加入 hiding wrapper（MEMO_ID_SUBQUERY），agent 隐藏 memo 嘅公开表单 404（Q4）。上游新功能：结构化表格笔记 + 表单收集（beta）/ AI Agent 模式全面升级（resumable runs / timeline）/ 公开分享密码保护 / 插件市场本地化。验证矩阵新增 **V8 = table_forms 隔离验证**。
 > - **V2.6（2026-09-11）**：目标版本 v1.64.0.1 → **v1.65.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**小版本 merge**（v1.64.0 → v1.65.0，上游 10 commits / 118 files），**无新增 migration**（数据库 schema 不变）；新增 F18-A 修复（HiddenNotebookError extends AppError，REST 写隐藏分类 500→403）；TokenHidingEditor bg-white→bg-card 同步上游 dark mode CSS token 重构；上游新功能：Markdown ZIP export + Diagram 布局 4 连 fix + Docker entry path 兼容。
 > - **V2.5（2026-09-10）**：⚠️ **新增 DATA 目录强制备份步骤（MASTER 钦定，升级铁律）**——大架构升级（如 v1.64.0.1 嘅 11 个新 migration）会改数据库结构，升级前必须先备份 `./edgeever-data`，否则新版本有问题时**回滚都救唔返数据**；插入位置 = 日常升级流程第 2.5 步（更新源码之后、build/上线之前）+ 升级铁律段；「回滚特殊注意」补充「DATA 备份先至係真正嘅回滚保障（镜像回滚只救代码，唔救数据）」。
@@ -56,19 +59,32 @@
 
 **版本锚点说明**：
 
-- **本次部署 = fde-v1.90.0.1 分支**（上游 merge v1.90.0 + table_forms 隔离修复）
-- 分支 fde-v1.90.0.1 = fde-v1.65.0.1（05c8062f）→ merge upstream v1.90.0（c31dfe7a）→ table_forms hiding fix
-- tag fde-v1.65.0.1（05c8062f）= 上一个可用版本（远端而家跑紧），**首选回滚锚点**
-- tag fde-v1.50.0.3（33f53658）= 更早稳定版，次选回滚锚点
-- tag fde-v1.64.0.1（ce044488）= 中间版（备用）
-- v1.65.0.1 → v1.90.0.1 **有数据库 schema 变化**：上游带来 9 个新 migration（0047-0055：replace_social_ai_prompts / workspace_extensions / companion_agent_run / companion_process_text / companion_agent_session / memo_share_passwords / collapse_duplicate_inbox_notebooks / user_note_body_font / table_forms）。**首次启动自动应用，无需手动 migrate**；⚠️ migration 撞号（上游 0036_resource_multipart_uploads vs 我哋 0036_mcp_token_hidden）无害——runner 按完整档案名 tracking，两者都会被正确应用一次（我哋嗰条远端已应用过会 skip，上游嗰条会执行）
+- **本次部署 = fde-v2.23.0.1 分支**（上游 merge v2.23.0 + A 点 wrapper 修复 + poster_render_jobs 隔离 + Plan D guard）
+- 分支 fde-v2.23.0.1 = fde-v1.90.0.1（292718d0）→ merge upstream v2.23.0（6600a632）→ A 点修复 + Q4 poster rule + Plan D guard
+- tag **fde-v1.90.0.1（292718d0）** = 上一个可用版本（远端而家跑紧），**首选回滚锚点**
+- tag fde-v1.65.0.1（05c8062f）= 更早稳定版，次选回滚锚点
+- tag fde-v1.50.0.3（33f53658）= 老稳定点，三选回滚锚点
+- v1.90.0.1 → v2.23.0.1 **有大规模 schema 变化**：上游带来 **37 个新 migration（0056-0092）**。**首次启动自动应用，无需手动 migrate**；⚠️ migration 撞号（上游 0036_resource_multipart_uploads vs 我哋 0036_mcp_token_hidden）无害——runner 按完整档案名 tracking，两者都会被正确应用一次（我哋嗰条远端已应用过会 skip，上游嗰条会执行）
 
-**本版变更内容（v1.90.0.1）**：
+**⚠️ 本版 migration 风险明细（37 个内最需注意的 6 个）**：
 
-1. **上游 merge v1.90.0**：v1.65.0 → v1.90.0（25 个 release / 391 commits / 785 files）：结构化表格笔记 + 表单收集（beta，新表 table_forms）/ AI Agent 模式全面升级（resumable runs / timeline / pinned context，退休 Paw mode）/ 公开分享密码保护（memo_shares password_hash）/ 插件市场本地化 + 插件 AI 输出上限提升 / 截图存笔记 / 图表增强（plain theme + architecture）/ 日文 locale + 内置字体 / WeChat 导入增强
-2. **table_forms 隔离修复（本版 FDE 核心改动）**：`table_forms` 表（0055）加入 hiding wrapper（MEMO_ID_SUBQUERY，NULL-safe）—— agent token 直接 SELECT table_forms 会过滤隐藏 memo 嘅 form；loadForm 的 EXISTS(memos) 双重拦截 → 隐藏 memo 嘅公开表单对 agent 404（Q4 语义）；公开访问者（无认证）照常可访问（per-token 隔离只对 agent 生效）
-3. **隔离功能全量保留**：per-token 隔离、NULL-safe 修正（BUG-002/002b）、search 修复（BUG-001）、tag verified 字段（BUG-003）、F18-A（REST 403）全部喺 merge 后实测回归通过（hiding 7 档 90 pass / 0 fail；全库 2418 pass / 11 fail = baseline 环境相关 11 条零新增）
-4. **新增 migration 0047-0055（9 个）**：⚠️ 0047 改 AI prompts seed（升级后 AI 行为会变）+ ⚠️ 0053 一次性 DDL 动 inbox 表 —— **升级前必须备份 data**（V2.5 铁律，今次特别重要）
+| migration | 影响 | 如何判断有无影响 |
+|---|---|---|
+| `0058_retire_emerald_note_palette` | UPDATE users.note_prose_palette（emerald→native） | 若你从未用过翡翠色板 → 零影响 |
+| `0059_retire_custom_note_palette` | UPDATE users（custom→native） | 若从未用过自定义色板 → 零影响 |
+| `0064_retire_video_transcription` | **DROP 5 张表**（video transcription 退役） | 若从未用过视频转写 → 零影响 |
+| `0070_workspace_seed_localization` | 只在「完全未用过」安装生效 | 有数据 → 自动跳过 |
+| `0071_fix_welcome_memo_markdown` | 只动 hash 完全匹配的 welcome seed | 你改过 welcome note → 自动跳过 |
+| `0078_clear_default_notebook_colors` | 只清 untouched 出厂色值 | 自订过外观 → 保留原值 |
+
+**本版变更内容（v2.23.0.1）**：
+
+1. **上游 merge v2.23.0**：v1.90.0 → v2.23.0（**964 commits / 2402 files / 跨 33 个 minor**）：新增 **16 个 MCP 工具**（poster 8 / table 7 / 其他 2，旧 45 → 61）/ poster 设计渲染 / 结构化表格笔记增强 / 视频转写退役（0064）/ 笔记本外观（颜色/粗体/文字色/反色）×4 migration / TOTP 双因素认证 / 公开笔记本站点 / 笔记分享 slug + 密码 + 展示选项 / 备份 revision / 定时任务运行计数 / 导出游标索引 / 4 个安全修复（XSS 修复 / renderer 边界加固 / 依赖漏洞更新 / URI+SVG 漏洞更新）
+2. **A 点修复（本版 FDE 核心改动 1）**：`isReadQuery()` 不再把 `WITH ... UPDATE/INSERT/DELETE` 误判为读查询 —— 上游 `deleteNotebookTree` 的 guarded UPDATE 之前会被送进 `rewriteSelectSql()` 并被错误注入。**TDD 修复**（`tests/mcp-hiding-with-update.test.ts` T1-T7，RED 4 fail → GREEN 10 pass）
+3. **Q4 poster_render_jobs 隔离（本版 FDE 核心改动 2）**：`poster_render_jobs`（0066）加入 hiding wrapper（MEMO_ID_SUBQUERY，NULL-safe）—— `readPosterRenderJob()` 直接 SELECT 本表且无 JOIN memos，之前 agent 可读/轮询隐藏 memo 的渲染任务（template / revision / status 全泄露）。**TDD 修复**（`tests/mcp-hiding-poster-jobs.test.ts` T1-T5，RED 3 fail → GREEN 5 pass）+ leak-matrix S11
+4. **Plan D poster guard（本版 FDE 核心改动 3）**：Dockerfile 保留 upstream 原样（chromium 5 行全部不动）+ 加独立一行 `RUN bun run check:poster:thumbnails`，stale 时 fail-fast 而非静默跑浏览器
+5. **隔离功能全量保留**：per-token 隔离、NULL-safe 修正（BUG-002/002b）、search 修复（BUG-001）、tag verified 字段（BUG-003）、F18-A（REST 403）全部喺 merge 后实测回归通过（hiding 全套 10 档全绿 + leak-matrix 19 pass / 0 fail + 全库 2428 pass / 11 fail = baseline 环境相关 11 条零新增）
+6. **Q3 判定（已实测安全，不加守卫）**：`delete_notebook` 递归删除对 agent 天然安全 —— wrapper 过滤隐藏子树导致计数不匹配 → `changes=0` → 409 拒绝。**隐藏数据永不落入 UPDATE 的 id 集合**（3 场景探针实测）
 
 
 ---
@@ -77,30 +93,30 @@
 
 📌 **两种场景二选一**：远端已有一个旧版 edgeever 源码仓库（今次及以后大部分情况）→ 用 **场景 A**；全新机器 / 换目录 → 用 **场景 B**。
 
-### 场景 A：既有仓库升级（默认 —— 远端已有 fde-v1.50.0.3 等旧版仓库）
+### 场景 A：既有仓库升级（默认 —— 远端已有 fde-v1.90.0.1 等旧版仓库）
 
 喺既有源码目录（例如 /opt/edgeever-src）逐条执行：
 
     git fetch origin --tags
-    git checkout fde-v1.90.0.1
-    git pull origin fde-v1.90.0.1
+    git checkout fde-v2.23.0.1
+    git pull origin fde-v2.23.0.1
 
 核对（两条都应通过）：
 
     git log --oneline -1
-    # 应显示：docs: DEPLOY V2.7 for fde-v1.90.0.1（或用 git describe --tags --exact-match 确认输出 fde-v1.90.0.1）
+    # 应显示：docs: DEPLOY V2.8 for fde-v2.23.0.1（或用 git describe --tags --exact-match 确认输出 fde-v2.23.0.1）
     git describe --tags --exact-match
-    # 应输出：fde-v1.90.0.1
+    # 应输出：fde-v2.23.0.1
 
 **排障**：如果 fetch 报 `! [rejected] ... (would clobber existing tag)` 或 pull 报
 `Need to specify how to reconcile divergent branches` —— 只会喺「之前 fetch 过旧版同名 tag」
 嘅仓库出现（例如 AI 部署通知前曾拉过一次）。恢复法（实测 2026-09-10）：
 
-    git tag -d fde-v1.90.0.1
+    git tag -d fde-v2.23.0.1
     git fetch origin --tags
-    git checkout fde-v1.90.0.1
-    git pull origin fde-v1.90.0.1
-    git describe --tags --exact-match    # 应输出 fde-v1.90.0.1
+    git checkout fde-v2.23.0.1
+    git pull origin fde-v2.23.0.1
+    git describe --tags --exact-match    # 应输出 fde-v2.23.0.1
 
 ⚠️ **HEAD detached 说明**：单分支 clone 入面 checkout 新分支名时，git 找不到同远端 tracking 分支但找到同名 tag，会落在「HEAD detached at fde-v1.90.0.1」—— **呢个係正常现象唔係错误**（实测 2026-09-10）：docker build 只需要源码文件树，detached 状态文件齐全、build 无影响。以后升级更新版本时同样三步（checkout 新版本号）即可。
 
@@ -116,13 +132,13 @@
 
 1. 选个目录，例如 /opt/edgeever-src：
 
-       git clone --branch fde-v1.90.0.1 --single-branch https://github.com/fde-lander/edgeever.git /opt/edgeever-src
+       git clone --branch fde-v2.23.0.1 --single-branch https://github.com/fde-lander/edgeever.git /opt/edgeever-src
 
 2. 验证 HEAD commit：
 
        cd /opt/edgeever-src && git log --oneline -1
 
-   应显示：docs: DEPLOY V2.7 for fde-v1.90.0.1（可用 git describe --tags --exact-match 确认输出 fde-v1.90.0.1）
+   应显示：docs: DEPLOY V2.8 for fde-v2.23.0.1（可用 git describe --tags --exact-match 确认输出 fde-v2.23.0.1）
 
    注：`--single-branch` clone 默认已带全部 tags（git 默认 --tags 跟 clone 走），无需额外 fetch tag 即可 checkout 旧 tag 回滚。
 
@@ -133,11 +149,11 @@
 
 ## 🏗 第二步：远端 Build 镜像
 
-在源码目录（/opt/edgeever-src）执行（版本号必须与本次部署目标一致 = **v1.90.0.1**）：
+在源码目录（/opt/edgeever-src）执行（版本号必须与本次部署目标一致 = **v2.23.0.1**）：
 
     docker build \
       --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) \
-      -t edgeever-fde:v1.90.0.1 \
+      -t edgeever-fde:v2.23.0.1 \
       .
 
 要点：
@@ -159,13 +175,13 @@
 在 compose 文件同目录建 .env（如果已有就改）：
 
     EDGE_EVER_IMAGE=edgeever-fde
-    EDGE_EVER_VERSION=v1.90.0.1
+    EDGE_EVER_VERSION=v2.23.0.1
     EDGE_EVER_PORT=8787
     EDGE_EVER_AUTH_USERNAME=admin
     EDGE_EVER_AUTH_PASSWORD=你的密码
 
 注意 compose.yaml 用 "image: ${EDGE_EVER_IMAGE}:${EDGE_EVER_VERSION}"，
-所以 EDGE_EVER_IMAGE=edgeever-fde + EDGE_EVER_VERSION=v1.90.0.1 会拼出 edgeever-fde:v1.90.0.1，
+所以 EDGE_EVER_IMAGE=edgeever-fde + EDGE_EVER_VERSION=v2.23.0.1 会拼出 edgeever-fde:v2.23.0.1，
 正好对应第二步的 -t 标签。
 
 **⚙️ .env 可选新变量（v1.64.0 上游新增，全部唔改都照样跑）**：
@@ -195,67 +211,109 @@
 
 ---
 
-## 🔁 日常升级流程（以后每个新版本照此，本次 = v1.65.0.1 → v1.90.0.1）
+## 🔁 日常升级流程（以后每个新版本照此，本次 = v1.90.0.1 → v2.23.0.1）
 
 1. 本地 AI 改完代码 push 到 GitHub 分支，并告知**新 commit hash**（每次升级都用通知嘅 hash 校验，唔好凭记忆拉）
-2. 远端更新源码（同第一步场景 A 嘅三步命令）：
+2. 远端更新源码：
 
        cd /opt/edgeever-src
        git fetch origin --tags
-       git checkout fde-v1.90.0.1
-       git pull origin fde-v1.90.0.1
-       git log --oneline -1     # 应显示 docs: DEPLOY_REMOTE_BUILD V2.4 ...，一致先继续
+       git checkout fde-v2.23.0.1
+       git pull origin fde-v2.23.0.1
+       git log --oneline -1     # 应与通知的 HEAD 一致，唔一致就停手
 
-2.5. ⚠️ **DATA 目录强制备份（升级铁律 —— build / 上线之前必做，跳过 = 裸奔升级）**：
+   ⚠️ 本版分支係**新分支**（之前係 fde-v1.90.0.1），`git checkout` 会自动切换，属正常。
 
-    大架构升级会升级数据库结构（migration），一旦新版本启动后 schema 已变，
-    出问题时镜像可以回滚，**数据库本身冇备份就救唔返**。必须先备份 compose
-    所在目录映射出来嘅 `./edgeever-data`（含 SQLite 数据库 + 资源文件）：
+2.5. ⚠️⚠️ **DATA 目录强制备份（本版最高风险步骤 — HARD-GATE）**
 
-       # 先停容器（避免备份到写入中嘅数据库，保证一致性）：
+    本版新增 **37 个 migration（0056-0092）**，其中 **5 个会改写既有数据**、
+    **1 个会 DROP 5 张表**。冇备份 = 出事之后**连回滚都救唔返数据**。
+
+    ⚠️ **唔备份唔准升级**。
+
+       # ① 停容器（SQLite 一致性要求，不能热备）
        cd /opt/edgeever        # ← compose 所在目录（按你实际路径）
-       docker compose stop
+       docker compose stop edgeever
 
-       # 备份整个 data 目录（tar 保留权限结构，日期标记）：
-       cd /opt/edgeever
-       sudo tar -czf /opt/edgeever-data-backup-$(date +%Y%m%d-%H%M%S).tar.gz edgeever-data/
+       # ② 整份备份（保留权限 + 时间戳）
+       BACKUP_TS=$(date +%Y%m%d-%H%M%S)
+       sudo tar -czf "edgeever-data-backup-${BACKUP_TS}.tar.gz" edgeever-data/
+       ls -lh "edgeever-data-backup-${BACKUP_TS}.tar.gz"
 
-       # 验证备份文件存在 + 大小合理（应接近 edgeever-data 实际大小）：
-       ls -lh /opt/edgeever-data-backup-*.tar.gz | tail -1
-       du -sh edgeever-data/
+       # ③ ⚠️ 校验备份完整性（不校验 = 不算备份完）
+       tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | head -20
+       tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | wc -l    # 应 > 100
+       tar -tzvf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | grep -E '\.db|\.sqlite'
 
-    备份完成并验证后，先继续第 3 步 build。旧数据目录**唔好删**，留到新版
-    验证通过（第 5 步全绿）之后先清理，作为 7 日内快速回滚保障。
+       # ④ 记低备份路径（写进部署记录）
+       echo "BACKUP=${PWD}/edgeever-data-backup-${BACKUP_TS}.tar.gz"
+
+    **判读**：tar 列出失败 / 文件数 < 100 / 无 .db 文件 → **停手排查，不许继续**。
+
+    ⚠️ 本项目已是 **bind mount**（`./edgeever-data:/data`），**唔好用 `docker volume inspect`**（Phase 14 已从 named volume 迁走）。
 
 3. 重新 build（BUILD_ID 自动填当前 HEAD）：
 
-       docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.90.0.1 .
+       docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v2.23.0.1 .
+
+   ⚠️⚠️ **本版 build 会明显变慢，属正常，唔好误判为卡死**：
+
+   - 上游 v2.23.0 Dockerfile 的 **build stage 新增 `chromium` + `nodejs` 安装**（`apk add --no-cache chromium nodejs`）
+   - **首次 build 会下载约 200-250MB**，预计 **慢 +3-8 分钟**
+   - `apk add` 在 `COPY apps/api` 之前 → **Docker 层缓存可复用，第 2 次起不再下载**
+   - ✅ **runtime 镜像（生产环境跑的）零 chromium、零 node** —— 全新 `FROM oven/bun:1.3.14-alpine`，实测 runtime 段 grep chromium = 0
+   - 即：**服务器上跑的镜像绝对没有浏览器**；chromium 只在 build 机器上，为「万一 poster 缩图过期」的防御
+
+   ⚠️ **本 fork 另加了 Plan D pre-flight guard**（`RUN bun run check:poster:thumbnails`）：
+
+   - 若 poster 缩图 **fresh**（v2.23.0 属此情况）→ guard 几秒内通过，**build 根本不会启动浏览器**
+   - 若 poster 缩图 **stale**（未来上游某版忘同步）→ guard **立刻 EXIT=1 fail-fast**，报 `Poster thumbnails are stale`，**唔会静默跑 5-10 分钟浏览器最后可能 OOM**
+   - 遇到此错误照下面修复后重新 build：
+
+         # 在源码目录（/opt/edgeever-src）执行：
+         bun run prepare:poster:thumbnails
+         git add apps/web/src/assets/poster-template-previews
+         git commit -m "chore: regenerate poster thumbnails"
+
+     若远端冇装 bun，可跳过此路径，改用官方 Dockerfile 原本的 build 内生成（去掉 guard 那行临时构建）。
 
 4. 改 .env 版本号 → 重建容器：
 
-       # .env 入面：EDGE_EVER_VERSION=v1.90.0.1
+       # .env 入面：EDGE_EVER_VERSION=v2.23.0.1
        docker compose up -d
 
 5. 验证（健康端点 + 本次变更重点）：
 
-       curl -s http://127.0.0.1:8787/api/health
-       # 应返回 "ok": true、"migration":"0055_..."（本次有 schema 变化，首次启动后 0046→0055）+ "build":"<hash>…"
+       sleep 20 && curl -s http://127.0.0.1:8787/api/health
+       # 应返回 "ok":true、"migration":"0092_..."（37 个新 migration 自动应用）、"build":"<新 HEAD 前12位>"
 
-**本次升级（v1.65.0.1 → v1.90.0.1）验证重点**：
+**本次升级（v1.90.0.1 → v2.23.0.1）验证重点（V0-V10）**：
 
-- `/api/health`：migration 字段应变为 0055_table_forms.sql（0047-0055 共 9 个新 migration 自动应用）
-- **V8 table_forms 隔离验证（本版新增）**：
-  - 建 DZ_TEST 分类 + memo + 开启表单（表格笔记 → 表单收集）
-  - 主人 WEB UI 加隔离 → agent MCP/REST 读表单 → 404（隐藏 memo 表单唔暴露存在性）
-  - 直接查 table_forms（agent）→ 隐藏 form 唔出现
-  - 公开访问者（无认证）攞住表单 token → 照常可访问（per-token 隔离只对 agent 生效）
-- V0-V7 隔离回归（沿用 Phase 23 模式）：V0 health / V1 分类隔离 / V2 读写守卫 / V3 REST 403 / V4 父子继承 / V5 标签 / V6 diagram / V7 清理
-- 被隔离分类仍然完全不可见 —— 隔离功能未被上游 merge 削弱（全方向探针）
+- **V0** `/api/health`：`build` = 新 HEAD 前 12 位，**`migration=0092`**（0056-0092 共 37 个自动应用），`ok:true`，HTTP 200
+- **V1** MCP `get_current_user`：owner 身份 + 8 scopes + `dataIsolation workspaceScoped`
+- **V2** MCP `list_notebooks`：基线数量（现行 6 个可见分类）
+- **V3** MCP `list_memos`：基线数量（现行 36 active）
+- **V4** 分类隔离核心：隐藏分类的 memo **不在** 任何 MCP 列表
+- **V5** MCP 读隐藏：`get_memo(隐藏id)` → 404
+- **V6** MCP 写隐藏：`create_memo` 到隐藏分类 → 403 HiddenNotebookError
+- **V7** 标签隔离：隐藏分类的标签不出现在 `list_tags`
+- **V8** `get_workspace_stats`：notebooks / memos 数与 V2/V3 一致（隔离过滤生效）
+- **V9** ⭐ **poster_render_jobs 隔离（本版新增）**：
+  - agent 对**隐藏分类**的 poster 调 `request_poster_render` → 404 / 403
+  - agent 拿**隐藏 jobId** 调 `get_poster_render_job` → **404**（唔暴露存在性）
+  - agent 对**可见** poster 调 render → 正常返回 job（功能未被隔离误杀）
+- **V10** Diagram / Table / Form 隔离回归：隐藏分类的 diagram / table_forms 对 agent 一律不可见
+- 被隔离分类仍然完全不可见 —— 隔离功能未被上游 merge 削弱
 - `search_memos`（BUG-001）/ `create_notebook`（BUG-002）/ `rename_tag` 返 `verified:true`（BUG-003）/ F18-A（REST 写隐藏 403）四条修复全部无回归
-- 空分类仍然可见（BUG-002 修复仍然有效）
-- MCP 工具列表应保持 45 个（与 v1.65.0.1 一致，无新增 companion 读取工具）
+- **MCP 工具列表应为 61 个**（上游 v2.23.0 新增 16 个：poster 8 / table 7 / 其他 2，旧 45 → 61）
 
-6. 旧镜像确认新版运行正常后可删：docker rmi edgeever-fde:v1.50.0.3
+⚠️ **测试数据铁律**：只用 `DZ_TEST_*` 前缀新建数据，**绝对不碰现有笔记**，测完即清。
+
+6. 旧镜像确认新版运行正常后可删（**先确认新版全绿再删**）：
+
+       docker rmi edgeever-fde:v1.90.0.1
+
+   ⚠️ **本版建议保留旧镜像 + 备份至少 72 小时**（37 个 migration 风险面比上次大 4 倍）。
 
 ---
 
@@ -319,36 +377,82 @@
 
 ---
 
-## ⚠️ 回滚方案
+## ⚠️ 回滚方案（三级，由快到完整）
 
-1. **首选（镜像还在时）**：.env 改回旧版本号 EDGE_EVER_VERSION=v1.65.0.1 → docker compose up -d（秒回）
-2. **镜像已删**（rebuild 旧版）：
+### Level 1 — 代码快速回滚（⚠️ 只在 migration 未跑完时有效）
 
-       cd /opt/edgeever-src
-       git checkout fde-v1.65.0.1    # single-branch clone 已带全部 tags，直接 checkout 得
-       git log --oneline -1          # 应显示 05c8062f
-       docker build --build-arg EDGE_EVER_BUILD_ID=05c8062f -t edgeever-fde:v1.65.0.1 .
-       # .env 改 EDGE_EVER_VERSION=v1.65.0.1 → docker compose up -d
-       # 注意：checkout 旧 tag 后源码目录停喺 detached HEAD，回新版本时再 git checkout fde-v1.90.0.1
+    # .env 改 EDGE_EVER_VERSION=v1.90.0.1
+    docker compose up -d
 
-3. **次选更旧锚点**：tag `fde-v1.50.0.2`（2dfd30ac），同样手法（BUILD_ID=2dfd30ac，tag v1.50.0.2）
-4. **回滚到任意更旧版本**：git checkout <该版本 tag 或 commit> → docker build -t edgeever-fde:<自定义tag> . → .env 对应改 → up -d
-5. 数据安全：数据在 ./edgeever-data bind mount，镜像操作完全不影响
+⚠️ **限制**：只有容器启动即失败（**migration 未执行完成**）时才有效。
+若 migration 已跑完（`/api/health` 显示 `migration=0092`），DB schema 已变，**此回滚会崩**。
 
-### ⚠️ 回滚特殊注意（v1.90.0.1 有 schema 变化，同以往唔同）
+### Level 2 — 数据 + 代码完整回滚（⚠️ migration 已执行后的唯一正确方案）
 
-v1.90.0.1 首次启动会应用 9 个新 migration（0047-0055：AI prompts seed 替换 / workspace_extensions /
-companion_turns 加字段 ×3 / memo_share_passwords / inbox 去重 DDL / user_note_body_font / table_forms；
-数据库结构升级，**升级方向自动、安全**）。
-但**回滚到 fde-v1.65.0.1 时数据库已经升级咗**，注意：
+    cd /opt/edgeever
 
-- **fde-v1.65.0.1 服务器可以正常启动**：旧版代码唔识得 0047-0055 嗰啲新表/新字段，唔会报错、唔会删数据 —— 新嘢只係「多咗但用唔着」（0048 workspace_extensions / 0055 table_forms 系新表；0049-0051 系 companion_turns 加字段；0054 系 users 加字段；**无一条改动 0001-0046 旧表结构**）
-- **⚠️ 0047 会替换 AI prompts seed（UPDATE 数据）**：升级后 AI 行为会变（prompt 内容更新）。呢个系**单向数据替换**，回滚唔会还原 —— 但系旧版代码本来就有自己嘅 seed 逻辑，实际影响极细
-- **⚠️ 0053 系一次性 DDL 动 inbox 表**（collapse_duplicate_inbox_notebooks：去重 inbox 分类，用 `_inbox_dedup_canonical` 临时表）。呢个系**单向数据规范化**，回滚唔会还原，但无破坏性 —— 如果主人 inbox 分类本来无重复，呢条 DDL 对数据零影响
-- **⚠️ 如果之后又想再升级返 v1.90.0.1**：migration runner 睇 `_edgever_migrations` 表，0047-0055 已记录为已应用 → 唔会重跑 → 直接照常用，**无数据问题**
-- **唯一要避免嘅操作**：回滚期间**唔好删除/重建 data volume**（`./edgeever-data`）—— 咁样会连笔记数据一齐删埋
-- **⚠️ DATA 备份先至係真正嘅回滚保障（V2.5 起升级铁律）**：镜像回滚只救代码、唔救数据 —— schema 一旦被新版 migration 改过，出问题想完整还原旧数据，唯一方法係升级前备份嘅 `edgeever-data` tar 包（见日常升级流程 2.5 步）。**所以：每次启动新 IMAGES 之前，必须先备份好 Docker 映射出来嘅 edgeever-data 先可以**。v1.90.0.1 有 0047（改 seed）+ 0053（动 inbox）两个数据改动，**今次备份特别重要**
-- **结论**：回滚安全（数据全保），再升级亦安全（migration 状态持久），只要**永远唔删 data volume** + **升级前备份 data** 就得
+    # ① 停容器
+    docker compose stop edgeever
+
+    # ② 先把失败状态留档（唔好直接删，方便事后分析；保留至少 72 小时）
+    mv edgeever-data "edgeever-data-failed-$(date +%Y%m%d-%H%M%S)"
+
+    # ③ 还原备份（用第 2.5 步做嘅 tar 包）
+    tar -xzf edgeever-data-backup-<你的TS>.tar.gz
+    ls -la edgeever-data/        # 确认还原成功
+
+    # ④ 代码回滚
+    cd /opt/edgeever-src
+    git checkout fde-v1.90.0.1
+    git log --oneline -1         # 应为 292718d0
+    docker build --build-arg EDGE_EVER_BUILD_ID=292718d0 -t edgeever-fde:v1.90.0.1 .
+
+    # ⑤ 改 .env → 启动 → 验证
+    # .env 入面：EDGE_EVER_VERSION=v1.90.0.1
+    cd /opt/edgeever
+    docker compose up -d
+    sleep 20 && curl -s http://127.0.0.1:8787/api/health
+    # 预期：build=292718d0..., migration=0055, ok:true
+
+### Level 3 — 回滚锚点
+
+| 优先级 | 版本 | commit | 备注 |
+|---|---|---|---|
+| 首选 | `fde-v2.23.0.1` | 本版交付 | 部署成功后备份首可选 |
+| **回滚首选** | `fde-v1.90.0.1` | `292718d0` | **现行稳定版**，回滚目标 |
+| 次选 | `fde-v1.65.0.1` | `05c8062f` | 更早稳定点 |
+| 三选 | `fde-v1.50.0.3` | `33f53658` | 老稳定点 |
+
+### ⚠️⚠️ 回滚特殊注意（本版 37 个 migration，风险面比上次大 4 倍）
+
+本版首次启动会应用 **37 个新 migration（0056-0092）**。其中：
+
+**① 会改写既有数据的 5 个**（单向，回滚唔会还原）：
+- `0058_retire_emerald_note_palette` — 退役翡翠色板，**改 users.note_prose_palette 数据**
+- `0059_retire_custom_note_palette` — 退役自定义色板（同上）
+- `0070_workspace_seed_localization` — workspace 种子本地化（**只在「完全未用过」的安装才会生效**，有数据则跳过）
+- `0071_fix_welcome_memo_markdown` — 修 welcome memo markdown（**只动 hash 完全匹配的 untouched seed**，重跑即 no-op）
+- `0078_clear_default_notebook_colors` — 清默认 notebook 颜色（**只清 untouched 出厂色值**，自订外观保留）
+
+**② 会 DROP 表的 1 个**（最需注意）：
+- `0064_retire_video_transcription` — **DROP 5 张表**：`ai_transcription_workspace_settings` / `ai_transcription_models` / `ai_transcription_providers` / `ai_transcription_settings` / `video_transcript_jobs`
+- ⚠️ 这些属上游**未发布功能**（v2.x 期间引入又退役），**正常情况下冇数据**；且 `0065` 会重建 `ai_transcription_providers` / `ai_transcription_models` / `ai_transcription_workspace_settings` 三张（结构更新）
+- **如果你的实例从冇用过 video transcription → 影响为零**
+
+**③ 回滚可行性判断**：
+
+| 情况 | 回滚 fde-v1.90.0.1 会否崩 | 说明 |
+|---|---|---|
+| migration 已跑完（migration=0092） | 可以启动，但 schema 已变 | 旧代码唔识 0056-0092 新表/新字段 → 唔报错唔删数据（只会「多咗但用唔着」） |
+| ⚠️ 但 0064 DROP 咗 5 张表 | 旧代码若依赖这些表 → **会崩** | 正常实例冇用 video transcription，无影响；若你真用过 → **必须 Level 2 还原备份** |
+
+**⚠️ 铁律**：
+1. **必须先有备份才允许升级**（HARD-GATE，见 2.5 步）
+2. **migration 已执行 = 只能 Level 2**，不能只回代码
+3. 失败状态目录（`edgeever-data-failed-*`）**保留至少 72 小时**再清理
+4. 回滚完成后必须验证 `migration` 字段回到 `0055`，否则 schema 与代码不匹配
+5. **永远唔好删除/重建 `./edgeever-data`** —— 会连笔记数据一齐删埋
+6. 想再升级返 v2.23.0.1：migration runner 睇 `_edgeever_migrations` 表，0056-0092 已记录为已应用 → 唔会重跑 → 直接照常用，**无数据问题**
 
 ---
 

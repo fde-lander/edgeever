@@ -1,0 +1,1489 @@
+# SPEC — fde-v2.23.0.1 实施规格书
+
+**文档版本**：**V1.2**（2026-11-08 主人指示：A 点 `WITH ... UPDATE` 隐患本版必须 TDD 修复）
+**SPEC 编号**：EDGEEVER-FDE-V2.23.0.1
+**撰写日期**：2026-11-08（V1.0 嗅探组 / V1.1 实施组审查修订 / V1.2 实施组 TDD 追加）
+**撰写角色**：V1.0 = 嗅探组（只读侦查）；V1.1/V1.2 = **AI 实施组（FINAL DOUBT FIRST 实测复核 + TDD 规格）**
+**交办对象**：本 session 实施组（Phase 28-38）
+
+**V1.1 修订摘要（6 项实质修正，全部有实测证据）**：
+
+| # | 修正项 | V1.0 | V1.1 实测真值 | 证据 |
+|---|---|---|---|---|
+| 1 | `docker-release` 命令 | `bun run docker-release`（7 pass） | **不存在此 script**；用 `bun run test:docker-release` → **27 pass / 0 fail** | findings F28-A2 |
+| 2 | Commit 计划 | `git add -A` 一次提交 | **会令 Commit 2 变空 commit** → 改为 merge commit 只 add 3 冲突文件 | findings F28-A3 |
+| 3 | Q3 delete_notebook 判定 | 「待判定」 | **已实跑 = 🟢 安全，不加守卫**（3 场景全测） | findings F28-A1 |
+| 4 | `import-routes.ts` | 「未确认」 | **`requireScopes(read/write:memos)`，写入经我们的写守卫 → 安全** | findings F28-A6 |
+| 5 | C.2 全表扫描 | 漏记 5 张新表 | 已补齐（均非 memo-linked，Q4 判断仍正确） | findings F28-A7 |
+| 6 | wrapper `WITH...UPDATE` | 未记载 | **实测会被误判为 read query 并改写**（结果安全但属巧合）→ 记录 6.4 章，本版不改 | findings F28-A5 |
+
+---
+
+## 0. 阅读指引（实施组必读）
+
+本 SPEC 是**唯一实施依据**。配套文件：
+
+| 文件 | 内容 | 何时读 |
+|---|---|---|
+| **本 SPEC** | 实施规格、冲突解决策略、验证标准、回滚机制 | **全文必读** |
+| `docs/upgrade-plan-v2.23.0-sniffer-report.md` | 嗅探组原始侦查报告（七章） | SPEC 有疑点时的证据来源 |
+| `findings.md` 的 F27-A ~ F27-F | 侦查原始数据（版本证据 / 冲突实测 / 探针输出） | 需要实锤证据时 |
+| `progress.md` 的 2026-11-08 段 | 侦查过程记录 | 需要过程背景时 |
+| `DEPLOY_REMOTE_BUILD_V2.md` | 现行部署教程 V2.7 | 交付阶段参考，本 SPEC 第 7 章要求升 V2.8 |
+
+**⚠️ 铁律：本 SPEC 全部结论都有实锤（版本双证 / merge-tree 实测 EXIT=1 / 真 bun:sqlite 探针 LEAK+FIXED / 逐 case 审计 / 全表扫描）。实施组不得以「我觉得应该唔同」取代实测，若怀疑 SPEC 有错，**先跑探针实测再说**，实测推翻 SPEC 就停下报告主人。
+
+---
+
+## 1. 主人拍板决策（2026-11-08，已确认）
+
+| # | 问题 | 主人决定 |
+|---|---|---|
+| **Q1** | 基准版本 | ✅ **一下子到 fde-v2.23.0.1**（不分批，直接跳 v2.23.0） |
+| **Q2** | 新 route 是否走 WithHiding | ✅ **按嗅探组推荐**：只对 agent 可达的新 route 做；`requireUser` 端点天然安全（agent 403） |
+| **Q3** | `delete_notebook` 递归删除守卫 | ✅ **按实际情况判定**（实施组先 DOUBT FIRST 探针实测，泄露必加，不泄露不加） |
+| **Q4** | poster_render_jobs 修复范围 | ✅ **按嗅探组推荐**：只补 `poster_render_jobs`（1 行 + TDD）；其余 3 张只审计不补 |
+| **Q5** | 验证标准 | ✅ **延续成功案例**（三连绿 + 全库对照 baseline 零新增 fail + hiding 全套 + docker-release） |
+| **Q6** | DEPLOY 文档 | ✅ **必须先备份再升级，提供安全的回滚机制**（DEPLOY 升 V2.8 独立 commit） |
+| **Q7** | **chromium 剥离（主人 2026-11-08 新增质疑）** | ✅ **主人 2026-11-08 二次拍板 = 方案 A+D**：Dockerfile 保留 upstream 原样（chromium 只留 build stage）；另加 pre-flight guard 实现 fail-fast。详见第 3.2 章 + Step 5.5 |
+
+**主人额外指令**：
+- 嗅探组**不是实施组，不实施代码改动**
+- 嗅探组工作 = 写 SPEC + 建 placeholder phase 引出交接
+- SPEC 完成后项目可暂停，交下一个 AI 实施组
+
+---
+
+## 2. 基准与目标（冻结值）
+
+```
+本地基准分支   : fde-v1.90.0.1
+本地基准 commit: 292718d0  (docs: DEPLOY V2.7)
+merge-base     : c31dfe7a  (= tag v1.90.0)
+上游目标 tag   : v2.23.0
+上游目标 commit: 6600a632  (chore: release v2.23.0)
+新分支名       : fde-v2.23.0.1
+新 tag         : fde-v2.23.0.1
+目标 migration : 0092（本地 0055 + 上游 37 个新增）
+```
+
+**版本真实性双证（已核实）**：
+- `package.json` @ 6600a632 → `"version": "2.23.0"` ✅
+- `release-summary.json` @ 6600a632 → `"version": "2.23.0"` ✅
+- `git ls-remote --tags upstream` → `6600a632...refs/tags/v2.23.0` ✅
+
+---
+
+## 3. 规模与风险评估
+
+| 指标 | 数值 | 风险等级 |
+|---|---|---|
+| 上游新增 commit | **964** | 高（跨 33 个 minor） |
+| 上游改动文件 | **2402** | 高 |
+| 本地 FDE commit | 25 | 中 |
+| merge-tree 冲突 | **3 个文件** | 中（全部结构性，非语义） |
+| 新增 migration | **37 个**（0056-0092） | 高（5 个改历史数据） |
+| 新 MCP 工具 | **16 个**（45 → 61） | 中（15 个已覆盖） |
+| 新泄露缺口 | **1 个**（`poster_render_jobs`） | 中（1 行修复） |
+| Dockerfile 改动 | **+20 −2** | ⚠️ 中（见 3.2 章 chromium 专项分析，**生产镜像零 chromium**） |
+| bun.lock 改动 | +1451 −820 | 中（必须 `bun install`） |
+
+### 3.1 上游 commit 类型分布（参考）
+
+```
+fix     361 (37.5%)   feat 164 (17.0%)   docs 150 (15.6%)
+chore    84           test  69           style 34
+refactor 30           ci     6           perf  4
+```
+
+fix 占比 37.5% 偏高 → 上游 v2.x 处于快速迭代修 bug 期。**升级顺带获得 4 个安全修复**：
+- `dc5a55a1` fix(api): 修复备份附件恢复引起的 XSS (#701) (#711)
+- `6b5027e8` fix(security): harden renderer and desktop execution boundaries
+- `d17215b1` fix(deps): update bundled npm and vulnerable dependencies
+- `ea4867a1` fix: update vulnerable URI CSS and SVG dependency copies
+
+### 3.2 ⚠️ chromium 专项分析（主人 2026-11-08 特别质疑，已实测查清）
+
+**主人原话质疑**：「部署地方系服务器，不要浏览器感重MEM的东西，先查清楚到底系咪对 chromium 有依赖，如果真有有无办法剥离？」
+
+**结论先说**：✅ **生产镜像零 chromium，且 build 时根本不会启动浏览器。** 实测证据见下。
+
+#### 3.2.1 chromium 只存在于 build stage，runtime 完全隔离
+
+上游 v2.23.0 Dockerfile 四层结构（精确行号）：
+
+| Stage | 起始行 | chromium |
+|---|---|---|
+| `manifests` | L5 | ❌ 无 |
+| `dependencies` | L22 | ❌ 无 |
+| **`build`** | **L29** | ⚠️ **有（L31 `RUN apk add --no-cache chromium nodejs` + L32 ENV）** |
+| `runtime` | **L43 `FROM oven/bun:1.3.14-alpine`**（**全新基础镜像，非 build 衍生**） | ✅ **完全没有** |
+
+**实测**：`runtime stage` 段 grep `chromium` = **0 处**。最终部署镜像零 chromium、零 node。
+→ 主人担心的「服务器装浏览器」**只发生在 build 机器，绝不进生产镜像**。
+
+#### 3.2.2 chromium 唯一用途：生成 poster 模板缩图（且 fresh 时不触发）
+
+调用链：
+```
+bun run build:web
+  → vite build (apps/web/vite.config.ts)
+    → automaticPosterThumbnails().buildStart()
+      → runPosterThumbnailGeneration({root})
+        → ① thumbnailsCurrent() —— fresh 即 return {generated:0, skipped:true}（不碰浏览器）
+        → ② 只有 stale 才 execFile("node", [prepare-poster-thumbnails.mjs --json])
+           → ensurePosterThumbnails() → openRenderer()
+           → import("@playwright/test") + chromium.launch() 渲染 47 模板 × 2 语言
+```
+
+上游源码注释（`scripts/prepare-poster-thumbnails.mjs` L1，逐字引用）：
+> `// Used by Vite on startup/build and template saves. Fresh assets need no browser.`
+
+#### 3.2.3 决定性实测（三层，全部真态非推测）
+
+**探针 1** — `/tmp/probe-v223/chromium-necessity.ts`，干净上游 v2.23.0 树（`git archive` 提取，零改动）重跑 `sourceState()` + `thumbnailsCurrent()`：
+```
+source files scanned : 32
+computed sourceHash  : 7ff832affe98db572c94cca648f60f97ac92b4133c9f843c579758c328701809
+manifest sourceHash  : (matches)
+computed painterHash : 776e6d0d9b7d65e9f14b930d672baef4fec0bc9eb8c8df7e3284412604dabfff
+thumbnailsCurrent()  : true
+reason               : all-assets-valid
+assets validated     : 94
+>>> VERDICT: SKIP — build does NOT launch chromium.
+```
+
+**探针 2** — `/tmp/probe-v223/final-chromium-verdict.ts`，模拟 build 门禁 + 环境检查：
+```
+[Test 1] clean upstream v2.23.0 tree:
+  [gate] thumbnailsCurrent = true
+  result: {"generated":0,"skipped":true}
+  => chromium needed? NO — gate returns before playwright import
+
+[Test 2] stale tree (poster source touched):
+  [gate] thumbnailsCurrent = false
+  => chromium needed? YES — would launch browser
+
+[Test 3] this build host:
+  @playwright/test module: importable (JS lib present)
+  chromium binary: MISSING        ← 本机完全没有 chromium，fresh 路径照样通过
+```
+
+**探针 3（最强实锤）** — `/tmp/strip-test`，**完全没有 node、没有 chromium** 环境直跑：
+```
+$ node --version
+node: MISSING
+$ bun scripts/prepare-poster-thumbnails.mjs --check
+Poster thumbnails are current
+```
+→ **fresh 状态下，零 node + 零 chromium 也能通过**。
+
+#### 3.2.4 为何 fresh：94 张缩图已 commit 进 git
+
+| 事实 | 数据 |
+|---|---|
+| `apps/web/src/assets/poster-template-previews/` 文件数 | **95**（94 webp + 1 manifest.json） |
+| manifest 模板数 | 47 个 × 2 语言（zh/en）= 94 张 |
+| `.gitignore` 是否排除 | **没有排除** → 已提交 |
+| manifest `sourceHash` | `7ff832af...` 与干净树 computed hash **逐字节一致** |
+
+→ 任何 clean checkout（含 docker build 的 COPY）都是 fresh，**永不 stale**。
+
+#### 3.2.5 我们 merge 后会否 stale？不会
+
+**实测**：`git diff --name-only c31dfe7a..HEAD | grep -E 'poster|font'` = **空**。
+→ FDE patch 38 文件**完全不碰 poster 源文件** → merge 后 sourceHash 仍匹配 → **build 仍 SKIP**。
+
+#### 3.2.6 风险面：未来上游改 poster 源文件会 stale
+
+上游 v1.90→v2.23 期间 poster 相关源文件被改 **14 次**（字体重构 / 模板新增 / 画布修复）。若上游某版本改源但**忘同步缩图**，该 tag 会 stale → build 真的需要 chromium。
+**实测 v2.23.0 这个 tag 没忘记**（hash 完美匹配）。
+
+#### 3.2.7 剥离方案对比（4 选项）
+
+| 方案 | 做法 | build 成本 | 风险 | 维护负担 |
+|---|---|---|---|---|
+| **A. 保留 upstream 原样** | Dockerfile 不动 | 首次 +3-8 分钟 / ~200-250MB 下载；`apk add`(L31) 在 `COPY apps/api`(L33) 之前 → **Docker 层缓存可复用**，第 2 次起不再下载 | 零（官方路径，`docker-release` 4 条断言天然绿） | 零 |
+| **B. 剥离 chromium** | 删 Dockerfile L30-32；**保留** L38-39 COPY（vite 插件需 import 该脚本 + tests/browser generator）；同时改 `scripts/docker-release.test.mjs` 删 3 条断言（L84-86） | 省 ~200-250MB | ⚠️ 中：未来 poster 源文件一改就 build 失败（stale 且无浏览器） | 每次升级必须核实上游缩图已同步 |
+| **C. 剥离但留 node** | 只删 chromium | 省 ~180-200MB | 与 B 同风险但省得少（半吊子） | 同 B |
+| **D. 加 pre-flight guard** | build stage L41 前加独立一行 `RUN bun run check:poster:thumbnails` | 几乎零（~1 秒） | stale 立刻 fail-fast + 清晰错误 | 1 行 Dockerfile |
+
+**⚠️ 方案 B/C 若采用，D 是必需配套**（否则 stale 时 build 失败信息混乱）。
+
+#### 3.2.8 ✅ 采纳方案：**A + D**（主人 2026-11-08 二次拍板）
+
+**决定内容**：
+> **Dockerfile 保留 upstream v2.23.0 原样**（chromium / nodejs / ENV / 两条 COPY 全部不动），
+> **另加 pre-flight guard** 让 stale 情况 fail-fast + 给出可操作的中文修复指引。
+
+**为何这个组合最优**（针对主人质疑「不要浏览器感重 MEM」）：
+1. **生产镜像零 chromium**（runtime 全新 FROM，实测 grep=0）→ 主人担心的「服务器装浏览器」实质不存在
+2. **build 时根本不启动浏览器**（v2.23.0 缩图已同步，sourceHash 逐字节匹配，实测 SKIP）
+3. **guard 本身不需要浏览器**（只读 32 个源文件 hash + manifest.json，实测在零 node 零 chromium 环境 EXIT=0）
+4. **零官方断言破坏**（25/25 全过，实测证明）
+5. **未来 stale 会 fail-fast** 而不是静默花 5-10 分钟跑浏览器最后可能 OOM
+
+**⚠️ A+D 的固有 trade-off（必须知情，实测确认）**：
+
+| 情形 | 纯 A（无 guard） | **A+D（采纳）** |
+|---|---|---|
+| 缩图 fresh（v2.23.0 实际情况） | build 成功，不启动浏览器 | build 成功，不启动浏览器（guard 通过）✅ **无差别** |
+| 缩图 stale（未来上游忘同步） | build 自动启动 chromium 重新生成 → build 成功（慢 +几分钟） | guard EXIT=1 → **build FAIL** |
+
+**含义**：加了严格 fail-fast 后，`apk add chromium` 在 stale 情形永远用不上（build 在 guard 就死了）→ chromium 变「纯装饰」。
+**但这正是 A+D 的设计意图**：宁可 fail-fast 报清楚错，不要静默跑浏览器最后可能 OOM。
+
+**stale 时的两条出路（必须写进 guard 错误提示，让部署者不被卡死）**：
+1. **本地重新生成并 commit**（推荐，保持 build 零浏览器）：
+   ```
+   bun run prepare:poster:thumbnails
+   git add apps/web/src/assets/poster-template-previews
+   git commit -m "chore: regenerate poster thumbnails"
+   ```
+2. **一次性允许 build 内生成**（紧急情况）：
+   ```
+   docker build --build-arg EDGE_EVER_ALLOW_POSTER_RENDER=1 ...
+   ```
+   ⚠️ 若采用此出路需在 Dockerfile 加对应开关支持（属额外改动，默认不实现）
+
+**实施规格（写死，见 Step 5.5）**：
+```dockerfile
+# Plan D pre-flight guard: fail fast when poster thumbnails are stale.
+# Reads 32 source files + manifest.json only; no browser, no node needed.
+# Fix: bun run prepare:poster:thumbnails  →  git add ...  →  git commit
+RUN bun run check:poster:thumbnails
+```
+插入位置：`COPY tsconfig.json ./` **之后**、`RUN bun run build:web && bun run build:self-hosted` **之前**（独立一行）。
+
+**⚠️ 绝对禁止的写法（实测会破坏官方断言）**：
+```dockerfile
+# ❌ 禁止：把 guard 和 build 合并成一行
+RUN bun run check:poster:thumbnails && bun run build:web && bun run build:self-hosted
+```
+原因：`scripts/docker-release.test.mjs` L82 断言 `toContain("RUN bun run build:web && bun run build:self-hosted")` 是**精确字符串匹配**，合并后会立刻失败。
+→ **guard 必须独立成一行，build 那行保持字节级原样。**
+
+**SELF-CHECK 实测证据（`/tmp/probe-v223/selfcheck-plan-ad.ts`）**：
+```
+[BEFORE (upstream v2.23.0 Dockerfile)] simple assertions: 25 | pass 25 | fail 0
+[AFTER  (upstream + plan D guard inserted)] simple assertions: 25 | pass 25 | fail 0
+>>> Plan A+D is SAFE: upstream assertions all still pass, guard added cleanly.
+
+CHROMIUM / POSTER assertions（方案 A 保住全部 4 条）:
+  OK RUN apk add --no-cache chromium nodejs              after=true before=true
+  OK EDGE_EVER_POSTER_CHROME_EXECUTABLE=/usr/bin/chromium after=true before=true
+  OK COPY tests/browser/poster-thumbnail-generator...     after=true before=true
+  OK scripts/prepare-poster-thumbnails.mjs ... scripts/   after=true before=true
+  OK RUN bun run build:web && bun run build:self-hosted   after=true before=true
+  OK RUN bun run check:poster:thumbnails  (new guard)     after=true before=false
+
+ORDERING（guard 必须跑在 COPY 之后、build 之前）:
+  OK COPY apps/web apps/web                          @1486 < guard@2070
+  OK COPY packages packages                          @1509 < guard@2070
+  OK COPY scripts/self-hosted-config.mjs             @1594 < guard@2070
+  OK COPY tests/browser/poster-thumbnail-generator   @1780 < guard@2070
+  OK guard@2070 < build@2106
+```
+
+**guard 命令实测（两状态真跑）**：
+```
+fresh  : $ bun scripts/prepare-poster-thumbnails.mjs --check
+         Poster thumbnails are current
+         EXIT=0
+
+stale  : error: Poster thumbnails are stale; normal dev/build will regenerate them automatically.
+         EXIT=1
+```
+
+**给主人的一句话总结**：服务器上跑的镜像 **绝对没有浏览器**；build 机器上装 chromium 是为了「万一上游缩图过期」的防御，实测 v2.23.0 这个 tag 根本不会用到它。首次 build 慢 3-8 分钟，之后有层缓存。方案 A+D 额外加了一层 fail-fast 守护：以后万一上游忘同步缩图，build 会**立刻报清楚错**而不是静默跑浏览器。
+
+---
+
+## 4. FDE PATCH 资产冻结清单（升级后必须全部保留）
+
+### 4.1 核心三件（上游零触碰 ✅ 最幸运部分）
+
+| 文件 | 行数 | 作用 | 上游改动 |
+|---|---|---|---|
+| `apps/api/src/mcp-hiding.ts` | +874 | 确定性 SQL 词法解析器 + 9 条 INJECTION_RULES + fail-closed | **0 行** |
+| `apps/api/src/hiding-guards.ts` | +49 | 写入守卫（assertNotebookWritable / assertNotebooksWritable） | **0 行** |
+| `apps/api/src/hiding-routes.ts` | +153 | 管理端点 GET/PUT + `requireOwner` | **0 行** |
+
+### 4.2 需在冲突解决中手工重贴的注入点（**共 11 处，验收硬指标**）
+
+**`apps/api/src/index.ts` — 4 个 WithHiding 注入点 + 1 个 route 注册**
+
+| 位置 | 内容 | 说明 |
+|---|---|---|
+| L257 附近 | `registerAuthRoutes` 的 `authenticateRequest: (...args) => authenticateRequestWithHiding(...args)` | 原为 `authenticateRequest` |
+| L272 附近 | `registerUserRoutes` 同上 | |
+| L303 附近 | `/api/v1/*` 中间件 `const auth = await authenticateRequestWithHiding(c, true)` | 原为 `authenticateRequest` |
+| L376 附近 | `registerMcpRoutes` 的 `authenticateRequest` 同上 | |
+| L380 附近 | `registerHidingRoutes(app)` | 管理端点注册 |
+
+另需保留：L25-30 的 `import { createHidingDatabaseWithSymbol, loadHiddenNotebookIds } from "./mcp-hiding"` + `import { registerHidingRoutes } from "./hiding-routes"`
+
+**`apps/api/src/memo-service.ts` — 5 处写守卫**
+
+| 原行号 | 所在函数 | 守卫内容 |
+|---|---|---|
+| L737 | `moveMemosRecord` | `assertNotebookWritable(db, notebookId)` |
+| L809 | `mergeMemosRecord` | `if (input.notebookId) assertNotebookWritable(db, input.notebookId)` |
+| L961 | `createMemoRecord` | `assertNotebookWritable(db, input.notebookId)` |
+| L1094 | `importMemosRecord` | `assertNotebookWritable(db, input.notebookId)` |
+| L1236 | `updateMemoRecord` | `if (input.notebookId !== undefined) assertNotebookWritable(db, input.notebookId)` |
+
+另需保留：L29 的 `import { assertNotebookWritable, assertNotebooksWritable } from "./hiding-guards"`
+
+**`apps/api/src/notebook-service.ts` — 2 处写守卫**
+
+| 原行号 | 所在函数 | 守卫内容 |
+|---|---|---|
+| L161 | `createNotebookRecord` | `if (parentId) assertNotebookWritable(db, parentId)` |
+| L203 | `updateNotebookRecord` | `assertNotebookWritable(db, id)` |
+
+另需保留：L6 的 `import { assertNotebookWritable } from "./hiding-guards"`
+
+**验收方式（Q5 硬指标）**：升级后人工 `grep -n` 逐个核对，**必须 4 + 5 + 2 = 11 处全在**。少一处 = 不合格，不得交付。
+
+### 4.3 其余资产（auto-merge 或独立文件，无需干预）
+
+- `apps/web/src/components/settings/TokenHidingEditor.tsx`（+236）树状选择器
+- `apps/web/src/components/settings/McpConfigCard.tsx`（+13）入口
+- `migrations/0036_mcp_token_hidden.sql`（+14）
+- `packages/client/src/index.ts`（+15）
+- `packages/shared/src/i18n/en-US.ts` / `zh-CN.ts`（各 +12）
+- `compose.yaml` + `apps/site/public/compose.yaml`（bind mount 改动）
+- `docs/deploy-docker.md` / `.zh-CN.md`（各 +2/−2）
+
+### 4.4 测试资产 15 档（零撞名，原样保留 ✅）
+
+```
+tests/leak-matrix.test.ts               466 行  S1-S10 泄露矩阵（BUILD 硬 GATE）
+tests/mcp-hiding.test.ts                699 行  SQL 词法解析核心
+tests/mcp-hiding-real-sqlite.test.ts    374 行  真 bun:sqlite 执行
+tests/mcp-hiding-null-join.test.ts      298 行  BUG-002 NULL-safe 回归
+tests/mcp-hiding-table-forms.test.ts    195 行  table_forms 隔离
+tests/auth-hiding.test.ts               226 行
+tests/hiding-routes.test.ts             154 行
+tests/hiding-guards.test.ts              88 行
+tests/migration-0036.test.ts            200 行
+tests/spike-v1.50.0.test.ts             496 行
+tests/tag-rename-verify.test.ts         270 行
+tests/doubt-first-check.ts              146 行
+tests/repro-create-notebook-diag.ts      81 行
+tests/repro-create-notebook.ts          184 行
+tests/repro-search-bug.ts                94 行
+```
+
+上游 `tests/` 目录**无任何** hiding/leak/spike/doubt 同名档 → 撞名风险为零（已实测）。
+
+---
+
+（下一章续：冲突解决策略）
+
+## 5. 冲突解决策略（3 个真冲突）
+
+**merge-tree 实测结果（EXIT=1）**：3 个文件 CONFLICT，其余 9 个共用文件全部 auto-merge。
+
+### 5.1 冲突 1：`apps/api/src/index.ts`
+
+**本地改动（4 注入点 + 1 注册）**
+- import 段新增 `mcp-hiding`（2 个符号）+ `hiding-routes`（1 个符号）
+- 4 处 `authenticateRequest` → `authenticateRequestWithHiding`
+- 新增 `registerHidingRoutes(app)` 调用
+
+**上游改动（18 个 hunk，+79 −11）**
+- import 段新增 4 个 route 注册函数：`registerPosterRenderRoutes` / `registerNotebookShareRoutes` / `registerPublicNotebookShareRoutes` / `registerImportRoutes`
+- 新增 route 注册调用（L340-372 区域）：`registerImportRoutes(app)` / `registerPosterRenderRoutes(app)` / `registerNotebookShareRoutes(app)` / `registerTableFormRoutes(app)` / `registerPluginDistributionRoutes` / `registerScheduledTaskRoutes` / `registerWorkspaceExtensionRoutes` 等
+- `registerPublicNotebookShareRoutes(app)` 位置在 L266（早于认证中间件，公开段）
+- 多处 hunk 在 import 区与 `fetchEdgeEverApp` 区
+
+**解决原则（ORDER OF OPERATIONS，防漏步）**
+```
+1. 先 accept upstream 版本（保全部新 route 注册）
+2. 再逐个重贴本地 5 项：
+   a. import mcp-hiding（createHidingDatabaseWithSymbol, loadHiddenNotebookIds）
+   b. import hiding-routes（registerHidingRoutes）
+   c. 4 处 authenticateRequest → authenticateRequestWithHiding
+   d. 尾部 registerHidingRoutes(app)
+3. 立即 bun run typecheck 验证（此文件是最大风险点）
+```
+
+**⚠️ 特别注意 — Q2 审计点（本文件是主战场）**
+上游新增的每个 `registerXxxRoutes` 都要判定 agent 可达性：
+- `registerPublicNotebookShareRoutes(app)` — 公开段，早于 `/api/v1/*` 中间件 → 无认证，非 agent 路径 ✅
+- `registerNotebookShareRoutes(app)` — 内部 `requireUser` → agent 403 ✅
+- `registerPosterRenderRoutes(app)` — 内部 `requireUser` → agent 403 ✅
+- `registerImportRoutes(app)` — **需实施组确认**（见 6.3）
+- `registerTableFormRoutes(app)` — 已知走 wrapper + table_forms rule ✅
+- 其余（plugin-distribution / scheduled-task / workspace-extension）— 非 memo 内容读取或已有豁免判定 ✅
+
+**判定方法**：进文件 grep `requireUser` / `authenticateRequest` / `getMemoDetail` / 直接 SQL，见第 6 章。
+
+### 5.2 冲突 2：`apps/api/src/memo-service.ts`
+
+**本地改动（5 处写守卫）** — 见 4.2 表
+
+**上游改动（+66 −23，多个 hunk）**
+- `searchMemoSummaries` 大改（MCP 搜索结果加 bounded body snippets）
+- `listMemosForMcp` 微调
+- `moveMemosRecord` 微调（**与本地守卫同函数，行级重叠**）
+- import 段变化（+2 −3）
+- `MemoMutationCommit` 类型变化
+
+**解决原则（ORDER OF OPERATIONS）**
+```
+1. 先 accept upstream 版本
+2. 再逐函数重贴 5 个守卫（按第 4.2 表的「所在函数」定位，不靠行号）
+3. 特别小心 moveMemosRecord：上游改了函数体，守卫要插在函数开头、
+   在 db 操作之前（原位置 = 函数体第一行后）
+4. bun run typecheck 验证
+```
+
+**⚠️ 侦察型提示**：上游 `searchMemoSummaries` 大改加了 body snippet —— 这段 SQL 如果直接 `SELECT ... FROM memo_search_documents` 或 `FROM memos_fts`，这两张表**已有 rule** ✅。但若新增 JOIN，实施组需确认 wrapper 是否仍能正确注入。**实测方法**：跑 `tests/mcp-hiding.test.ts` + `tests/leak-matrix.test.ts` S8（D3 regression）。
+
+### 5.3 冲突 3：`apps/api/src/notebook-service.ts`
+
+**本地改动（2 处写守卫）** — 见 4.2 表
+
+**上游改动（+104 −24，13 个 hunk）**
+- `NotebookRow` 类型加字段（外观相关：color_target / is_bold / text_color / icon_inverted / row_inverted）
+- `mapNotebook` 映射新字段
+- `notebookSelectSql` 加字段
+- `createNotebookRecord`（+1 hunk）
+- `updateNotebookRecord`（4 个 hunk，含 210-231 的删除/移动）
+- `listActiveNotebookTree` 大改（+263-286 区域，chunked IN）
+- `deleteNotebookRecord`（**大改 +316-343**，新增 `deleteNotebookTree` 递归 CTE）
+
+**解决原则（ORDER OF OPERATIONS）**
+```
+1. 先 accept upstream 版本
+2. 重贴 2 个守卫（createNotebookRecord L161 / updateNotebookRecord L203 对应位置）
+3. 不动 deleteNotebookTree（上游新逻辑）
+4. bun run typecheck 验证
+```
+
+**⚠️ Q3 审计点：`deleteNotebookTree` 递归删除**
+上游新增 MCP 工具 `delete_notebook` → 调 `deleteNotebookTree(db, workspaceId, notebookId, actor, {dryRun, guardConcurrentChanges})`。
+
+**风险假设**：agent 对可见 notebook 调用 delete → 递归删除整棵子树 → 若子树里有隐藏 notebook（agent 视角看不到但物理存在），会不会把隐藏的也删掉？**这是数据破坏级风险，不是泄露级。**
+
+**必须做 DOUBT FIRST 探针（见 6.2），不能靠推测。**
+
+---
+
+## 6. 新泄露面处理（3 项任务）
+
+### 6.1 【必做】补 `poster_render_jobs` rule（Q4 主人已批）
+
+**缺口实锤（嗅探组探针实测，真 bun:sqlite）**
+
+缺口来源：上游 migration `0066_poster_render_jobs.sql`：
+```sql
+CREATE TABLE poster_render_jobs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  memo_id TEXT NOT NULL REFERENCES memos(id) ON DELETE CASCADE,
+  expected_revision INTEGER NOT NULL,
+  ...
+);
+```
+
+代码路径（`apps/api/src/poster-render-service.ts` L19-20）：
+```ts
+export const readPosterRenderJob = (db: DatabaseAdapter, workspace: string, id: string) =>
+  db.prepare('SELECT * FROM poster_render_jobs WHERE workspace_id = ? AND id = ?')
+    .bind(workspace, id).first<PosterRenderJobRow>();
+```
+**无 JOIN memos** → wrapper 无法靠 memos rule 兜底 → 必须显式加 rule。
+
+**⚠️ V1.1 修正（审查组 2026-11-08 实测）**：该文件**共 7 处 SQL**，不止 L19-20 一处：
+| 行 | 语句 | 类型 | wrapper 是否改写 | 处理 |
+|---|---|---|---|---|
+| L19-20 (L20) | `SELECT * FROM poster_render_jobs WHERE ...` | SELECT | ✅ 会注入 | **rule 覆盖 → Q4 补 1 行即可** |
+| L32 | `UPDATE poster_render_jobs SET status='failed' ...` | UPDATE | ❌ 不改写 | 正常，写路径不泄露（只改自己的 job 状态） |
+| L33 | `DELETE FROM poster_render_jobs WHERE status IN ('completed','failed') ...` | DELETE | ❌ 不改写 | 正常（清理过期 job） |
+| L38 | `SELECT * FROM poster_render_jobs WHERE ... memo_id = ?` | SELECT | ✅ 会注入 | rule 覆盖 |
+| L40 | `SELECT COUNT(*) AS n FROM poster_render_jobs WHERE ...` | SELECT | ✅ 会注入 | rule 覆盖（计数会因隐藏而变小，语义正确） |
+| L43-44 | `INSERT OR IGNORE INTO poster_render_jobs ... SELECT ...` | INSERT..SELECT | ❌ 不改写 | 正常（agent 只能为自己可见 memo 建 job） |
+| L45 | `SELECT * FROM poster_render_jobs WHERE ... memo_id = ?` | SELECT | ✅ 会注入 | rule 覆盖 |
+
+**结论确认**：**Q4「只补 1 行 rule」判断正确** —— 3 处 SELECT 读取点全部被 rule 覆盖，UPDATE/DELETE/INSERT 本就不是泄露路径（它们只会操作 agent 自己 workspace 的 job）。**但 SPEC 原写「L19-20 一处」不准确，实施组不要因此以为只有一处要验证。**
+
+**探针实测输出（/tmp/probe-v223/probe-new-tables.ts）**
+```
+[poster_render_jobs direct SELECT (readPosterRenderJob)]
+  raw sql : SELECT * FROM poster_render_jobs WHERE workspace_id = 'ws1'
+  applied : SELECT * FROM poster_render_jobs WHERE workspace_id = 'ws1'   ← 无注入！
+  rows    : 1 -> [{"id":"job_hid","workspace_id":"ws1","memo_id":"m_hid","status":"pending"}]
+  LEAK?   : >>> YES — LEAKS HIDDEN DATA <<<
+
+--- AFTER adding poster_render_jobs: MEMO_ID_SUBQUERY ---
+  applied : ... WHERE (memo_id IS NULL OR memo_id NOT IN (SELECT id FROM memos WHERE notebook_id IN ('nb_hid'))) AND ...
+  rows    : 0 -> []
+  leak    : FIXED — hidden poster job hidden
+```
+
+**修复规格（严格照做，不要发明新方案）**
+
+① TDD RED 先红（新建 `tests/mcp-hiding-poster-jobs.test.ts`）
+
+测试档规格（真 bun:sqlite，不用 mock，pattern 照抄 `tests/mcp-hiding-table-forms.test.ts`）：
+```
+T1: Setup — 建隐藏 notebook + 其 memo + poster_render_jobs 记录
+T2: 未加 rule 时直接 SELECT poster_render_jobs → 会见到隐藏 job（RED 证据）
+T3: 加 rule 后直接 SELECT poster_render_jobs → 0 行（GREEN 断言）
+T4: 无 rule 边界 — memo_id 为 NULL 的 job（孤儿）不被误杀
+T5: 经 MCP 工具链 get_poster_render_job 路径 → 隐藏 memo 的 job 404
+```
+
+⚠️ RUN 顺序：先只写 T2+T3（确保 RED 可重现），确认红 → 加 rule → 确认绿 → 再补 T1/T4/T5。
+
+② 加 1 行（`apps/api/src/mcp-hiding.ts` INJECTION_RULES 数组末尾）
+```ts
+{ table: "poster_render_jobs", getInjection: MEMO_ID_SUBQUERY },
+```
+位置：紧接现有 `table_forms` 条目之后（保持「按 migration 编号递增」的既有惯例）。
+
+③ 扩展 `tests/leak-matrix.test.ts` 加 S11
+```
+S11: agent cannot see poster_render_jobs for hidden memos (direct SELECT)
+S11: get_poster_render_job path hides secret poster job (404 semantics)
+```
+
+④ 门禁：`tests/mcp-hiding*.test.ts` + `tests/leak-matrix.test.ts` 全绿
+
+**⚠️ 不做的事（Q4 主人已明确）**：
+- ❌ 不要补 `notebook_shares`
+- ❌ 不要补 `notebook_share_excluded_memos`
+- ❌ 不要补 `video_transcript_jobs`
+- 理由：嗅探组已逐张审计判定这 3 张全部走 `requireUser` 管理端点，agent 天然 403（见 6.3）
+- 但要在 findings.md 写一句「已审计无需补」存档
+
+### 6.2 【判定型】`delete_notebook` 递归删除守卫（Q3 主人授权按实际情况）
+
+**背景**：上游 v2.x 新增 MCP 工具 `delete_notebook`（commit `53869bd3` feat(mcp): safely delete empty notebook trees (#509)），调 `deleteNotebookTree`。
+
+**上游 MCP 工具实现**（`mcp-tool-service.ts` case "delete_notebook"）：
+```ts
+case "delete_notebook": {
+  assertScope(auth, "write:notebooks");
+  // 只允许 notebookId + dryRun 两个参数
+  return deleteNotebookTree(c.env.storage.db, auth.workspaceId,
+    getRequiredString(args.notebookId, "notebookId"), getAuditActor(c),
+    { dryRun: args.dryRun === true, guardConcurrentChanges: true });
+}
+```
+
+**DOUBT FIRST 探针规格（实施组必做，结果决定要不要加守卫）**
+
+探针目标：判断 agent 调用 `delete_notebook(visible_parent_id)` 会不会连带删除物理存在的隐藏子 notebook。
+
+探针脚本（放 `/tmp/probe-v223/delete-notebook-tree.ts`，真 bun:sqlite）：
+```
+T1: Setup 结构
+    nb_visible (不隐藏)
+      └── nb_hidden_child (正好是 token 的隐藏 id)
+      两者各有 1 个 memo
+T2: agent（带 hiding set = [nb_hidden_child]）调 deleteNotebookTree(nb_visible, dryRun=true)
+    → 观察 affected 计数 + 实际删掉哪些
+T3: 同 T2 但 dryRun=false，事务内执行后回滚（用 BEGIN/ROLLBACK 保护）
+    → 观察 nb_hidden_child 是否被删
+T4: 对照组 — 隐藏的是父、可见的是子（反向结构）
+T5: 单层无隐藏 — 正常删除全程不受影响（避免修复后误杀）
+```
+
+**判定表（⚠️ 审查组 2026-11-08 已实跑，结论已定 = 🟢 安全；实施组仍需自己复跑一次留证）**
+
+| T2/T3 结果 | 判定 | 行动 |
+|---|---|---|
+| 隐藏子被删除（连同 memo） | 🔴 **数据破坏漏洞** | **必须加写守卫**：在 `deleteNotebookTree` 入口（或 MCP case 内）加 `assertNotebooksWritable(db, subtreeNotebookIds)`；同时在 MCP case 加 `assertNotebookWritable(db, args.notebookId)` |
+| 隐藏子未被删除（被过滤或整体 403） | 🟢 安全 | 不加守卫，但**必须在 findings 记「已判定安全 + 探针证据」** |
+| 上游 dryRun 报错 / 拒绝隐藏父 | 🟢 安全 | 同上 |
+| 探针跑不起来（环境问题） | ⚠️ 无结论 | **停下报告主人**，不要拍脑袋判定 |
+
+**✅ 审查组已实跑结论（2026-11-08，V1.1 新增，证据见 findings.md F28-A1）**：
+
+| 场景 | 实跑结果 | 判定 |
+|---|---|---|
+| 可见父 + 隐藏子，**各有笔记** | agent tree=1（隐藏子被 wrapper 过滤）→ 非空检查 409 拒绝 | 🟢 安全 |
+| 可见父 + 隐藏子，**两者全空** | agent tree=1 → changes=1，**隐藏子未被删**（session 视角才会 changes=2 删两个） | 🟢 安全 |
+| 可见父(空) + 隐藏中间层(空) + 隐藏孙(**有笔记**) | agent tree 含孙（wrapper 只过滤中间层，D4 行为）→ 非空检查见孙笔记 → 409 拒绝 | 🟢 安全 |
+
+**机制实锤**：`listActiveNotebookTree` 被 wrapper 改写为 `WHERE ... AND notebooks.id NOT IN ('<hidden>')` → 隐藏子树从 agent 视角消失 → `notebookIds.length` 变小 → guarded UPDATE 的 `(SELECT COUNT(*) FROM active_tree) = ?` 计数比较失败 → `changes=0` → 上游抛 `notebook_changed` 409。
+→ **隐藏数据永不落入 UPDATE 的 `id IN (SELECT id FROM active_tree)` 集合，故不可能被删。**
+
+**→ 结论：Q3 = 不加写守卫**（2026-11-08 判定）。实施组在 Step 4 只需复跑探针确认并记录 findings，**不需要新增 `tests/hiding-delete-notebook.test.ts` 或 S12**。
+
+**⚠️ 附带发现（非本版必修，仅记录）**：`listActiveNotebookTree` 的 recursive CTE 只对 `notebooks` 表注入过滤，隐藏**中间层**的**孙层**会漏出到 agent 视角（探针 probe7 实测 agent 见到 `nb_hid_leaf`）。这是既有 D4 行为，SPEC B.1 要求核心三件上游零改动 → **本版不改**，记入 findings F28-A1 / F28-A5 待下版评估。
+
+**若需加守卫时的 TDD 要求**：新测试档 `tests/hiding-delete-notebook.test.ts`，TDD RED→GREEN，并在 `tests/leak-matrix.test.ts` 加 S12。
+
+### 6.3 【审计型】上游全部新 route 的 agent 可达性（Q2 主人已批）
+
+**判定准则（照此执行，不要自由发挥）**
+
+```ts
+// apps/api/src/request-auth.ts L41-46（上游与本地完全相同，已核对）
+export const requireUser = (c: AppContext) => {
+  const auth = c.get("auth");
+  return auth?.kind === "user"
+    ? null
+    : forbidden(c, "Only an interactive user session can manage this resource.");
+};
+```
+→ `requireUser` 要求 `kind === "user"`；**agent token 是 `kind = "token"` → 403**。所以：
+- **走 `requireUser` 的端点 = 天然隔离，无需 WithHiding**
+- **走 `/api/v1/*` 认证中间件且不 requireUser 的端点 = agent 可达 = 必须核对 wrapper 覆盖**
+
+**逐 route 审计清单（实施组必须每个都打开文件确认，不许跳）**
+
+| 新 route 文件 | 认证方式（已初步确认） | 含 memo 内容读取 | 结论 | 实施组动作 |
+|---|---|---|---|---|
+| `poster-render-routes.ts` | `requireUser`（L17 实锤） | 是（经 getMemoDetail = memos 有 rule） | ✅ 安全 | 打开确认即可 |
+| `notebook-share-routes.ts` | `requireUser`（L71/94/127/164/180 实锤）+ 公开段 | 是（memos/notebooks 有 rule；`notebook_share_excluded_memos` 仅在 user 路径） | ✅ 安全 | 打开确认；确认 `registerPublicNotebookShareRoutes` 早于认证中间件（L266 vs L289） |
+| `import-routes.ts` | ✅ **已实锤（V1.1）**：`requireScopes(read:memos)` L37 / `requireScopes(write:memos)` L43。**无 requireUser** → agent token 有 scope 即可进入 | 是（导入 memo 内容） | **✅ 安全**（写入全程经 `importMemosRecord` → **我们的第 5 个写守卫在 L1094 覆盖**） | 打开确认 + 跑写守卫测试 |
+| `auth-totp-routes.ts` | 登录流程，无 agent token 路径 | 否 | ✅ 安全 | 打开确认 |
+| `table-form-routes.ts` | 已知（公开 route 早于认证中间件） | 是（table_forms） | ✅ 已有 rule | 跑 S10 回归即可 |
+| `plugin-distribution-routes` / `scheduled-task-routes` / `workspace-extension-routes` | 上游既有，非新增 | 否（配置表） | ✅ 安全 | 略读确认 |
+
+**审计输出要求**：实施组必须在 `findings.md` 写一节 `F28-Q2 审计结果`，逐 route 一行结论 + 证据（文件行号 + grep 输出）。**不许只写「已审计通过」一句话。**
+
+---
+
+（下一章续：实施步骤 / 门禁 / 部署与回滚 / 附录）
+
+
+### 6.4 【已实测·记录型】wrapper 对 `WITH ... UPDATE` 语句的行为（V1.1 新增）
+
+**发现来源**：审查组 2026-11-08 实跑探针（`/tmp/probe-q3/probe4.ts`）时发现，`isReadQuery()` 只看**首个 token**：
+
+```ts
+function isReadQuery(tokens: Token[]): boolean {
+  for (const tok of tokens) {
+    if (tok.type === "whitespace") continue;
+    return tok.upper === "SELECT" || tok.upper === "WITH";   // ← WITH 一律当 read query
+  }
+  return false;
+}
+```
+
+→ 上游 `deleteNotebookTree` 的 guarded UPDATE 以 `WITH RECURSIVE` 开头，**会被当作 read query 送进 `rewriteSelectSql`**，实际改写结果（实测原文）：
+
+```sql
+WITH RECURSIVE tree(id) AS (
+        SELECT id FROM notebooks WHERE workspace_id = ? AND id = ? AND notebooks.id NOT IN ('nb_hidden_child')
+        UNION
+        SELECT n.id FROM notebooks n JOIN tree t ON n.parent_id = t.id WHERE n.workspace_id = ? AND n.id NOT IN ('nb_hidden_child')
+      ), active_tree AS MATERIALIZED (...)
+      UPDATE notebooks SET is_deleted = 1, ... WHERE ... 
+        AND (SELECT COUNT(*) FROM active_tree) = ?     ← 计数用被过滤的 tree
+        AND NOT EXISTS (... memos ... AND (memos.notebook_id IS NULL OR memos.notebook_id NOT IN ('nb_hidden_child')))
+```
+
+**实跑结果 = 🟢 安全**（见 6.2 章）：改写只作用于 CTE 内的 notebooks 引用，反而**让隐藏子树从前置查询阶段就消失**，导致计数不匹配 → `changes=0` → 409。**没有数据破坏。**
+
+**但这是「依赖巧合」而非「设计保证」**。风险点：
+- 如果未来上游把计数条件改成 `>=` 或移除 `(SELECT COUNT(*) FROM active_tree) = ?` 这个守卫 → 改写后的 CTE 可能仍然匹配到可见父 → `changes≥1` → 删除成功，但 `active_tree` 里不含隐藏子 → 隐藏子仍安全。**逻辑上依然安全**（因为 `id IN (SELECT id FROM active_tree)` 集合本身就被过滤了）。
+- 真正的理论风险：若某写语句的 `UPDATE <table> SET ...` 目标表本身是 content table 且 WHERE 未带 id 集合 → 改写会插入到错误位置。目前上游无此类语句（已 grep 全部 `WITH RECURSIVE` 6 处，逐一确认：4 处纯 SELECT、1 处 `WITH...UPDATE`（本处）、1 处公共 site SQL 纯 SELECT）。
+
+**决策（本版 = 主人 2026-11-08 二次指示：必须 TDD 修复）**：**本版修 `isReadQuery()`**，用严格 TDD（RED 先红 → GREEN → REFACTOR）。
+
+**为何主人要求本版修**：虽然实测当前安全，但这是「依赖巧合」而非「设计保证」。上游未来任何一次改动（改计数条件、新增 `WITH ... UPDATE` 写入）都可能让隐患变成真漏洞。用 TDD 修掉，把这个不确定性彻底消除。
+
+**TDD 规格（严格照做，不许先写代码）**
+
+**RED-1**（新测试档 `tests/mcp-hiding-with-update.test.ts`）
+```
+T1: `WITH RECURSIVE ... SELECT ...` → 判定为 READ，必须注入 hiding 过滤（现有行为不能破）
+T2: `WITH RECURSIVE ... UPDATE notebooks SET ...` → 判定为 WRITE，必须 passthrough（不改写、不注入）
+T3: `WITH ... INSERT INTO ...` → 判定为 WRITE，passthrough
+T4: `WITH ... DELETE FROM ...` → 判定为 WRITE，passthrough
+T5: `WITH RECURSIVE t AS (SELECT ...) SELECT * FROM memos` → READ，注入（真实 CTE + 外层 SELECT）
+T6: `WITH ... UPDATE` 改写后 SQL 与原文**逐字节一致**（passthrough 铁证）
+T7: 普通 `SELECT` / `UPDATE` / `INSERT` / `DELETE` 首 token 判定不变（回归）
+```
+预期 RED：T2/T3/T4/T6 全部失败（现状把 `WITH...UPDATE` 当 READ 去改写）。
+
+**GREEN**（改 `isReadQuery()`，唯一改动点，`apps/api/src/mcp-hiding.ts` L343-352）
+```ts
+/**
+ * Determine if SQL is a read query.
+ * V1.1 (MASTER 2026-11-08): a `WITH` prefix is NOT sufficient — a CTE can
+ * introduce a write statement (`WITH ... UPDATE/INSERT/DELETE`). Scan token
+ * stream for the FIRST top-level statement keyword (ignoring CTE bodies) and
+ * treat read = SELECT only.
+ */
+function isReadQuery(tokens: Token[]): boolean {
+  let depth = 0;
+  for (const tok of tokens) {
+    if (tok.type === "whitespace") continue;
+    if (tok.type === "punct") {
+      if (tok.text === "(") depth++;
+      else if (tok.text === ")") depth--;
+      continue;
+    }
+    if (tok.type !== "keyword") continue;
+    // First statement keyword at depth 0 decides.
+    if (depth === 0) {
+      if (tok.upper === "SELECT") return true;
+      if (tok.upper === "WITH") continue;   // keep scanning past the CTE prefix
+      if (tok.upper === "INSERT" || tok.upper === "UPDATE" || tok.upper === "DELETE") return false;
+      if (tok.upper === "VALUES" || tok.upper === "RETURNING") continue;
+    }
+  }
+  return false;   // fail-safe: unknown → treat as write (passthrough)
+}
+```
+**关键设计说明（不得擅自改）**：
+1. `depth === 0` 才判 statement keyword —— CTE body 内（深度 > 0）的 SELECT 不能当外层语句
+2. `WITH` 时 `continue` 而非 `return true` —— 继续扫到 CTE 之后的真实语句关键字
+3. `return false` 兜底 —— 无法判定时按 write 处理（passthrough，**不注入**）→ 比误注入更安全
+4. **不得改动 `rewriteSelectSql` / `findTableRefs` / tokenizer** —— A 点范围只限 `isReadQuery`
+
+**REFACTOR**：GREEN 后视情况抽 `FIRST_STATEMENT_KEYWORDS` 常量；**不得改变行为**。
+
+**门禁（TDD 完成后必须全过）**
+```bash
+bun test tests/mcp-hiding-with-update.test.ts    # 新增档全绿
+bun test tests/mcp-hiding.test.ts                # 原有 699 行档必须全绿（不破现有行为）
+bun test tests/mcp-hiding-real-sqlite.test.ts    # 真 SQLite 全绿
+bun test tests/leak-matrix.test.ts               # 泄露矩阵全绿
+bun run typecheck                                # EXIT=0
+```
+
+**回滚**：`git checkout -- apps/api/src/mcp-hiding.ts tests/mcp-hiding-with-update.test.ts`（改动仅 1 函数 + 1 新测试档）
+
+---
+
+## 7. 实施步骤（严格顺序，不许跳步）
+
+### Step 0 — 开工前置（**未完成 Step 0 不得开始 Step 1**）
+
+**0.1 PWF 开工**
+```bash
+plan.py start-phase edgeever        # 激活 Phase 28
+```
+
+**0.2 读 SPEC 全文** — 本文件七章 + 附录，不许跳读。
+
+**0.3 环境确认**
+```bash
+cd /home/hermes/workspace/edgeever
+export PATH=$HOME/.bun/bin:$PATH
+bun --version          # 预期 1.4.x
+git branch --show-current   # 预期 fde-v1.90.0.1
+git log --oneline -1        # 预期 292718d0
+git status --short          # 预期：task_plan.md.bak-*.bak + docs/specs/ + docs/upgrade-plan-v2.23.0-sniffer-report.md（V1.1 修正：实测有这 2 个额外未跟踪项）
+```
+
+**0.4 记录 baseline 测试数据（⚠️ 必须做，否则无法判断「零新增 fail」）**
+```bash
+timeout 500 bun test 2>&1 | tail -30 > /tmp/baseline-before-v2.23.0.txt
+cat /tmp/baseline-before-v2.23.0.txt
+```
+> v1.90.0.1 的已知 baseline：全库 **2418 pass / 11 fail**（11 个 fail 全部与 deployment-entrypoints / wrangler-runner / memo-routes 相关的环境差异，上游 pre-existing，非我们引入）
+> **实施组必须自己跑出真实的 baseline 数字并记录，不得直接抄这段**（因为环境可能变化）
+
+**0.5 拉上游 tag**
+```bash
+git fetch upstream refs/tags/v2.23.0   # FETCH_HEAD 方式，零 local ref
+git rev-parse FETCH_HEAD               # 必须 = 6600a632990494f499e482c3b6408ee2d39928ee
+```
+> ⚠️ 若 FETCH_HEAD ≠ 6600a632 → **停下报告主人**（上游 tag 被改写或拉错版本）
+
+**0.6 侦查产物归档决策（V1.1 新增，待主人拍板）**
+
+未跟踪的侦查产物有 2 项：
+```
+docs/specs/                                   ← SPEC 本体 + 本 SPEC 的 .bak
+docs/upgrade-plan-v2.23.0-sniffer-report.md   ← 嗅探组七章侦查报告
+```
+**建议**：**纳入版本库**（属项目资产，可追溯升级依据），归入 Commit 3（docs commit），与 DEPLOY V2.8 一起提交。
+**代价**：仓库多约 90KB 文档。
+**替代方案**：加进 `.gitignore` 排除（仓库干净但丢失可追溯性）。
+→ **实施组按主人指示执行，默认按「纳入版本库」处理。**
+
+---
+
+### Step 1 — 开分支 + merge（**核心冲突处理**）
+
+```bash
+git checkout -b fde-v2.23.0.1
+git merge FETCH_HEAD
+```
+**预期结果**：3 个 CONFLICT（`index.ts` / `memo-service.ts` / `notebook-service.ts`），其余 auto-merge。
+
+> ⚠️ 若冲突数 > 3 → 停下报告，说明上游 tag 已变化或本地有未提交改动。
+> ⚠️ 若冲突数 = 0 → 停下报告（不可能，merge-tree 已实测 3 个）。
+
+**解冲突顺序（按风险从高到低）**：
+```
+1. apps/api/src/index.ts         （最大风险，18 hunk + 我们 5 项改动）
+2. apps/api/src/memo-service.ts  （5 守卫 + 上游 searchMemoSummaries 大改）
+3. apps/api/src/notebook-service.ts （2 守卫 + 上游 deleteNotebookTree 大改）
+```
+每解完一个立即：
+```bash
+bun run typecheck   # 局部验证，不许三个都解完才检查
+```
+
+**解完后立即执行验收（不可跳过）**：
+```bash
+# 11 处必须全在（4 + 5 + 2）
+grep -c 'authenticateRequestWithHiding' apps/api/src/index.ts      # 预期 ≥ 4（含定义/注释共 6 行，但注入点必须 4 个）
+grep -n 'registerHidingRoutes(app)' apps/api/src/index.ts          # 预期 1 处
+grep -n 'assertNotebookWritable\|assertNotebooksWritable' apps/api/src/memo-service.ts   # 预期 5 处调用 + 1 import
+grep -n 'assertNotebookWritable' apps/api/src/notebook-service.ts  # 预期 2 处调用 + 1 import
+```
+> **数字不符 → 停手，逐个补齐再继续。少一处 = 隔离功能破洞。**
+
+---
+
+### Step 2 — 依赖安装
+
+```bash
+bun install
+```
+**预期**：新增 83+ 包（lockfile +1451 −820）。
+> ⚠️ 若 `bun install` 失败（网络/lockfile 冲突）→ 试 `bun install --frozen-lockfile`；仍失败停下报告。
+
+---
+
+### Step 3 — Q4 修复：补 poster_render_jobs rule（TDD）
+
+见第 6.1 章。**必须 TDD RED 先红**，不许直接加 rule 补测试（那样无法证明 bug 真实存在）。
+
+```bash
+# 3.1 写 RED 测试（T2+T3 最小集）
+bun test tests/mcp-hiding-poster-jobs.test.ts   # 预期 T3 红（见到隐藏 job）
+# 3.2 加 1 行 rule
+# 3.3 再跑 — 预期全绿
+bun test tests/mcp-hiding-poster-jobs.test.ts
+# 3.4 补 T1/T4/T5，再跑全绿
+# 3.5 扩展 leak-matrix S11，跑
+bun test tests/leak-matrix.test.ts
+```
+
+---
+
+### Step 4 — Q3 判定：delete_notebook 递归删除探针
+
+见第 6.2 章。**必须写探针实测，不许推测。** 按判定表执行。
+
+**⚠️ V1.1 更新**：审查组已实跑 3 个场景全部 🟢 安全（结论 = **不加守卫**）。实施组本步骤改为 **复跑探针留证**：
+```bash
+# 只需确认以下事实（真 bun:sqlite + 真 wrapper）：
+# 1. agent 视角 listActiveNotebookTree 会过滤掉隐藏子 → notebookIds 数量变小
+# 2. guarded UPDATE 的 (SELECT COUNT(*) FROM active_tree) = ? 因此不匹配 → changes=0 → 409
+# 3. 全空场景下隐藏子仍不被删（session 才 changes=2）
+# 结论写进 findings.md F28-Q3 探针结果
+```
+
+**探针结果处理**：
+- 数据破坏 → 加守卫 + TDD（`tests/hiding-delete-notebook.test.ts`）+ leak-matrix S12
+- **安全（V1.1 已确认）→ findings 记录证据，不加守卫，不新增测试档**
+- 跑不起来 → **停下报主人**
+
+---
+
+### Step 5 — Q2 审计：全部新 route agent 可达性
+
+见第 6.3 章。逐 route 打开文件确认，findings.md 写 `F28-Q2 审计结果` 逐行结论 + 证据。
+
+**特别重点：`import-routes.ts` 未确认** —— 必须读全文。
+
+---
+
+### Step 5.5 — Q7 chromium 决策执行（**方案 A+D，主人已拍板 2026-11-08**）
+
+**决策 = A + D**：Dockerfile 保留 upstream 原样 + 加 pre-flight guard。
+
+**⚠️ 本 Step 是 merge 后唯一需要主动改 Dockerfile 的地方，做错会破坏官方 `docker-release` 断言。**
+
+#### A 部分：保留 upstream 原样（**零改动**）
+
+以下 5 行**必须是 upstream v2.23.0 原样字节**，绝不能删、改、合并：
+```dockerfile
+# Only stale template previews need the build browser; it stays out of runtime.   ← ① 注释
+RUN apk add --no-cache chromium nodejs                                            ← ② chromium+nodejs
+ENV EDGE_EVER_POSTER_CHROME_EXECUTABLE=/usr/bin/chromium                           ← ③ CHROME 路径
+COPY scripts/self-hosted-config.mjs ... scripts/prepare-poster-thumbnails.d.mts scripts/  ← ④ scripts
+COPY tests/browser/poster-thumbnail-generator.html tests/browser/poster-thumbnail-generator.ts tests/browser/  ← ⑤ generator
+```
+理由：`scripts/docker-release.test.mjs` L83-86 对其中 **4 条**（②③④⑤）做字符串断言（实测 25/25 全过；① 是注释，无断言但保留可读性）。
+
+#### D 部分：加 pre-flight guard（**唯一改动，3 行注释 + 1 行 RUN**）
+
+**插入位置**：`COPY tsconfig.json ./` **之后**、`RUN bun run build:web && bun run build:self-hosted` **之前**。
+
+**精确内容**（逐字复制，注释可保留）：
+```dockerfile
+# Plan D pre-flight guard: fail fast when poster thumbnails are stale.
+# Reads 32 source files + manifest.json only; no browser and no node needed.
+# Fix: bun run prepare:poster:thumbnails  ->  git add apps/web/src/assets/poster-template-previews  ->  git commit
+RUN bun run check:poster:thumbnails
+```
+
+**改完后 build stage 尾部应长这样**（对比确认）：
+```dockerfile
+COPY scripts/self-hosted-config.mjs ... scripts/prepare-poster-thumbnails.d.mts scripts/
+COPY tests/browser/poster-thumbnail-generator.html tests/browser/poster-thumbnail-generator.ts tests/browser/
+COPY tsconfig.json ./
+# Plan D pre-flight guard: fail fast when poster thumbnails are stale.
+# Reads 32 source files + manifest.json only; no browser and no node needed.
+# Fix: bun run prepare:poster:thumbnails  ->  git add ...  ->  git commit
+RUN bun run check:poster:thumbnails
+RUN bun run build:web && bun run build:self-hosted
+```
+
+#### D 部分的三条铁律（违反即破坏官方断言，实测证明）
+
+| # | ❌ 禁止 | ✅ 正确 | 原因 |
+|---|---|---|---|
+| D1 | `RUN bun run check:poster:thumbnails && bun run build:web && bun run build:self-hosted`（合并一行） | guard **独立一行**，build 行保持字节原样 | `docker-release.test.mjs` L82 断言精确字符串 `toContain("RUN bun run build:web && bun run build:self-hosted")` |
+| D2 | guard 放在任何 `COPY` 之前 | 放 `COPY tsconfig.json ./` **之后** | guard 要读 32 个源文件 hash，源文件未 COPY 进来会报文件缺失 |
+| D3 | 顺手删 chromium / nodejs / ENV / tests/browser COPY | **全部保留** | 那是方案 B（已否决），删了 25 条断言会有 4 条失败 |
+
+#### 实施后立即验收（3 步，不可跳过）
+
+```bash
+# 1. guard 命令在干净树本身必须通过
+bun run check:poster:thumbnails
+# 预期输出: Poster thumbnails are current    (EXIT=0)
+
+# 2. Dockerfile 内容核对（5 条 upstream + 1 条新 guard 都在）
+grep -n 'apk add --no-cache chromium nodejs' Dockerfile                       # 预期 1 行
+grep -n 'EDGE_EVER_POSTER_CHROME_EXECUTABLE=/usr/bin/chromium' Dockerfile      # 预期 1 行
+grep -n 'COPY tests/browser/poster-thumbnail-generator' Dockerfile            # 预期 1 行
+grep -n 'RUN bun run build:web && bun run build:self-hosted' Dockerfile       # 预期 1 行（原样）
+grep -n 'RUN bun run check:poster:thumbnails' Dockerfile                      # 预期 1 行（新增）
+
+# 3. 官方 docker release 断言必须全绿
+bun run test:docker-release
+# 实测真值（审查组 2026-11-08 跑出）：27 pass / 0 fail（5 文件）
+# 其中 scripts/docker-release.test.mjs 单独跑 = 8 pass / 0 fail
+# ⚠️ 不存在 `docker-release` script，只有 `test:docker-release`
+```
+
+#### 可选增强（建议做，2 行）：加断言防未来被上游 merge 抹掉
+
+在 `scripts/docker-release.test.mjs` 的 Docker release contract test 内，紧接 L82 之后加：
+```js
+    // FDE fork plan D guard (SPEC 3.2.8): keeps stale poster sources from
+    // silently launching chromium inside the build. Must stay a standalone line.
+    expect(dockerfile).toContain("RUN bun run check:poster:thumbnails");
+```
+理由：未来 merge 上游新版时，若上游 Dockerfile 覆盖掉我们的 guard，这条断言会立刻报警，而不是默默失去保护。
+
+#### 若 Master 日后改主意要剥离（方案 B，本 SPEC 不实施）
+
+删 L30-32（注释 + apk add + ENV），**保留** L38-39 COPY，同步改 `docker-release.test.mjs` 删 L84-86 三条断言，并加断言「Dockerfile 不含 chromium」。同时必须把「每次升级先跑 `bun run check:poster:thumbnails` 核实上游缩图已同步」写入升级 checklist（见附录 A16）。
+
+---
+
+### Step 6 — 全库门禁（Q5 标准）
+
+```bash
+# 6.1 三连绿
+bun run typecheck
+bun run typecheck:mobile
+bun run build:web
+
+# 6.2 全库测试对照 baseline
+timeout 500 bun test 2>&1 | tail -30 > /tmp/after-v2.23.0.txt
+# 比对：pass 数 >= baseline，fail 内容必须与 baseline 逐条一致（零新增）
+
+# 6.3 隔离专项逐档
+bun test tests/mcp-hiding.test.ts
+bun test tests/mcp-hiding-real-sqlite.test.ts
+bun test tests/mcp-hiding-null-join.test.ts
+bun test tests/mcp-hiding-table-forms.test.ts
+bun test tests/mcp-hiding-poster-jobs.test.ts    # 新增
+bun test tests/auth-hiding.test.ts
+bun test tests/hiding-guards.test.ts
+bun test tests/hiding-routes.test.ts
+bun test tests/leak-matrix.test.ts
+bun test tests/migration-0036.test.ts
+
+# 6.4 docker release 断言（⚠️ 不存在 docker-release script）
+bun run test:docker-release    # 实测真值：27 pass / 0 fail（5 文件）
+```
+
+**验收判定（Q5 硬指标）**
+
+| 门禁 | 通过标准 | 不通过时 |
+|---|---|---|
+| `bun run typecheck` | exit 0 | 修到 0，不许 --noEmit 绕过 |
+| `bun run typecheck:mobile` | exit 0 | 同上 |
+| `bun run build:web` | 成功产出 dist | 同上 |
+| 全库 `bun test` | pass ≥ baseline，**fail 逐条与 baseline 一致** | 新增 fail = 我们引入的回归，必须修 |
+| hiding 全套 10 档 | 全绿 | 逐档修，不许跳过 |
+| `test:docker-release` | **27 pass / 0 fail**（实测真值；docker-release.test.mjs 单独 8 pass） | 同上 |
+
+---
+
+### Step 7 — 交付（3-commit 粒度，延续既有模式）
+
+```bash
+# ⚠️ V1.1 修正（审查组 2026-11-08 实测）：原 V1.0 写 `git add -A` 会令 Commit 2 变空 commit
+#    因为 merge 未 commit 前，冲突解决的所有改动都还在索引/工作区，一次 add -A 全进 Commit 1。
+
+# Commit 1: merge commit（含全部 auto-merge + 3 个冲突解决）
+#   冲突解完后先 add 三个冲突文件（其余 auto-merge 文件 git 已在索引）
+git add apps/api/src/index.ts apps/api/src/memo-service.ts apps/api/src/notebook-service.ts
+git commit -m "merge: upstream v2.23.0 (964 commits, 37 migrations 0056-0092)"
+#   验证：git log --oneline -1 应显示 merge commit；git show --stat HEAD 应含上游全部改动
+
+# Commit 2: 我们的隔离增强（Q4 poster rule + TDD 测试 + Q7 Dockerfile guard）
+git add apps/api/src/mcp-hiding.ts tests/mcp-hiding-poster-jobs.test.ts \
+        tests/leak-matrix.test.ts Dockerfile scripts/docker-release.test.mjs
+git commit -m "fix: poster_render_jobs isolation rule + plan D poster guard (v2.23.0)"
+
+# Commit 3: DEPLOY 文档（独立 commit，见第 9 章）
+git add DEPLOY_REMOTE_BUILD_V2.md
+git commit -m "docs: DEPLOY V2.8 for fde-v2.23.0.1"
+
+# Tag + push（branch 与 tag 分开 refspec，既有惯例）
+git tag -a fde-v2.23.0.1 -m "fde-v2.23.0.1 — upstream v2.23.0 merge + poster_render_jobs isolation"
+git push origin fde-v2.23.0.1
+git push origin fde-v2.23.0.1 --tags
+# 远端核对
+git ls-remote origin refs/heads/fde-v2.23.0.1 refs/tags/fde-v2.23.0.1
+```
+
+---
+
+### Step 8 — 交主人远端部署（**实施组不做部署**）
+
+交付物格式（既有惯例）：
+```
+分支   : fde-v2.23.0.1
+HEAD   : <commit hash>
+tag    : fde-v2.23.0.1 (<tag hash>)
+变更说明: <3 commit 摘要>
+新增 migration: 37 个（0056-0092）
+⚠️ 升级前 HARD-GATE: 必须备份 edgeever-data
+```
+
+---
+
+## 8. 部署后验证清单（V0-V9，主人执行后回报）
+
+| 编号 | 验证项 | 预期 |
+|---|---|---|
+| **V0** | `/api/health` | `build` = 新 HEAD 前 12 位，`migration=0092`，`ok:true`，HTTP 200 |
+| **V1** | MCP `get_current_user` | owner 身份 + 8 scopes + `dataIsolation workspaceScoped` |
+| **V2** | MCP `list_notebooks` | 基线数量（现行 6 个可见分类） |
+| **V3** | MCP `list_memos` | 基线数量（现行 36 active） |
+| **V4** | 分类隔离核心 | 隐藏分类的 memo **不在** 任何 MCP 列表 |
+| **V5** | MCP 读隐藏 | `get_memo(隐藏id)` → 404 |
+| **V6** | MCP 写隐藏 | `create_memo` 到隐藏分类 → 403 HiddenNotebookError |
+| **V7** | 标签隔离 | 隐藏分类的标签不出现在 `list_tags` |
+| **V8** | `get_workspace_stats` | notebooks / memos 数与 V2/V3 一致（隔离过滤生效） |
+| **V9** | **poster_render_jobs 隔离（新增）** | agent 对隐藏分类的 poster 调 `request_poster_render` → 404/403；`get_poster_render_job` 拿隐藏 jobId → 404 |
+| **V10** | Diagram / Table / Form 隔离回归 | 隐藏分类的 diagram / table_forms 对 agent 一律不可见 |
+
+**测试数据铁律（既有惯例）**：
+- 只用 `DZ_TEST_*` 前缀新建数据
+- **绝对不碰主人现有笔记**
+- 测完即清；被 bug 阻住删唔到就写入 PWF 记录遗留 id + 清理路径
+
+---
+
+## 9. 部署与回滚机制（Q6 主人重点要求）
+
+### 9.1 ⚠️ HARD-GATE：先备份，再升级
+
+**这是主人的明确指令：必须先备份再升级。**
+
+**备份对象**：`./edgeever-data`（compose.yaml 的 bind mount 目录，映射到容器内 `/data`）
+> 依据：`compose.yaml` 现为 `volumes: - ./edgeever-data:/data`（Phase 14 已从 named volume 迁到 bind mount）
+> ⚠️ 不要用 `docker volume inspect`（已经是 bind mount，不是 named volume）
+
+**备份命令（远端服务器执行）**
+```bash
+cd <edgeever 部署目录>
+
+# 9.1.1 停容器（保证 SQLite 一致性，必须停，不能热备）
+docker compose stop edgeever
+
+# 9.1.2 整份备份（保留权限 + 时间戳）
+BACKUP_TS=$(date +%Y%m%d-%H%M%S)
+tar -czf "edgeever-data-backup-${BACKUP_TS}.tar.gz" edgeever-data/
+ls -lh "edgeever-data-backup-${BACKUP_TS}.tar.gz"
+
+# 9.1.3 校验备份完整性（HARD-GATE：不校验不算备份完）
+tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | head -20
+tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | wc -l   # 应 > 100
+# 记录 tar 内 SQLite 文件大小
+tar -tzvf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | grep -E '\.db|\.sqlite' 
+
+# 9.1.4 记录备份文件路径（写进部署记录）
+echo "BACKUP=${PWD}/edgeever-data-backup-${BACKUP_TS}.tar.gz"
+```
+
+**⚠️ 备份不通过就不许升级**：tar 列出失败 / 文件数异常（<100）/ 无 .db 文件 → 停下排查。
+
+**为何必须备份（37 个 migration 中至少 5 个会改历史数据）**：
+- `0058_retire_emerald_note_palette.sql` — 退役翡翠色板，**改现有笔记外观数据**
+- `0059_retire_custom_note_palette.sql` — 退役自定义色板
+- `0070_workspace_seed_localization.sql` — workspace 种子本地化（**改已有种子内容**）
+- `0071_fix_welcome_memo_markdown.sql` — 修 welcome memo markdown
+- `0078_clear_default_notebook_colors.sql` — 清默认 notebook 颜色
+
+### 9.2 升级流程
+
+```bash
+cd <edgeever 部署目录>
+
+# 9.2.1 获取新代码（场景 A: 既有仓库升级）
+git fetch --tags
+git checkout fde-v2.23.0.1
+git pull
+
+# 9.2.2 确认版本正确
+git describe --tags --exact-match    # 必须输出 fde-v2.23.0.1
+git rev-parse HEAD                    # 必须 = 交付的 HEAD
+
+# 9.2.3 build 镜像（BUILD_ID 自动填，既有惯例）
+docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) \
+  -t edgeever-fde:v2.23.0.1 .
+
+# ⚠️ 注意：本版 Dockerfile build stage 新增 chromium + nodejs 安装（见 SPEC 3.2 章专项分析）
+#    实测：v2.23.0 缩图已同步 → thumbnailsCurrent()=true → build 根本不会启动 chromium
+#    首次 build 仍会下载 ~200-250MB（apk add 在 COPY 前，层缓存可复用，第 2 次起不再下载）
+#    build 预计变慢 +3-8 分钟，属正常，不要误判为卡死
+#    ✅ runtime 镜像是全新 FROM oven/bun:alpine → 生产镜像零 chromium、零 node
+
+# 9.2.4 改 .env 版本号
+# EDGE_EVER_VERSION=v2.23.0.1
+
+# 9.2.5 启动
+docker compose up -d
+
+# 9.2.6 健康检查
+sleep 20 && curl -s http://127.0.0.1:8787/api/health
+# 预期: build=<新 HEAD 前12位>, migration=0092, ok:true
+```
+
+### 9.3 回滚机制（三级，由快到完整）
+
+**Level 1 — 代码快速回滚（未跑 migration 前有效）**
+```bash
+cd <edgeever 部署目录>
+git checkout fde-v1.90.0.1
+docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.90.0.1 .
+# .env 改 EDGE_EVER_VERSION=v1.90.0.1
+docker compose up -d
+```
+⚠️ **限制**：只有容器启动即失败（migration 未执行完成）时才有效。若 migration 已跑完（`migration=0092`），DB schema 已变，此回滚会导致旧代码对不上新 schema → **会崩**。
+
+**Level 2 — 数据 + 代码完整回滚（migration 已执行后的唯一正确方案）**
+```bash
+cd <edgeever 部署目录>
+
+# 9.3.1 停容器
+docker compose stop edgeever
+
+# 9.3.2 先把失败状态留档（不要直接删，方便事后分析）
+mv edgeever-data "edgeever-data-failed-$(date +%Y%m%d-%H%M%S)"
+
+# 9.3.3 还原备份
+tar -xzf edgeever-data-backup-<TS>.tar.gz
+ls -la edgeever-data/     # 确认还原成功
+
+# 9.3.4 代码回滚
+git checkout fde-v1.90.0.1
+docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v1.90.0.1 .
+# .env 改 EDGE_EVER_VERSION=v1.90.0.1
+
+# 9.3.5 启动 + 验证
+docker compose up -d
+sleep 20 && curl -s http://127.0.0.1:8787/api/health
+# 预期: build=<292718d0...>, migration=0055
+```
+
+**Level 3 — 回滚锚点（git tag 参考）**
+
+| 优先级 | 版本 | commit | 备注 |
+|---|---|---|---|
+| 首选 | `fde-v2.23.0.1` | 本版交付 | 部署成功后备份首可选 |
+| 回滚首选 | `fde-v1.90.0.1` | `292718d0` | **现行稳定版**，回滚目标 |
+| 次选 | `fde-v1.65.0.1` | `05c8062f` | 更早稳定点 |
+| 三选 | `fde-v1.50.0.3` | `33f53658` | 老稳定点 |
+
+**⚠️ 回滚铁律**
+1. **必须先有备份才允许升级**（HARD-GATE）
+2. migration 已执行 = 只能 Level 2，不能只回代码
+3. 失败状态目录（`edgeever-data-failed-*`）保留至少 72 小时再清理
+4. 回滚完成后必须验证 `migration` 字段回到 0055，否则 schema 与代码不匹配
+
+### 9.4 DEPLOY 文档升 V2.8（Commit 3）
+
+**必须更新的内容（逐项核对，不许漏）**
+
+| 章节 | 更新内容 |
+|---|---|
+| 标题 | `V2.7` → `V2.8` |
+| 「日常升级流程」示例 | `v1.90.0.1 → v2.23.0.1`（本次） |
+| migration 说明 | **37 个（0056-0092）**；列出 5 个改历史数据的 migration（见 9.1）；**备份 HARD-GATE 前置** |
+| build 步骤 | ⚠️ **必须写明（见 SPEC 3.2 / Step 5.5）**：① build stage 装 chromium+nodejs 但 **build 时不会启动浏览器**（v2.23.0 缩图已同步，实测 SKIP）② 首次 build 下载 ~200-250MB、慢 +3-8 分钟属正常（apk 层可缓存，第 2 次起不再下载）③ **runtime 镜像零 chromium、零 node**（全新 FROM，生产环境无浏览器）④ **本 fork 加了 plan D guard（`RUN bun run check:poster:thumbnails`）：若缩图 stale，build 会在几秒内失败并打印中文修复指引，不会静默跑浏览器** —— 遇到此错误照指引 `bun run prepare:poster:thumbnails` 后 commit 再重新 build |
+| `bun.lock` | 大改（+1451 −820），`docker build` 内会自动 `bun install --frozen-lockfile` |
+| 验证清单 | 加 **V9 poster_render_jobs 隔离**（见第 8 章） |
+| 回滚锚点 | `fde-v1.90.0.1`（292718d0）成为新回滚首选；`fde-v1.65.0.1` 次选 |
+| 回滚注意 | ⚠️ 升级：37 个 migration（比上次 9 个多 4 倍）；**没有备份 = 不可回滚** |
+| 全文残留扫描 | 扫全文旧版本号 `v1.90.0.1` / `V2.7` / `0055` 残留，逐个改（既有教训：曾漏改 L198） |
+
+**验收**：`grep -n 'V2\.7\|v1\.90\.0\.1' DEPLOY_REMOTE_BUILD_V2.md` → 只允许出现在「历史版本/回滚锚点」语境，不允许出现在「本次操作步骤」
+
+---
+
+（下一章续：附录）
+
+## 10. 附录 A — 已知陷阱清单（前人踩过的坑，直接照做不要重踩）
+
+| # | 陷阱 | 症状 | 正确做法 |
+|---|---|---|---|
+| A1 | `git tag -l` 末尾 ≠ latest | 误判基准版本（历史事故：v1.9.4 当最新，实际 v1.50.0） | 用 `git ls-remote --tags upstream` + `git fetch upstream refs/tags/vX.Y.Z`（FETCH_HEAD）+ 查 `package.json`/`release-summary.json` 双证 |
+| A2 | `compose` prefix 目录名到 named volume | `edgee_edgeever-data` 而非 `edgeever-data`，`docker run -v` 复制 100% 失败 | 本项目**已是 bind mount**（Phase 14 迁好），备份直接 `tar` 目录即可，不要 docker volume inspect |
+| A3 | DEPLOY build 命令占位符自指死循环 | `<commit>` 要自己填自己 | `docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD)` 自动填 |
+| A4 | BUG-002 NULL join 陷阱 | `NULL NOT IN (...)` = NULL → 整行被过滤，空 notebook 凭空消失 | 所有 memo-linked 注入必须 `(col IS NULL OR col NOT IN (...))` NULL-safe 形式（`MEMO_ID_SUBQUERY` 已内建） |
+| A5 | `bun install` 未跑就 typecheck | 大量 module not found | merge 后立即 `bun install`（Step 2 已在类型检查前） |
+| A6 | terminal timeout 600s 被拒 | 测试被中断 | 用 `timeout 500 bun test`（既有惯例） |
+| A7 | 冲突解完三个才 typecheck | 错误累积难以定位 | 每解一个立即 `bun run typecheck` |
+| A8 | `main` 分支禁忌 | AGENTS.md 严禁开新分支（指上游 main 工作流） | fork 用 `fde-vX.Y.Z.N` 补丁分支是既定做法，本次正确 |
+| A9 | 修改已执行旧 migration | schema 冲突 | 严禁改 0001-0055；新功能加递增编号（本次 37 个自动进来，不需我们新写） |
+| A10 | 用 `SUDO` 或提权 | HARD-GATE 违规 | 需要提权 → **停下问主人，提供命令让主人执行** |
+| A11 | Dockerfile 变慢误判 | build +3-8 分钟以为卡死 | 本版 build stage 新增 chromium+nodejs 安装（首次下载 ~200-250MB），慢属正常；**实测 build 时根本不会启动 chromium**（缩图已同步）；runtime 镜像零 chromium（见 SPEC 3.2 章） |
+| A12 | 测试碰主人现有数据 | 数据污染 | 铁律：只用 `DZ_TEST_*` 前缀，测完即清 |
+| A13 | `curl` 打第三方站 | 暴露服务器 IP（严重违规） | 只准 `curl` 自家实例 `edgee.bnicetome.top`；其余用 exa-fetch |
+| A14 | 冲突文件用 `git checkout --ours/theirs` 一刀切 | 丢失我们全部 patch | **禁止**；必须手工逐项重贴（第 5 章 ORDER OF OPERATIONS） |
+| A15 | **误以为生产镜像含 chromium** | 担心「服务器装浏览器太重」 | **不成立**：runtime stage 是全新 `FROM oven/bun:1.3.14-alpine`，chromium 只在 build stage，实测 runtime 段 grep chromium = 0。详见 SPEC 3.2 章 |
+| A16 | **把 guard 和 build 合并成一行** | `RUN bun run check:poster:thumbnails && bun run build:web && ...` 会令 `docker-release.test.mjs` L82 精确断言失败 | guard **必须独立成一行**，build 行保持字节原样（Step 5.5 铁律 D1） |
+| A17 | **guard 放在 COPY 之前** | guard 要读 32 个源文件 hash，文件未 COPY 进来会报 ENOENT | guard 必须放 `COPY tsconfig.json ./` **之后**（Step 5.5 铁律 D2） |
+| A18 | **顺手删 chromium/nodejs/ENV 以为「优化」** | 那是方案 B，已否决；删了 `docker-release` 25 条断言会有 4 条失败 | 方案 A 要求这 5 行全是 upstream 原样字节（Step 5.5 铁律 D3） |
+| A19 | **未来上游升级忘核对缩图** | 上游某版本改 poster 源但忘同步缩图 → guard 会 ABORT build | 这是 guard 的设计意图（fail-fast 而非静默跑浏览器）；升级时先跑 `bun run check:poster:thumbnails` 预检，若 stale 用 `bun run prepare:poster:thumbnails` 本地重新生成并 commit |
+| **A20** | **用 `bun run docker-release`** | `Script not found "docker-release"`（该 script 不存在） | 用 **`bun run test:docker-release`**，实测 27 pass / 0 fail（V1.1 新增） |
+| **A21** | **Commit 1 用 `git add -A`** | Commit 2 变空 commit（所有改动已被 Commit 1 吞掉） | merge commit 前只 `git add` 3 个冲突文件；其余我们的改动留到 Commit 2（V1.1 新增） |
+| **A22** | **以为 poster-render-service 只有一处 SQL** | 漏验 3 处 SELECT 读取点 | 该文件共 7 处 SQL，3 处 SELECT 受 rule 覆盖（L20/L38/L40/L45），UPDATE/DELETE/INSERT 不泄露（V1.1 新增） |
+| **A23** | **以为 delete_notebook 会破坏隐藏数据** | 多写一个不必要的守卫 + 测试 | 实测 3 场景全部安全（wrapper 过滤使计数不匹配 → 409），**不要加守卫**（V1.1 新增，见 6.2 结论） |
+| **A24** | **grep `docker-release` 就以为命令存在** | SPEC 多处写错命令 | 改任何命令前先 `grep -n '"<name>":' package.json` 确认 script 真实存在（V1.1 新增） |
+
+---
+
+## 11. 附录 B — 最终验收清单（实施组交付前逐项打勾）
+
+### B.1 代码完整性（**11 处硬指标**）
+
+- [ ] `apps/api/src/index.ts`：`authenticateRequestWithHiding` 注入点 **4 个**（L257/L272/L303/L376 对应位置）
+- [ ] `apps/api/src/index.ts`：`registerHidingRoutes(app)` **1 处**
+- [ ] `apps/api/src/index.ts`：`import ... from "./mcp-hiding"` + `import { registerHidingRoutes } from "./hiding-routes"` **都在**
+- [ ] `apps/api/src/memo-service.ts`：`assertNotebookWritable` 调用 **5 处**（5 个函数各 1）
+- [ ] `apps/api/src/memo-service.ts`：`import { assertNotebookWritable, assertNotebooksWritable }` 在
+- [ ] `apps/api/src/notebook-service.ts`：`assertNotebookWritable` 调用 **2 处**（create / update）
+- [ ] `apps/api/src/notebook-service.ts`：`import { assertNotebookWritable }` 在
+- [ ] `apps/api/src/mcp-hiding.ts`：INJECTION_RULES **10 条**（原 9 + poster_render_jobs）
+- [ ] `apps/api/src/mcp-hiding.ts`：`memos_fts` / `table_forms` / `poster_render_jobs` 都在
+- [ ] 核心三件上游零改动验证：`git diff c31dfe7a..v2.23.0 -- apps/api/src/mcp-hiding.ts apps/api/src/hiding-guards.ts apps/api/src/hiding-routes.ts` → **0 行**
+
+### B.2 测试完整性
+
+- [ ] 15 个既有测试档全部保留（实测清单 13 个 hiding 相关 + 2 个其他，逐个 `ls` 核对；V1.1 已实测全在）
+- [ ] 新增 `tests/mcp-hiding-poster-jobs.test.ts`（T1-T5，全绿）
+- [ ] `tests/leak-matrix.test.ts` 加 S11（2 个测试）
+- [ ] ~~若 Q3 判定需要守卫 → 新增 `tests/hiding-delete-notebook.test.ts` + S12~~ → **V1.1：Q3 已判定安全，不需新增（只要复跑探针留证）**
+- [ ] hiding 全套 **10 档**（9 既有 + poster）全绿
+
+### B.3 门禁
+
+- [ ] `bun run typecheck` exit 0
+- [ ] `bun run typecheck:mobile` exit 0
+- [ ] `bun run build:web` 成功
+- [ ] 全库 `timeout 500 bun test`：pass ≥ baseline，**fail 逐条与 baseline 一致（零新增）**
+- [ ] `bun run test:docker-release` → **27 pass / 0 fail**（实测真值）
+
+### B.4 审计记录（findings.md 必须有）
+
+- [ ] `F28-Q2 审计结果`：逐 route 一行结论 + 证据（含 `import-routes.ts` 全文判定）
+- [ ] `F28-Q3 探针结果`：探针输出原文 + 判定表结论
+- [ ] `F28-Q4 修复记录`：探针 RED 证据 + GREEN 证据 + 测试档路径
+- [ ] 「3 张表已审计无需补」存档（`notebook_shares` / `notebook_share_excluded_memos` / `video_transcript_jobs`）
+
+### B.5 交付物
+
+- [ ] 3 个 commit（merge / fix / docs）
+- [ ] tag `fde-v2.23.0.1`（annotated）
+- [ ] push branch + tag（分开 refspec）
+- [ ] `git ls-remote origin` 核对远程 hash 一致
+- [ ] `DEPLOY_REMOTE_BUILD_V2.md` 升 V2.8（第 9.4 章逐项）
+- [ ] 交付摘要（分支 / HEAD / tag / 变更说明 / 37 migration / 备份 HARD-GATE 提醒）
+
+### B.6 chromium / plan D（Q7 = A+D，主人已拍板）验收
+
+**A 部分（保留 upstream 原样，5 条全在）**
+- [ ] `grep -c 'apk add --no-cache chromium nodejs' Dockerfile` = **1**
+- [ ] `grep -c 'EDGE_EVER_POSTER_CHROME_EXECUTABLE=/usr/bin/chromium' Dockerfile` = **1**
+- [ ] `grep -c 'COPY tests/browser/poster-thumbnail-generator' Dockerfile` = **1**
+- [ ] `grep -c 'scripts/prepare-poster-thumbnails.mjs scripts/prepare-poster-thumbnails.d.mts scripts/' Dockerfile` = **1**
+- [ ] `grep -c 'RUN bun run build:web && bun run build:self-hosted' Dockerfile` = **1**（字节原样，未被合并）
+
+**D 部分（guard 已加且规格正确）**
+- [ ] `grep -c 'RUN bun run check:poster:thumbnails' Dockerfile` = **1**
+- [ ] guard 是**独立一行**（未与 build 合并）—— 铁律 D1
+- [ ] guard 在 `COPY tsconfig.json ./` **之后**、build 行**之前** —— 铁律 D2
+- [ ] guard 那行未附带 `&&` 连接 build —— 铁律 D1
+
+**功能验证**
+- [ ] `bun run check:poster:thumbnails` EXIT=0，输出 `Poster thumbnails are current`
+- [ ] `bun run test:docker-release` → **27 pass / 0 fail**（不是 7 pass）
+- [ ] 可选增强已做：`docker-release.test.mjs` 加了 `expect(dockerfile).toContain("RUN bun run check:poster:thumbnails")`
+- [ ] findings.md 已记录 Q7 = A+D 决策 + self-check 证据 + trade-off 声明
+
+---
+
+## 12. 附录 C — 关键事实速查（避免实施组重复侦查）
+
+### C.1 上游 v2.23.0 新增 16 个 MCP 工具（审计参考）
+
+| 组 | 工具 | 读路径 | 隔离状态 |
+|---|---|---|---|
+| poster (8) | `create_poster_memo` | createMemoRecord（有写守卫） | ✅ |
+| | `get_poster` | getMemoDetail（memos 有 rule） | ✅ |
+| | `update_poster` | getMemoDetail | ✅ |
+| | `request_poster_render` | getMemoDetail + INSERT poster_render_jobs | ✅ |
+| | `get_poster_render_job` | **readPosterRenderJob 裸 SQL** | ⚠️ **需补 rule（Q4）** |
+| | `get_poster_preview` | getMemoDetail + getResourceRow（resources 有 rule） | ✅ |
+| | `export_poster` | 同 preview | ✅ |
+| | `get_poster_capabilities` | 静态能力表，无 DB | ✅ |
+| table (7) | `create_table_memo` | createMemoRecord | ✅ |
+| | `get_table_records` | getMemoDetail | ✅ |
+| | `update_table_schema` / `add_table_record` / `update_table_record` / `delete_table_record` | getMemoDetail + updateMemoRecord | ✅ |
+| | `tableCellPatch`（内部） | `SELECT ... FROM resources`（resources 有 rule） | ✅ |
+| 其他 (2) | `create_infographic_memo` | createMemoRecord | ✅ |
+| | `delete_notebook` | deleteNotebookTree（**Q3 待探针**） | ⚠️ 待判定 |
+
+### C.2 全表扫描结果：16 张 memo-linked 表 vs INJECTION_RULES
+
+**⚠️ V1.1 修正（审查组 2026-11-08 实测）**：上游 0056-0092 实际新增 **15 张表**，V1.0 只列了其中 5 张。缺失的 5 张在此补上（均确认**不属 memo-linked**，不需 rule）：
+
+| 表 | 定义位置 | 关联网 | 状态 |
+|---|---|---|---|
+| `companion_turn_attachments` | 0057 | workspace_id + owner_id + turn_id（无 memo_id） | 🟢 非 memo-linked，无需 rule |
+| `companion_turn_attachment_parts` | 0057 | attachment_id（子表，无 memo_id） | 🟢 非 memo-linked，无需 rule |
+| `workspace_seed_localizations` | 0070 | workspace_id only | 🟢 非 memo-linked，无需 rule |
+| `workspace_example_seeds` | 0079 | workspace_id only | 🟢 非 memo-linked，无需 rule |
+| `memo_share_slug_claims` | 0081 | slug + workspace_id（**无 memo_id**） | 🟢 非 memo-linked（memo_shares 走 requireUser） |
+| `ai_transcription_providers/models/workspace_settings` | 0062/0065 | workspace_id / provider_id only | 🟢 非 memo-linked（0064 曾 DROP，0065 重建） |
+
+**→ 结论不变：仅 `poster_render_jobs` 需补 rule（Q4 正确）。**
+
+以下为 V1.0 原有清单（正确保留）：
+
+| 表 | 定义位置 | 状态 |
+|---|---|---|
+| `memos` | 0001 | ✅ COVERED (MEMOS_INJECTION) |
+| `notebooks` | 0001 | ✅ COVERED (NOTEBOOKS_INJECTION) |
+| `memo_contents` | 0001 | ✅ COVERED |
+| `memo_revisions` | 0001 | ✅ COVERED |
+| `resources` | 0001 | ✅ COVERED |
+| `memo_search_documents` | 0034 | ✅ COVERED |
+| `memo_tags` | 0035 | ✅ COVERED |
+| `memos_fts` | (虚表) | ✅ COVERED |
+| `table_forms` | 0055 | ✅ COVERED（v1.90.0.1 已补） |
+| **`poster_render_jobs`** | **0066（新）** | ⚠️ **MISSING — Q4 补** |
+| `notebook_shares` | 0067（新） | 🟢 已审计安全（requireUser） |
+| `notebook_share_excluded_memos` | 0072（新） | 🟢 已审计安全（requireUser 路径） |
+| `video_transcript_jobs` | 0061（新） | 🟢 已审计安全（requireUser / service 层） |
+| `memo_shares` | 0022 | 🟢 已审计安全（share-routes requireUser） |
+| `memo_edit_sessions` | 0011 | 🟢 已审计安全（memo-service wrapper 路径） |
+| `memo_import_sources` | 0021 | 🟢 已审计安全（import 内部，无 agent 直读出口） |
+| `resource_uploads` | 0036_up | 🟢 已审计安全（user-only） |
+| `companion_memory_evidence` | 0045 | 🟢 已审计安全（service 层 JOIN memos 兜底） |
+
+### C.3 关键文件路径速查
+
+```
+FDE 核心三件:
+  apps/api/src/mcp-hiding.ts          (874 行, 上游 0 改动)
+  apps/api/src/hiding-guards.ts       ( 49 行, 上游 0 改动)
+  apps/api/src/hiding-routes.ts       (153 行, 上游 0 改动)
+
+冲突三件:
+  apps/api/src/index.ts               (+79 −11 上游)
+  apps/api/src/memo-service.ts        (+66 −23 上游)
+  apps/api/src/notebook-service.ts    (+104 −24 上游)
+
+上游新 route（Q2 审计对象）:
+  apps/api/src/poster-render-routes.ts
+  apps/api/src/notebook-share-routes.ts
+  apps/api/src/import-routes.ts        ← 未确认，必读
+  apps/api/src/auth-totp-routes.ts
+
+上游新 service（Q4 相关）:
+  apps/api/src/poster-render-service.ts   ← readPosterRenderJob L19-20 裸 SQL
+
+上游新 MCP 工具文件:
+  apps/api/src/mcp-poster-tools.ts    (13 行, 纯编译)
+  apps/api/src/mcp-table-tools.ts     (37 行, 纯编译)
+  apps/api/src/mcp-tools.ts           (61 工具定义, 本地 45)
+```
+
+### C.4 环境命令速查
+
+```bash
+export PATH=$HOME/.bun/bin:$PATH     # bun 必须
+bun --version                        # 1.4.x
+cd /home/hermes/workspace/edgeever
+
+# PWF
+python3 /home/hermes/.hermes/skills/planning-with-files/scripts/plan.py start-phase edgeever
+python3 /home/hermes/.hermes/skills/planning-with-files/scripts/plan.py update-current-checkbox edgeever --item 28.1 --check
+
+# 门禁
+bun run typecheck && bun run typecheck:mobile && bun run build:web
+timeout 500 bun test
+bun run test:docker-release           # 实测真值 27 pass / 0 fail（5 文件）
+```
+
+---
+
+## 13. 交接声明
+
+**本 SPEC 由嗅探组（只读侦查）撰写，嗅探组不实施任何代码改动。**
+
+**Phase 28 已建为 PLACEHOLDER 交接 phase**（task_plan.md 当前区），checkboxes 28.1-28.10 对应本 SPEC 的执行顺序。
+
+**下一个 AI 实施组的开工流程**：
+```
+1. skill_view("planning-with-files")   # 必须加载 PWF 技能
+2. registry.py start-project edgeever
+3. plan.py start-phase edgeever        # 激活 Phase 28
+4. 读本 SPEC 全文（七章 + 三附录）
+5. 按 Step 0 → Step 8 执行
+```
+
+**⚠️ 实施组必须知道的四件事**：
+1. **Q1-Q7 已全部由主人拍板**（第 1 章），不要重新问主人，除非发现实测与 SPEC 不符
+2. **Q7 = 方案 A+D**（第 3.2.8 章 + Step 5.5）—— Dockerfile **保留 upstream 原样**（chromium 5 行全部不动），**只加 1 行独立 guard** `RUN bun run check:poster:thumbnails`。**严禁剥离、严禁与 build 合并成一行**
+3. **数据备份是 HARD-GATE**（第 9.1 章），未备份不许升级
+4. **11 处隔离代码是硬指标**（第 4.2 / B.1 章），少一处 = 不合格
+
+**V1.1 追加的三件事**：
+5. **Q3 已判定安全**（6.2 章实测）→ **不要加 delete_notebook 守卫**，不要新增 `hiding-delete-notebook.test.ts` / S12
+6. **命令真值**：`bun run test:docker-release`（27 pass / 0 fail），**不存在 `docker-release` script**
+7. **Commit 1 不要用 `git add -A`**（会吞掉 Commit 2）→ 详见 Step 7 V1.1 修正
+
+**关于 chromium 的最终一句话**：
+> **生产镜像（runtime stage）零 chromium、零 node** → 服务器上不会跑浏览器。
+> chromium 只在 build 机器上，为「万一上游缩图过期」做防御；实测 v2.23.0 这个 tag 缩图已同步（sourceHash 逐字节匹配），build 时**根本不会启动它**。
+> **本 fork 在方案 A 之上加了 plan D guard**：以后若上游忘同步缩图，build 会在几秒内 fail-fast 并打印修复指引，而不是静默跑 5-10 分钟浏览器（可能 OOM）。
+> 首次 build 会下载 ~200-250MB、慢 +3-8 分钟（apk 层可缓存，第 2 次起不再下载）。
+> **SELF-CHECK 已实测**：guard 插入后 `docker-release.test.mjs` 25/25 断言全过，ordering 正确。
+
+---
+
+**SPEC 结束。V1.1 / 2026-11-08 / 嗅探组 V1.0 + 实施组 FINAL DOUBT FIRST 修订**
+**侦查证据链**：`docs/upgrade-plan-v2.23.0-sniffer-report.md` + `findings.md` F27-A~F27-F + `progress.md` 2026-11-08 段
+**V1.1 审查证据链**：`findings.md` F28-A1~F28-A9 + `/tmp/probe-q3/probe4-7.ts` + `/tmp/guard-test/tree`（干净 v2.23.0 树实跑）
