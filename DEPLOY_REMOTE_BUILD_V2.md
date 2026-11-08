@@ -156,6 +156,8 @@
 
 ## 🏗 第二步：远端 Build 镜像
 
+> ⚠️ **build 前先睇「内存需求」**（下面 2.1 节）—— 本版 Docker build 峰值内存需求约 **2-3 GB**。本目标服务器（AMD Milan 4 核 / 7.7GB RAM / 3GB SWAP）**绰绰有余，唔需要加临时 SWAP**；只有 2GB 或以下内存嘅 VPS 先需要睇 2.1 节。
+
 在源码目录（/opt/edgeever-src）执行（版本号必须与本次部署目标一致 = **v2.23.0.1**）：
 
     docker build \
@@ -168,6 +170,58 @@
 - `-t` 标签名自定，与 .env 的 EDGE_EVER_IMAGE / EDGE_EVER_VERSION 对应即可
 - 首次 build 要下载 oven/bun:1.3.14-alpine 基础镜像 + bun install 全部依赖，耗时较长（视网络 5-20 分钟）
 - 磁盘需求：build 过程峰值约 4-6 GB，build 完**必须清理**（见第四步「Build 完成后释放空间」）
+- **内存需求**：build 峰值约 **2-3 GB**（bun install 解压 + vite build 打包最食内存）。**本目标服务器 7.7GB RAM + 3GB SWAP 足够，唔使加临时 SWAP**；2GB 或以下内存 VPS 先要睇 2.1 节。
+
+---
+
+### 2.1 临时 SWAP 添加 / 使用 / 移除（只供 2GB 或以下内存 VPS 参考）
+
+> ✅ **本目标服务器（AMD Milan 4 核 / 7.7GB RAM / 3GB SWAP）唔需要做本节** —— 直接跳过，去 build。
+
+**点解要加**：Docker build 过程（尤其 `bun install` 解压几百 MB 依赖 + `vite build` 打包）峰值内存可达 **2-3 GB**。如果服务器内存得 1-2 GB，build 会 OOM 失败。加临时 SWAP 等于借硬盘做「假内存」，build 完删返佢，唔影响系统长期状态。
+
+**推荐参数**：**2GB 临时 SWAP 文件**（`/swapfile-build`，`swappiness=10`，build 完即删）。2GB 够覆盖 build 峰值，又唔会太夸张占用磁盘。
+
+#### ① 添加临时 SWAP（build 前）
+
+    # 睇下有冇已有 swap（如果已经有 swap 且够大，可以跳过）
+    free -h
+
+    # 创建 2GB 临时 swapfile（fallocate 快，唔支持就 dd）
+    sudo fallocate -l 2G /swapfile-build || sudo dd if=/dev/zero of=/swapfile-build bs=1M count=2048
+    sudo chmod 600 /swapfile-build
+    sudo mkswap /swapfile-build
+    sudo swapon /swapfile-build
+
+    # 临时调低 swappiness（10 = 尽量少用 swap，平时唔使改返）
+    sudo sysctl vm.swappiness=10
+
+    # 确认生效（Swap 行应该见到 /swapfile-build，总容量增加）
+    free -h
+    swapon --show
+
+#### ② Build（加咗 SWAP 之后先 build，见上面命令）
+
+#### ③ 移除临时 SWAP（build 完 + 镜像验证通过之后）
+
+    # 先停用 swapfile（确保冇进程依赖佢）
+    sudo swapoff /swapfile-build
+    # 删除临时文件
+    sudo rm -f /swapfile-build
+    # 恢复默认 swappiness（60 = Debian 默认值）
+    sudo sysctl vm.swappiness=60
+
+    # 确认已移除（Swap 行应回到原有状态）
+    free -h
+    swapon --show
+
+⚠️ **注意事项**：
+- SWAP 只解决「内存唔够导致 OOM」嘅问题，**唔会令 build 变快**（swap 读写比 RAM 慢好多，build 时间可能 +20-50%）
+- 如果 build 中途失败，**记得都要移除临时 SWAP**（步骤同上 ③），唔好留喺度
+- 加 SWAP 唔需要重启任何服务，即时生效
+- 如果磁盘空间唔够 2GB，可以改用 1GB（`-l 1G` / `count=1024`）—— 但 1GB 只係最低限度，build 可能仍然 OOM，建议优先清磁盘（见第四步）再上 2GB
+
+---
 
 验证镜像存在：
 
@@ -289,6 +343,8 @@
     ⚠️ 本项目已是 **bind mount**（`./edgeever-data:/data`），**唔好用 `docker volume inspect`**（Phase 14 已从 named volume 迁走）。
 
 3. 重新 build（BUILD_ID 自动填当前 HEAD）：
+
+   ✅ **本服务器（AMD Milan 4 核 / 7.7GB RAM / 3GB SWAP）内存足够**，唔需要加临时 SWAP，直接 build 就得：
 
        docker build --build-arg EDGE_EVER_BUILD_ID=$(git rev-parse HEAD) -t edgeever-fde:v2.23.0.1 .
 
