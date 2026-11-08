@@ -12,6 +12,7 @@
 
 > **版本变更记录**
 >
+> - **V2.9（2026-11-08）**：🧹 **补齐「Build 完成后释放空间」章节（MASTER 要求）**。改动四点：① 原「第五步」重编为 **第四步**（原文编号由第三步直接跳第五步，缺第四步），并大幅扩写为 8 小节（占用判读 / build cache / 悬空+旧镜像 / `docker system prune` 陷阱 / 源码残留 + `git gc` / Bun cache / 一键脚本 / 回收量参考表）；② 日常升级流程新增 **第 7 步「释放空间（必做）」**——原文 1-6 步之后**冇任何清理指引**，流程断点；③ **参数实测更正**：`--keep-storage` 已废弃（Docker 29.x 实测提示 `keep-storage flag has been changed to reserved-space`）→ 改用 `--reserved-space` / `--max-used-space` / `--min-free-space`；④ 修正两处失效引用（第 57 行 / 第 163 行「见第五步」→「见第四步」）。新增安全红线：**绝对唔好**跑 `docker system prune -a --volumes -f`（`-a` 会删回滚镜像、`--volumes` 会删同机其他服务 named volume，不可逆）。
 > - **V2.8（2026-11-08）**：目标版本 v1.90.0.1 → **v2.23.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**超大版本 merge**（v1.90.0 → v2.23.0，上游 **964 commits / 2402 files / 跨 33 个 minor**）。**新增 37 个 migration（0056-0092）**，其中 ⚠️ **5 个会改历史数据**（0058 / 0059 / 0070 / 0071 / 0078）+ ⚠️ **0064 会 DROP 5 张表**（video transcription 退役，属上游未发布功能）—— 升级前**必须**备份 data（见第 9.1 章 HARD-GATE）。⚠️ **build stage 新增 chromium + nodejs 安装**（上游 Dockerfile，仅 build 机器用；**runtime 镜像零 chromium 零 node**）→ 首次 build 会下载约 200-250MB、慢 +3-8 分钟属正常。本 fork 额外加 **Plan D pre-flight guard**（`RUN bun run check:poster:thumbnails`）：若 poster 缩图 stale，build 会在几秒内 fail-fast 并打印修复指引。本版 FDE 修复：**A 点** `isReadQuery()` 不再把 `WITH...UPDATE` 误判为读查询（TDD 10 断言）+ **Q4** `poster_render_jobs` 加入 hiding wrapper（S11）。验证矩阵新增 **V9 = poster_render_jobs 隔离验证**。
 > - **V2.7（2026-09-29）**：目标版本 v1.65.0.1 → **v1.90.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**大版本 merge**（v1.65.0 → v1.90.0，上游 25 个 release / 391 commits / 785 files）。**新增 9 个 migration（0047-0055）**，其中 ⚠️ **0047 改 AI prompts seed（升级后 AI 行为会变）** + ⚠️ **0053 一次性 DDL 动 inbox 表** —— 升级前必须备份 data（V2.5 铁律）。新泄露面 `table_forms`（0055）已加入 hiding wrapper（MEMO_ID_SUBQUERY），agent 隐藏 memo 嘅公开表单 404（Q4）。上游新功能：结构化表格笔记 + 表单收集（beta）/ AI Agent 模式全面升级（resumable runs / timeline）/ 公开分享密码保护 / 插件市场本地化。验证矩阵新增 **V8 = table_forms 隔离验证**。
 > - **V2.6（2026-09-11）**：目标版本 v1.64.0.1 → **v1.65.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**小版本 merge**（v1.64.0 → v1.65.0，上游 10 commits / 118 files），**无新增 migration**（数据库 schema 不变）；新增 F18-A 修复（HiddenNotebookError extends AppError，REST 写隐藏分类 500→403）；TokenHidingEditor bg-white→bg-card 同步上游 dark mode CSS token 重构；上游新功能：Markdown ZIP export + Diagram 布局 4 连 fix + Docker entry path 兼容。
@@ -54,7 +55,7 @@
 **体检判读**：
 
 - 第 1-3 项任何 ❌：先装对应工具（Debian: apt install docker.io docker-compose-plugin git，Docker 官方源更佳）
-- 第 4 项可用空间 < 6GB：先做第五步清理，或清旧镜像
+- 第 4 项可用空间 < 6GB：先做第四步清理（见第 320 行「Build 完成后释放空间」），或先删旧版镜像
 - 第 5 项 ❌：检查 DNS/防火墙（只需 443 出站）
 
 **版本锚点说明**：
@@ -160,7 +161,7 @@
 - BUILD_ID 用 $(git rev-parse HEAD) 自动填当前 HEAD 全 hash —— /api/health 嘅 build 字段 = 拉到嘅源码 commit 前 12 位，**永远自洽**（唔使手抄 hash，唔会抄错）
 - `-t` 标签名自定，与 .env 的 EDGE_EVER_IMAGE / EDGE_EVER_VERSION 对应即可
 - 首次 build 要下载 oven/bun:1.3.14-alpine 基础镜像 + bun install 全部依赖，耗时较长（视网络 5-20 分钟）
-- 磁盘需求：build 过程峰值约 4-6 GB，build 完可清理（见第五步）
+- 磁盘需求：build 过程峰值约 4-6 GB，build 完**必须清理**（见第四步「Build 完成后释放空间」）
 
 验证镜像存在：
 
@@ -315,65 +316,200 @@
 
    ⚠️ **本版建议保留旧镜像 + 备份至少 72 小时**（37 个 migration 风险面比上次大 4 倍）。
 
+7. 🧹 **释放空间（必做，每次升级都要做，唔好跳过）**：
+
+   ⚠️ **顺序铁律**：**必须系上面 1-6 步全绿（尤其第 5 步 `/api/health` 验证通过）之后**才做。
+   如果验证未过就清 cache，一旦要回滚/重建，就要从头再下载 chromium + nodejs + 全部依赖，白等 10-20 分钟。
+
+       # ① 睇占用（判断清边样）
+       docker system df
+
+       # ② 清 build cache（最大回收项，3-6 GB；保留最近 2GB 让下次 build 快返）
+       docker builder prune --reserved-space 2GB -f
+
+       # ③ 清悬空镜像
+       docker image prune -f
+
+       # ④ 确认回收效果
+       docker system df
+       df -h / | tail -1
+
+   **预期**：做齐 ②+③ 一般可回收 **4-8 GB**（本版 Dockerfile 4 阶段 + chromium/nodejs，cache 特别大）。
+
+   ⚠️ **绝对唔好**跑 `docker system prune -a --volumes -f`：
+   `-a` 会连你留低做回滚嘅旧镜像都删；`--volumes` 会删同机其他服务嘅 named volume（不可逆）。
+
+   📖 **完整清理指引（含参数实测更正、git gc、Bun cache、判读表）见「第四步：Build 完成后释放空间」第 320 行起。**
+
 ---
 
-## 🧹 第五步：Build 残留清理（Bun + Docker 释放空间）
+## 🧹 第四步：Build 完成后释放空间（必做，每次升级都做）
 
-### 5.1 Docker build cache（大头，每次 build 都会累积）
+⚠️ **时机铁律**：清理**必须**在「第四步之后」= 新版容器已启动 + `/api/health` 验证全绿 + （本版建议）观察无异常之后才做。
+**唔好 build 完即刻清 cache** —— 如果验证失败要回滚或重建，cache 清咗就要从头再下载 chromium/nodejs + 全部依赖，白等 10-20 分钟。
 
-查看占用：
+---
+
+### 4.1 先睇占用（判断要不要清、清边样）
 
     docker system df
 
-清理 build cache（安全，下次 build 变慢但无副作用）：
+    # 想睇每条 cache / 每个镜像具体几大：
+    docker system df -v
 
+判读：
+
+- **Build Cache** 行 = 本版 build 累积（大头）。本版 Dockerfile 系 4 阶段多 build（manifests → dependencies → build → runtime）+ `apk add chromium nodejs`，
+  **单次 build cache 保守估计 3-6 GB**（视之前有无 cache 复用）。
+- **Images** 行 `RECLAIMABLE` = 悬空 + 未被容器使用嘅旧版镜像，这部分可以回收。
+- **Containers** 行一般 0B（`up -d` 后旧容器会被替换成悬空，会算入 Images）。
+
+---
+
+### 4.2 清 build cache（最大回收项，安全）
+
+    # 全部清（下次 build 变慢但无副作用，数据零影响）
     docker builder prune -f
 
-只清悬空 cache 保留最近层：docker builder prune --keep-storage 2GB -f
+    # 【推荐】只清旧 cache，保留最近 2GB 让下次 build 快返：
+    docker builder prune --reserved-space 2GB -f
 
-### 5.2 悬空/旧镜像
+    # 或者反过来：限制 cache 总量上限 2GB：
+    docker builder prune --max-used-space 2GB -f
 
-    docker image prune -f          # 删 dangling
-    docker rmi 旧tag               # 手动删旧版本镜像（确认新版正常先删）
+⚠️ **参数实测更正（Docker 29.x）**：
 
-### 5.3 源码目录 Bun 残留（远端直接 docker build 时不会产生！）
+- `docker builder prune` 现在实际系 `docker buildx prune` 嘅别名（`docker builder prune --help` 会显示 `Usage: docker buildx prune`）。
+- **旧写法 `--keep-storage` 已废弃** —— 实测会打印 `Flag --keep-storage has been deprecated, keep-storage flag has been changed to reserved-space`（唔会报错，但唔好再用）。
+- 正式写法：`--reserved-space`（永远保留几多）/ `--max-used-space`（上限几多）/ `--min-free-space`（清到剩几多空闲）。
+- 加 `-a` 会连 internal/frontend images 都清（更彻底，一般都无害）。
 
-⚠️ 重点：第二步的 docker build 全部在容器内进行（多阶段 build），**远端源码目录不会生成 node_modules**，
-除非你在远端直接跑过 bun install / bun run（不要这样做，无必要）。
+---
 
-检查命令：
+### 4.3 清悬空 + 旧版镜像
 
-    du -sh /opt/edgeever-src/node_modules 2>/dev/null || echo "干净，无 node_modules"
+    # 只删 dangling（<none> 标签嘅中间层镜像），最安全
+    docker image prune -f
 
-如果存在（曾手动跑过 bun install），清理：
+    # 睇下边个系旧版
+    docker images | grep edgeever-fde
 
-    rm -rf /opt/edgeever-src/node_modules /opt/edgeever-src/apps/*/node_modules /opt/edgeever-src/packages/*/node_modules
+    # 确认新版全绿之后再删旧版（本版强烈建议保留至少 72 小时）
+    docker rmi edgeever-fde:v1.90.0.1
+
+⚠️ **本版（37 个 migration）保守做法**：`v1.90.0.1` 旧镜像 + data 备份 **至少留 72 小时** 才删。
+因为 37 个 migration 风险面比上次大 4 倍，万一 72 小时内发现问题要回滚，有旧镜像 = 回滚快好多。
+
+---
+
+### 4.4 ⚠️ `docker system prune` 嘅陷阱（唔好乱用）
+
+    # ❌ 危险组合，绝对唔好加 -a --volumes
+    # docker system prune -a --volumes -f
+
+- `docker system prune -f` 本身只清「停止嘅容器 + 未使用网络 + 悬空镜像 + build cache」→ 对本项目安全。
+- **绝对唔好加 `-a`**：会连「有 tag 但冇容器用嘅镜像」都删（包括你留低 72 小时嘅回滚镜像、其他项目镜像）。
+- **绝对唔好加 `--volumes`**：会删未挂载嘅 volume。本项目虽然已改 bind mount（`./edgeever-data:/data`，Phase 14），
+  但同机可能有其他服务用 named volume，误删 = 灾难。**呢个系不可逆操作，唔好赌**。
+
+结论：本项目只用手动精准命令（4.2 + 4.3），**唔用 `docker system prune -a`**。
+
+---
+
+### 4.5 源码目录残留（正常情况应该系 0）
+
+⚠️ 重点：第二步嘅 `docker build` **全部在容器内多阶段进行**，远端源码目录**唔会**生成 `node_modules`。
+除非你曾经在远端直接跑过 `bun install` / `bun run`（**唔好咁做，无必要**）。
+
+检查：
+
+    du -sh /opt/edgeever-src 2>/dev/null
+    du -sh /opt/edgeever-src/node_modules 2>/dev/null || echo "✓ 干净，无 node_modules"
+
+如果真系有（曾手动跑过 bun install），清理：
+
+    rm -rf /opt/edgeever-src/node_modules \
+           /opt/edgeever-src/apps/*/node_modules \
+           /opt/edgeever-src/packages/*/node_modules
     rm -rf /opt/edgeever-src/.bun-cache 2>/dev/null
 
-### 5.4 Bun 全局缓存（只有远端装了 bun 才会有；纯 docker build 不需要装 bun！）
+**顺手压一压 git 仓库**（每次跨大版本 merge 后 packfile 会膨胀，`git gc` 可回收）：
 
-如果远端曾装过 bun CLI 且不再需要：
+    cd /opt/edgeever-src
+    git gc --aggressive --prune=now
 
-    du -sh ~/.bun   # 看占用（本机实测 ~2.1GB）
-    rm -rf ~/.bun   # 完全移除（会删掉 bun 可执行文件）
+    # 睇下省到几多
+    du -sh .git
 
-或只清 install cache 保留 bun 本体：
+⚠️ `git gc` 只整理 git 内部对象，**绝对安全**，唔会动 working tree 或者 data。
+
+---
+
+### 4.6 Bun 全局缓存（远端本来唔应该装 bun）
+
+纯 `docker build` 部署**唔需要**远端装 bun。如果曾经装过：
+
+    du -sh ~/.bun              # 睇占用
+    rm -rf ~/.bun              # 完全移除（会删埋 bun 可执行文件）
+
+或只清 install cache 保留 bun 本体（万一要跑 4.2 嘅 poster thumbnails 修复命令）：
 
     rm -rf ~/.bun/install/cache
 
-⚠️ 参考数据（本机实测）：edgeever node_modules = 1.9GB，bun install cache = 2.0GB。
-远端用 docker build 方法两者都应保持为 0。
+⚠️ **实测参考数据**（本机 2026-11-08 实测，供比对远端是否异常）：
 
-### 5.5 一键体检脚本
+- `~/.bun` 总量 = **3.8 GB**，其中 `~/.bun/install/cache` = **3.7 GB**（几乎全部系 cache）
+- edgeever `node_modules` = **3.3 GB**
+- 远端用 docker build 方法，呢两项**都应该保持为 0**。如果见到几 GB → 说明有人跑过本地 install，可以清。
 
-    echo "=== Docker ==="
+---
+
+### 4.7 一键体检 + 清理脚本
+
+**体检（只读，唔删任何嘢）：**
+
+    echo "=== Docker 占用 ==="
     docker system df
+
     echo "=== 源码目录残留 ==="
+    du -sh /opt/edgeever-src 2>/dev/null
     du -sh /opt/edgeever-src/node_modules 2>/dev/null || echo "无 node_modules ✓"
+
     echo "=== Bun 残留 ==="
     du -sh ~/.bun 2>/dev/null || echo "无 ~/.bun ✓"
-    echo "=== 磁盘 ==="
+
+    echo "=== 磁盘余量 ==="
     df -h / | tail -1
+
+**清理（新版验证全绿之后才跑）：**
+
+    echo "=== 清 build cache ==="
+    docker builder prune --reserved-space 2GB -f
+
+    echo "=== 清 dangling 镜像 ==="
+    docker image prune -f
+
+    echo "=== 确认旧镜像可删（72 小时后才做） ==="
+    docker images | grep edgeever-fde
+
+    echo "=== 清理后对比 ==="
+    docker system df
+    df -h / | tail -1
+
+---
+
+### 4.8 预期回收量参考
+
+| 项目 | 典型占用 | 清理命令 | 风险 |
+|---|---|---|---|
+| Build Cache | 3-6 GB（本版 chromium+nodejs 多阶段） | `docker builder prune` | 零（下次 build 慢些） |
+| 悬空镜像 | 数百 MB - 2 GB | `docker image prune -f` | 零 |
+| 旧版镜像（72h 后） | 约 200-400 MB/个 | `docker rmi <tag>` | 零（确认新版正常） |
+| 源码 node_modules（异常） | 3.3 GB | `rm -rf` | 零（docker build 唔用佢） |
+| Bun cache（异常） | 3.7 GB | `rm -rf ~/.bun/install/cache` | 零 |
+| git packfile | 数百 MB（跨大版本 merge 后） | `git gc --prune=now` | 零 |
+
+**正常一次升级完了之后，做齐 4.2 + 4.3，一般可回收 4-8 GB。**
 
 ---
 
