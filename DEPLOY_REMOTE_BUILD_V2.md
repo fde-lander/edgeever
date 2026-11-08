@@ -12,6 +12,7 @@
 
 > **版本变更记录**
 >
+> - **V2.10（2026-11-08）**：🔐 **备份格式对齐 MASTER 最新成功案例（v1.65.0.1 实测验证）**。改动三点：① 备份文件名由 `edgeever-data-backup-<TS>.tar.gz` → **`edgeever-data-bak-<目标版本>-<YYYYMMDD>.tar.zst`**（带版本号，回溯清晰；例 `edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst`）；② 压缩工具 gzip → **zstd**（`tar -I 'zstd -T0 -3' -cpf`），校验改 `zstd -dc | tar -t`，还原改 `zstd -dc | tar -xp`；③ 第零步新增 **zstd ≥ 1.4 前置依赖检查**（体检项 4，apt install 清单同步加 zstd）。**临时区 sandbox 实测通过**：create → `zstd -dc | tar -t` 枚举 → 文件计数 → `.db` grep 全链路可用（zstd 1.5.7 / GNU tar 1.35，`-I` 参数经 `tar --help` 核实）。
 > - **V2.9（2026-11-08）**：🧹 **补齐「Build 完成后释放空间」章节（MASTER 要求）**。改动四点：① 原「第五步」重编为 **第四步**（原文编号由第三步直接跳第五步，缺第四步），并大幅扩写为 8 小节（占用判读 / build cache / 悬空+旧镜像 / `docker system prune` 陷阱 / 源码残留 + `git gc` / Bun cache / 一键脚本 / 回收量参考表）；② 日常升级流程新增 **第 7 步「释放空间（必做）」**——原文 1-6 步之后**冇任何清理指引**，流程断点；③ **参数实测更正**：`--keep-storage` 已废弃（Docker 29.x 实测提示 `keep-storage flag has been changed to reserved-space`）→ 改用 `--reserved-space` / `--max-used-space` / `--min-free-space`；④ 修正两处失效引用（第 57 行 / 第 163 行「见第五步」→「见第四步」）。新增安全红线：**绝对唔好**跑 `docker system prune -a --volumes -f`（`-a` 会删回滚镜像、`--volumes` 会删同机其他服务 named volume，不可逆）。
 > - **V2.8（2026-11-08）**：目标版本 v1.90.0.1 → **v2.23.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**超大版本 merge**（v1.90.0 → v2.23.0，上游 **964 commits / 2402 files / 跨 33 个 minor**）。**新增 37 个 migration（0056-0092）**，其中 ⚠️ **5 个会改历史数据**（0058 / 0059 / 0070 / 0071 / 0078）+ ⚠️ **0064 会 DROP 5 张表**（video transcription 退役，属上游未发布功能）—— 升级前**必须**备份 data（见第 9.1 章 HARD-GATE）。⚠️ **build stage 新增 chromium + nodejs 安装**（上游 Dockerfile，仅 build 机器用；**runtime 镜像零 chromium 零 node**）→ 首次 build 会下载约 200-250MB、慢 +3-8 分钟属正常。本 fork 额外加 **Plan D pre-flight guard**（`RUN bun run check:poster:thumbnails`）：若 poster 缩图 stale，build 会在几秒内 fail-fast 并打印修复指引。本版 FDE 修复：**A 点** `isReadQuery()` 不再把 `WITH...UPDATE` 误判为读查询（TDD 10 断言）+ **Q4** `poster_render_jobs` 加入 hiding wrapper（S11）。验证矩阵新增 **V9 = poster_render_jobs 隔离验证**。
 > - **V2.7（2026-09-29）**：目标版本 v1.65.0.1 → **v1.90.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**大版本 merge**（v1.65.0 → v1.90.0，上游 25 个 release / 391 commits / 785 files）。**新增 9 个 migration（0047-0055）**，其中 ⚠️ **0047 改 AI prompts seed（升级后 AI 行为会变）** + ⚠️ **0053 一次性 DDL 动 inbox 表** —— 升级前必须备份 data（V2.5 铁律）。新泄露面 `table_forms`（0055）已加入 hiding wrapper（MEMO_ID_SUBQUERY），agent 隐藏 memo 嘅公开表单 404（Q4）。上游新功能：结构化表格笔记 + 表单收集（beta）/ AI Agent 模式全面升级（resumable runs / timeline）/ 公开分享密码保护 / 插件市场本地化。验证矩阵新增 **V8 = table_forms 隔离验证**。
@@ -33,11 +34,12 @@
 
 ## 🔍 第零步：前置环境体检（首次部署前必做）
 
-**需要安装嘅工具**（只需两项，**唔需要**装 bun/node/pnpm——build 全部喺容器内进行）：
+**需要安装嘅工具**（只需四项，**唔需要**装 bun/node/pnpm——build 全部喺容器内进行）：
 
 1. **Docker Engine** ≥ 20.10（含 buildx 多阶段 build 支持）
 2. **git** ≥ 2.20
 3. docker compose plugin（docker compose version 可验证）
+4. **zstd** ≥ 1.4（⚠️ 备份用 `.tar.zst` 压缩，冇装就做唔到备份）
 
 一键体检脚本（复制即贴）：
 
@@ -47,16 +49,18 @@
     docker compose version || echo "❌ 未装 compose plugin"
     echo "=== 3. git ==="
     git --version || echo "❌ 未装 git"
-    echo "=== 4. 磁盘空间（build 峰值需 4-6GB）==="
+    echo "=== 4. zstd ==="
+    zstd --version || echo "❌ 未装 zstd（备份必需）"
+    echo "=== 5. 磁盘空间（build 峰值需 4-6GB）==="
     df -h / | tail -1
-    echo "=== 5. GitHub 连通 ==="
+    echo "=== 6. GitHub 连通 ==="
     git ls-remote https://github.com/fde-lander/edgeever.git HEAD >/dev/null 2>&1 && echo "✓ GitHub 可达" || echo "❌ GitHub 不可达"
 
 **体检判读**：
 
-- 第 1-3 项任何 ❌：先装对应工具（Debian: apt install docker.io docker-compose-plugin git，Docker 官方源更佳）
-- 第 4 项可用空间 < 6GB：先做第四步清理（见第 320 行「Build 完成后释放空间」），或先删旧版镜像
-- 第 5 项 ❌：检查 DNS/防火墙（只需 443 出站）
+- 第 1-4 项任何 ❌：先装对应工具（Debian: apt install docker.io docker-compose-plugin git zstd，Docker 官方源更佳）
+- 第 5 项可用空间 < 6GB：先做第四步清理（见第 320 行「Build 完成后释放空间」），或先删旧版镜像
+- 第 6 项 ❌：检查 DNS/防火墙（只需 443 出站）
 
 **版本锚点说明**：
 
@@ -232,25 +236,30 @@
 
     ⚠️ **唔备份唔准升级**。
 
+    **备份命名格式（MASTER 钦定，沿用 v1.65.0.1 成功案例）**：
+    `edgeever-data-bak-<目标版本>-<YYYYMMDD>.tar.zst`
+    例：`edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst`
+
        # ① 停容器（SQLite 一致性要求，不能热备）
        cd /opt/edgeever        # ← compose 所在目录（按你实际路径）
        docker compose stop edgeever
 
-       # ② 整份备份（保留权限 + 时间戳）
-       BACKUP_TS=$(date +%Y%m%d-%H%M%S)
-       sudo tar -czf "edgeever-data-backup-${BACKUP_TS}.tar.gz" edgeever-data/
-       ls -lh "edgeever-data-backup-${BACKUP_TS}.tar.gz"
+       # ② 整份备份（zstd 压缩，多线程，保留权限）
+       BAK="edgeever-data-bak-fde-v2.23.0.1-$(date +%Y%m%d).tar.zst"
+       sudo tar -I 'zstd -T0 -3' -cpf "$BAK" edgeever-data/
+       ls -lh "$BAK"
 
        # ③ ⚠️ 校验备份完整性（不校验 = 不算备份完）
-       tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | head -20
-       tar -tzf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | wc -l    # 应 > 100
-       tar -tzvf "edgeever-data-backup-${BACKUP_TS}.tar.gz" | grep -E '\.db|\.sqlite'
+       zstd -dc "$BAK" | tar -t | head -20
+       zstd -dc "$BAK" | tar -t | wc -l                              # 应 > 100
+       zstd -dc "$BAK" | tar -tv | grep -E '\.db|\.sqlite'           # 应见到 db 文件
 
        # ④ 记低备份路径（写进部署记录）
-       echo "BACKUP=${PWD}/edgeever-data-backup-${BACKUP_TS}.tar.gz"
+       echo "BACKUP=${PWD}/$BAK"
 
-    **判读**：tar 列出失败 / 文件数 < 100 / 无 .db 文件 → **停手排查，不许继续**。
+    **判读**：zstd 解压失败 / tar 列出失败 / 文件数 < 100 / 无 .db 文件 → **停手排查，不许继续**。
 
+    ⚠️ 用 zstd 而非 gzip 的原因：实测同体积压缩率更高、`-T0` 多线程快 3-5 倍，data 大时省很多时间。
     ⚠️ 本项目已是 **bind mount**（`./edgeever-data:/data`），**唔好用 `docker volume inspect`**（Phase 14 已从 named volume 迁走）。
 
 3. 重新 build（BUILD_ID 自动填当前 HEAD）：
@@ -533,8 +542,8 @@
     # ② 先把失败状态留档（唔好直接删，方便事后分析；保留至少 72 小时）
     mv edgeever-data "edgeever-data-failed-$(date +%Y%m%d-%H%M%S)"
 
-    # ③ 还原备份（用第 2.5 步做嘅 tar 包）
-    tar -xzf edgeever-data-backup-<你的TS>.tar.gz
+    # ③ 还原备份（用第 2.5 步做嘅 .tar.zst 包）
+    zstd -dc edgeever-data-bak-fde-v2.23.0.1-<你的日期>.tar.zst | tar -xp
     ls -la edgeever-data/        # 确认还原成功
 
     # ④ 代码回滚
