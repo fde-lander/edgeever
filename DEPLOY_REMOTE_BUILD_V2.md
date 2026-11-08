@@ -12,6 +12,7 @@
 
 > **版本变更记录**
 >
+> - **V2.12（2026-11-08）**：🎯 **修正备份命名用「当前运行版本」（MASTER 抓到致命错误）**。V2.10/V2.11 写 `edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst` —— **错**：备份系**升级前**做嘅，装住嘅系**旧版本**嘅 data，用「待部署版本」命名会令备份档名同内容不符，回滚时拣错档 / 误以为已有新版本备份。改为 **`edgeever-data-bak-<当前运行版本>-<YYYYMMDD>.tar.zst`**（本次 = `edgeever-data-bak-fde-v1.90.0.1-20261108.tar.zst`，同 v1.65.0.1 成功案例逻辑一致：备份时跑紧 v1.65.0.1 所以系 `-fde-v1.65.0.1-`）。新增**备份前必查当前版本**步骤（`grep EDGE_EVER_VERSION .env` + `/api/health`），并用 `CUR="fde-v1.90.0.1"` → `BAK="edgeever-data-bak-${CUR}-..."` 变量化避免手抄错。回滚还原命令同步改为 `-fde-v1.90.0.1-`。
 > - **V2.11（2026-11-08）**：🔎 **修正备份校验判据（MASTER 抓到错误）**。原写 `tar -t | wc -l # 应 > 100` —— 呢个门槛系从旧文档照搬，**实际错**：`edgeever-data` 只有 3 类东西（`edgeever.sqlite` / `edgeever-secrets.json` / `resources/` 每附件一个 blob），全新安装或附件少时条目数只有 **3-6**，用「>100」会把正常备份误判为失败。改为**关键文件在场判据**：必须见到 `edgeever.sqlite`（数据库）+ `edgeever-secrets.json`（凭据密钥），有附件则 `resources/` 应有 blob；文件数只作参考并注明「新生 3-6 属正常」。sanity sandbox 实测：2 文件 + 1 附件 → `wc -l` = **5**（含 2 个目录条目），证实旧门槛不可靠。
 > - **V2.10（2026-11-08）**：🔐 **备份格式对齐 MASTER 最新成功案例（v1.65.0.1 实测验证）**。改动三点：① 备份文件名由 `edgeever-data-backup-<TS>.tar.gz` → **`edgeever-data-bak-<目标版本>-<YYYYMMDD>.tar.zst`**（带版本号，回溯清晰；例 `edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst`）；② 压缩工具 gzip → **zstd**（`tar -I 'zstd -T0 -3' -cpf`），校验改 `zstd -dc | tar -t`，还原改 `zstd -dc | tar -xp`；③ 第零步新增 **zstd ≥ 1.4 前置依赖检查**（体检项 4，apt install 清单同步加 zstd）。**临时区 sandbox 实测通过**：create → `zstd -dc | tar -t` 枚举 → 文件计数 → `.db` grep 全链路可用（zstd 1.5.7 / GNU tar 1.35，`-I` 参数经 `tar --help` 核实）。
 > - **V2.9（2026-11-08）**：🧹 **补齐「Build 完成后释放空间」章节（MASTER 要求）**。改动四点：① 原「第五步」重编为 **第四步**（原文编号由第三步直接跳第五步，缺第四步），并大幅扩写为 8 小节（占用判读 / build cache / 悬空+旧镜像 / `docker system prune` 陷阱 / 源码残留 + `git gc` / Bun cache / 一键脚本 / 回收量参考表）；② 日常升级流程新增 **第 7 步「释放空间（必做）」**——原文 1-6 步之后**冇任何清理指引**，流程断点；③ **参数实测更正**：`--keep-storage` 已废弃（Docker 29.x 实测提示 `keep-storage flag has been changed to reserved-space`）→ 改用 `--reserved-space` / `--max-used-space` / `--min-free-space`；④ 修正两处失效引用（第 57 行 / 第 163 行「见第五步」→「见第四步」）。新增安全红线：**绝对唔好**跑 `docker system prune -a --volumes -f`（`-a` 会删回滚镜像、`--volumes` 会删同机其他服务 named volume，不可逆）。
@@ -238,15 +239,27 @@
     ⚠️ **唔备份唔准升级**。
 
     **备份命名格式（MASTER 钦定，沿用 v1.65.0.1 成功案例）**：
-    `edgeever-data-bak-<目标版本>-<YYYYMMDD>.tar.zst`
-    例：`edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst`
+    `edgeever-data-bak-<当前运行版本>-<YYYYMMDD>.tar.zst`
+
+    ⚠️ **用「当前运行版本」唔用「待部署版本」** —— 备份系**升级前**做嘅，装住嘅系旧版本嘅 data。
+    例（本次 v1.90.0.1 → v2.23.0.1）：`edgeever-data-bak-fde-v1.90.0.1-20261108.tar.zst`
+    （对照 v1.65.0.1 成功案例：备份时跑紧 v1.65.0.1，所以系 `-fde-v1.65.0.1-`）
+
+    ⚠️ **备份前先确认当前跑紧边个版本**（唔好凭记忆，直接问容器）：
+
+       # 由 .env 读现有版本（compose 目录）
+       grep EDGE_EVER_VERSION .env        # 例：EDGE_EVER_VERSION=v1.90.0.1
+       # 或由 /api/health 读 build/migration
+       curl -s http://127.0.0.1:8787/api/health
 
        # ① 停容器（SQLite 一致性要求，不能热备）
        cd /opt/edgeever        # ← compose 所在目录（按你实际路径）
        docker compose stop edgeever
 
        # ② 整份备份（zstd 压缩，多线程，保留权限）
-       BAK="edgeever-data-bak-fde-v2.23.0.1-$(date +%Y%m%d).tar.zst"
+       # ⚠️ 下面 CUR 换成你上一步确认嘅当前运行版本（本次 = fde-v1.90.0.1）
+       CUR="fde-v1.90.0.1"
+       BAK="edgeever-data-bak-${CUR}-$(date +%Y%m%d).tar.zst"
        sudo tar -I 'zstd -T0 -3' -cpf "$BAK" edgeever-data/
        ls -lh "$BAK"
 
@@ -555,8 +568,8 @@
     # ② 先把失败状态留档（唔好直接删，方便事后分析；保留至少 72 小时）
     mv edgeever-data "edgeever-data-failed-$(date +%Y%m%d-%H%M%S)"
 
-    # ③ 还原备份（用第 2.5 步做嘅 .tar.zst 包）
-    zstd -dc edgeever-data-bak-fde-v2.23.0.1-<你的日期>.tar.zst | tar -xp
+    # ③ 还原备份（用第 2.5 步做嘅 .tar.zst 包，命名带嘅系「备份时嘅运行版本」）
+    zstd -dc edgeever-data-bak-fde-v1.90.0.1-<你的日期>.tar.zst | tar -xp
     ls -la edgeever-data/        # 确认还原成功
 
     # ④ 代码回滚
