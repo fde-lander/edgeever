@@ -12,6 +12,7 @@
 
 > **版本变更记录**
 >
+> - **V2.11（2026-11-08）**：🔎 **修正备份校验判据（MASTER 抓到错误）**。原写 `tar -t | wc -l # 应 > 100` —— 呢个门槛系从旧文档照搬，**实际错**：`edgeever-data` 只有 3 类东西（`edgeever.sqlite` / `edgeever-secrets.json` / `resources/` 每附件一个 blob），全新安装或附件少时条目数只有 **3-6**，用「>100」会把正常备份误判为失败。改为**关键文件在场判据**：必须见到 `edgeever.sqlite`（数据库）+ `edgeever-secrets.json`（凭据密钥），有附件则 `resources/` 应有 blob；文件数只作参考并注明「新生 3-6 属正常」。sanity sandbox 实测：2 文件 + 1 附件 → `wc -l` = **5**（含 2 个目录条目），证实旧门槛不可靠。
 > - **V2.10（2026-11-08）**：🔐 **备份格式对齐 MASTER 最新成功案例（v1.65.0.1 实测验证）**。改动三点：① 备份文件名由 `edgeever-data-backup-<TS>.tar.gz` → **`edgeever-data-bak-<目标版本>-<YYYYMMDD>.tar.zst`**（带版本号，回溯清晰；例 `edgeever-data-bak-fde-v2.23.0.1-20261108.tar.zst`）；② 压缩工具 gzip → **zstd**（`tar -I 'zstd -T0 -3' -cpf`），校验改 `zstd -dc | tar -t`，还原改 `zstd -dc | tar -xp`；③ 第零步新增 **zstd ≥ 1.4 前置依赖检查**（体检项 4，apt install 清单同步加 zstd）。**临时区 sandbox 实测通过**：create → `zstd -dc | tar -t` 枚举 → 文件计数 → `.db` grep 全链路可用（zstd 1.5.7 / GNU tar 1.35，`-I` 参数经 `tar --help` 核实）。
 > - **V2.9（2026-11-08）**：🧹 **补齐「Build 完成后释放空间」章节（MASTER 要求）**。改动四点：① 原「第五步」重编为 **第四步**（原文编号由第三步直接跳第五步，缺第四步），并大幅扩写为 8 小节（占用判读 / build cache / 悬空+旧镜像 / `docker system prune` 陷阱 / 源码残留 + `git gc` / Bun cache / 一键脚本 / 回收量参考表）；② 日常升级流程新增 **第 7 步「释放空间（必做）」**——原文 1-6 步之后**冇任何清理指引**，流程断点；③ **参数实测更正**：`--keep-storage` 已废弃（Docker 29.x 实测提示 `keep-storage flag has been changed to reserved-space`）→ 改用 `--reserved-space` / `--max-used-space` / `--min-free-space`；④ 修正两处失效引用（第 57 行 / 第 163 行「见第五步」→「见第四步」）。新增安全红线：**绝对唔好**跑 `docker system prune -a --volumes -f`（`-a` 会删回滚镜像、`--volumes` 会删同机其他服务 named volume，不可逆）。
 > - **V2.8（2026-11-08）**：目标版本 v1.90.0.1 → **v2.23.0.1**（clone 分支 / build 命令 / .env 示例 / 日常升级步骤 / 回滚锚点全部同步）。本次为**超大版本 merge**（v1.90.0 → v2.23.0，上游 **964 commits / 2402 files / 跨 33 个 minor**）。**新增 37 个 migration（0056-0092）**，其中 ⚠️ **5 个会改历史数据**（0058 / 0059 / 0070 / 0071 / 0078）+ ⚠️ **0064 会 DROP 5 张表**（video transcription 退役，属上游未发布功能）—— 升级前**必须**备份 data（见第 9.1 章 HARD-GATE）。⚠️ **build stage 新增 chromium + nodejs 安装**（上游 Dockerfile，仅 build 机器用；**runtime 镜像零 chromium 零 node**）→ 首次 build 会下载约 200-250MB、慢 +3-8 分钟属正常。本 fork 额外加 **Plan D pre-flight guard**（`RUN bun run check:poster:thumbnails`）：若 poster 缩图 stale，build 会在几秒内 fail-fast 并打印修复指引。本版 FDE 修复：**A 点** `isReadQuery()` 不再把 `WITH...UPDATE` 误判为读查询（TDD 10 断言）+ **Q4** `poster_render_jobs` 加入 hiding wrapper（S11）。验证矩阵新增 **V9 = poster_render_jobs 隔离验证**。
@@ -250,14 +251,26 @@
        ls -lh "$BAK"
 
        # ③ ⚠️ 校验备份完整性（不校验 = 不算备份完）
-       zstd -dc "$BAK" | tar -t | head -20
-       zstd -dc "$BAK" | tar -t | wc -l                              # 应 > 100
-       zstd -dc "$BAK" | tar -tv | grep -E '\.db|\.sqlite'           # 应见到 db 文件
+       # 注意：data 目录只有 3 类东西，文件数天然少，唔可以用「>100」做门槛
+       #   1. edgeever.sqlite（+ 可能有 -wal / -shm 伴生档）
+       #   2. edgeever-secrets.json
+       #   3. resources/ 内每个附件一个 blob（数量随你实际附件数变）
+       zstd -dc "$BAK" | tar -t | head -20                       # 睇到目录结构
+       zstd -dc "$BAK" | tar -t | wc -l                        # 条目数（含目录，新生/少附件 3-6，有附件会更多）
+       zstd -dc "$BAK" | tar -tv | grep -E '\.sqlite|\.db'      # ★ 必须见到 edgeever.sqlite
+       zstd -dc "$BAK" | tar -tv | grep 'edgeever-secrets.json' # ★ 必须见到 secrets
+       zstd -dc "$BAK" | tar -tv | grep 'resources/' | head -3  # 有附件就应见到 blob
 
-       # ④ 记低备份路径（写进部署记录）
+       # ④ 记低备份路径 + 大小（写进部署记录）
+       ls -lh "$BAK"
        echo "BACKUP=${PWD}/$BAK"
 
-    **判读**：zstd 解压失败 / tar 列出失败 / 文件数 < 100 / 无 .db 文件 → **停手排查，不许继续**。
+    **判读（唔靠文件数，靠关键文件在场）**：
+    - `zstd -dc` 报错 / tar 列不出 → **停手**（档案损坏）
+    - **冇 `edgeever.sqlite`** → **停手**（数据库冇入包，备份废）
+    - **冇 `edgeever-secrets.json`** → **停手**（还原后凭据密钥丢失，AI/加密功能会坏）
+    - 有附件但 `resources/` 完全冇条目 → **停手**（附件未入包）
+    - 文件数只作参考：全新安装得 3-6 个条目属正常；**唔好见到「唔够 100」就以为失败**
 
     ⚠️ 用 zstd 而非 gzip 的原因：实测同体积压缩率更高、`-T0` 多线程快 3-5 倍，data 大时省很多时间。
     ⚠️ 本项目已是 **bind mount**（`./edgeever-data:/data`），**唔好用 `docker volume inspect`**（Phase 14 已从 named volume 迁走）。
