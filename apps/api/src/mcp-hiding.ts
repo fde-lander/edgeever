@@ -339,13 +339,37 @@ function findTableRefs(tokens: Token[]): TableRef[] {
 /**
  * Determine if SQL is a read query (SELECT or WITH...SELECT).
  * INSERT/UPDATE/DELETE are NOT rewritten.
+ *
+ * SPEC V1.2 §6.4 (MASTER directive 2026-11-08): a leading `WITH` is NOT proof
+ * of a read. A CTE can prefix a write statement (`WITH ... UPDATE/INSERT/
+ * DELETE`) — upstream `deleteNotebookTree` is exactly that shape. Feeding such
+ * a statement into rewriteSelectSql() misplaces the injection fragment; today
+ * it happens to be harmless, but that is coincidence, not contract. So scan the
+ * token stream for the FIRST statement keyword at paren depth 0 and treat only
+ * SELECT as a read.
+ *
+ * Design invariants (pinned by tests/mcp-hiding-with-update.test.ts):
+ * 1. `depth === 0` gates the decision — SELECTs inside a CTE body must not count.
+ * 2. `WITH` makes us keep scanning, never an automatic READ.
+ * 3. Anything unrecognised falls through to `false` = WRITE = passthrough,
+ *    which fails safe (no injection) rather than rewriting blindly.
  */
 function isReadQuery(tokens: Token[]): boolean {
+  let depth = 0;
   for (const tok of tokens) {
     if (tok.type === "whitespace") continue;
-    return tok.upper === "SELECT" || tok.upper === "WITH";
+    if (tok.type === "punct") {
+      if (tok.text === "(") depth++;
+      else if (tok.text === ")") depth--;
+      continue;
+    }
+    if (tok.type !== "keyword") continue;
+    if (depth !== 0) continue; // inside a CTE body / subquery — not the outer statement
+    if (tok.upper === "SELECT") return true;
+    if (tok.upper === "WITH") continue; // CTE prefix — keep scanning for the real statement
+    if (tok.upper === "INSERT" || tok.upper === "UPDATE" || tok.upper === "DELETE") return false;
   }
-  return false;
+  return false; // unknown shape → treat as write (passthrough, fail-safe)
 }
 
 /**
