@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { NEW_IMAGE_WIDTH_PERCENT } from "./image-display.ts";
 import {
   countMemoCharacters,
+  DEFAULT_MEMO_TITLE,
+  getMemoDisplayTitle,
   docToMarkdown,
   docToText,
   markdownToDoc,
@@ -133,6 +136,25 @@ describe("PDF attachment Markdown compatibility", () => {
 });
 
 describe("file attachment Markdown compatibility", () => {
+  test("keeps literal entities and escapes in attachment labels without changing resource URL suffixes", () => {
+    const url = "/api/v1/resources/res_label/blob?download=1&copy=2#page=3";
+    for (const [extension, type] of [["pdf", PDF_ATTACHMENT_NODE_TYPE], ["zip", FILE_ATTACHMENT_NODE_TYPE]]) {
+      const label = `literal &copy; &#91; \\[.${extension}`;
+      const doc = { type: "doc", content: [{ type: "paragraph", content: [{ type, attrs: { url, label } }] }] };
+      const reopened = markdownToDoc(docToMarkdown(doc)).content[0].content[0];
+      expect(reopened).toMatchObject({ type, attrs: { label, url } });
+    }
+  });
+
+  test("retains inline attachment labels containing an escaped opening bracket", () => {
+    for (const [extension, type] of [["pdf", PDF_ATTACHMENT_NODE_TYPE], ["zip", FILE_ATTACHMENT_NODE_TYPE]]) {
+      const markdown = `See [report\\[2026.${extension}](/api/v1/resources/res_bracket/blob)`;
+      const parsed = markdownToDoc(markdown);
+      expect(parsed.content[0].content.some(node => node.type === type)).toBe(true);
+      expect(markdownToDoc(docToMarkdown(parsed)).content[0].content.some(node => node.type === type)).toBe(true);
+    }
+  });
+
   test("parses a stored non-PDF resource link as an attachment card", () => {
     const markdown = "[Attachment: budget.xlsx](/api/v1/resources/res_sheet/blob)";
     const doc = markdownToDoc(markdown);
@@ -154,6 +176,46 @@ describe("file attachment Markdown compatibility", () => {
   test("keeps an ordinary standalone web link as text", () => {
     const doc = markdownToDoc("[EdgeEver](https://edgeever.org)");
     expect(doc.content[0]?.content?.[0]?.type).toBe("text");
+  });
+
+  test("keeps a research category ending in .AI as a link, including an older rich-text link", () => {
+    const markdown = "[arXiv cs.AI](https://arxiv.org/list/cs.AI/recent)";
+    const parsed = markdownToDoc(markdown);
+    expect(parsed.content[0]?.content?.[0]).toMatchObject({
+      type: "text",
+      text: "arXiv cs.AI",
+      marks: [{ type: "link", attrs: { href: "https://arxiv.org/list/cs.AI/recent" } }],
+    });
+    expect(resolveMemoContentDoc(parsed, markdown).content[0]?.content?.[0]?.type).toBe("text");
+    expect(markdownToDoc("[arXiv cs\\.AI](https://arxiv.org/list/cs.AI/recent)").content[0]?.content?.[0]?.type)
+      .toBe("text");
+  });
+
+  test("repairs an already saved false attachment card without changing real .ai attachments", () => {
+    const url = "https://arxiv.org/list/cs.AI/recent";
+    const savedDoc = {
+      type: "doc",
+      content: [{
+        type: "paragraph",
+        content: [{ type: FILE_ATTACHMENT_NODE_TYPE, attrs: { label: "arXiv cs.AI", filename: "arXiv cs.AI", url } }],
+      }, {
+        type: "paragraph",
+        content: [{ type: FILE_ATTACHMENT_NODE_TYPE, attrs: { label: "icon.ai", url: "/api/v1/resources/res_ai/blob" } }],
+      }],
+    };
+    const resolved = resolveMemoContentDoc(savedDoc, "");
+    expect(resolved.content[0]?.content?.[0]).toMatchObject({
+      type: "text",
+      text: "arXiv cs.AI",
+      marks: [{ type: "link", attrs: { href: url } }],
+    });
+    expect(resolved.content[1]?.content?.[0]?.type).toBe(FILE_ATTACHMENT_NODE_TYPE);
+    expect(docToMarkdown(resolved).split("\n")[0]).toBe(`[arXiv cs.AI](${url})`);
+  });
+
+  test("recognizes an explicitly marked external attachment", () => {
+    expect(markdownToDoc("[Attachment: icon.ai](https://example.com/download?id=1)").content[0]?.content?.[0]?.type)
+      .toBe(FILE_ATTACHMENT_NODE_TYPE);
   });
 
   test("preserves an empty external link through Markdown and JSON", () => {
@@ -360,6 +422,59 @@ describe("Mermaid Markdown conversion", () => {
 describe("LaTeX Markdown conversion", () => {
   const markdown = "Euler: $e^{i\\pi}+1=0$.\n\n$$\n\\frac{a}{b}\n$$";
 
+  test("renders the issue #514 math fence while preserving its inline code example", () => {
+    const inline = "$\\Gamma(n) = (n-1)!\\quad\\forall n\\in\\mathbb N$";
+    const latex = "\\Gamma(z) = \\int_0^\\infty t^{z-1}e^{-t}dt\\,.";
+    const doc = markdownToDoc(`The Gamma function satisfying \`${inline}\`\n\n\`\`\`math\n${latex}\n\`\`\``);
+    expect(doc.content[0].content[1]).toMatchObject({ type: "text", text: inline, marks: [{ type: "code" }] });
+    expect(doc.content[1]).toEqual({ type: "blockMath", attrs: { latex } });
+    expect(markdownToDoc(docToMarkdown(doc))).toEqual(doc);
+  });
+
+  test("uses standard fence parsing for tilde, longer, nested, and ordinary fences", () => {
+    for (const fence of ["~~~", "````"]) {
+      expect(markdownToDoc(`${fence}math\nx^2\n${fence}`).content[0]).toEqual({
+        type: "blockMath", attrs: { latex: "x^2" },
+      });
+    }
+    expect(markdownToDoc("> ```math\n> x^2\n> ```").content[0].content[0].type).toBe("blockMath");
+    for (const language of ["", "latex", "javascript", "mermaid"]) {
+      expect(markdownToDoc(`\`\`\`${language}\n$x$\n\`\`\``).content[0].type).toBe("codeBlock");
+    }
+    expect(markdownToDoc("```math\n\n```").content[0].type).toBe("codeBlock");
+    expect(markdownToDoc("````markdown\n```math\nx^2\n```\n````").content[0].type).toBe("codeBlock");
+  });
+
+  test("keeps code dollar pairs unchanged through repeated Markdown round trips", () => {
+    for (const source of ["`$x$`", "```js\nconst cost = '$100$';\nconst formula = '$x$';\n```", "```\n$$x^2$$\n```"]) {
+      const original = markdownToDoc(source);
+      let current = original;
+      for (let i = 0; i < 3; i += 1) current = markdownToDoc(docToMarkdown(current));
+      expect(current).toEqual(original);
+      expect(docToMarkdown(original)).toBe(source);
+    }
+  });
+
+  test("upgrades legacy math code blocks without losing rich table cells or image widths", () => {
+    const legacy = {
+      type: "doc",
+      content: [
+        { type: "codeBlock", attrs: { language: "math" }, content: [{ type: "text", text: "x^2" }] },
+        { type: "table", content: [{ type: "tableRow", content: [{ type: "tableCell", content: [
+          { type: "paragraph", content: [{ type: "text", text: "Rich", marks: [{ type: "bold" }] }] },
+          { type: "image", attrs: { src: "/image.png", width: "50%" } },
+        ] }] }] },
+        { type: "paragraph", content: [{ type: "text", text: "$x$", marks: [{ type: "code" }] }] },
+      ],
+    };
+    const before = JSON.stringify(legacy);
+    const resolved = resolveMemoContentDoc(legacy, "```math\nx^2\n```");
+    expect(resolved.content[0]).toEqual({ type: "blockMath", attrs: { latex: "x^2" } });
+    expect(resolved.content.slice(1)).toEqual(legacy.content.slice(1));
+    expect(JSON.stringify(legacy)).toBe(before);
+    expect(resolveMemoContentDoc(resolved, docToMarkdown(resolved))).toEqual(resolved);
+  });
+
   test("round-trips inline and block formula nodes", () => {
     const doc = markdownToDoc(markdown);
 
@@ -495,9 +610,9 @@ hello **world**
     expect(doc.content[0]?.type).toBe("details");
     expect(doc.content[0]?.content?.[1]?.content?.[0]).toMatchObject({
       type: "image",
-      attrs: { src: "https://example.com/a.png", alt: "pic", width: 35 },
+      attrs: { src: "https://example.com/a.png", alt: "pic", width: NEW_IMAGE_WIDTH_PERCENT },
     });
-    expect(docToMarkdown(doc)).toContain('<img src="https://example.com/a.png" alt="pic" width="35%" />');
+    expect(docToMarkdown(doc)).toContain(`<img src="https://example.com/a.png" alt="pic" width="${NEW_IMAGE_WIDTH_PERCENT}%" />`);
   });
 
   test("plays a remote video inside details through the existing attachment", () => {
@@ -717,5 +832,18 @@ describe("plugin embed Markdown compatibility", () => {
     expect(parsed.content[0]).toMatchObject({ type: PLUGIN_EMBED_NODE_TYPE, attrs: attributes });
     expect(docToMarkdown(parsed)).toBe(markdown);
     expect(resolveMemoContentDoc(parsed, "fallback").content[0].type).toBe(PLUGIN_EMBED_NODE_TYPE);
+  });
+});
+
+describe("getMemoDisplayTitle", () => {
+  test("shows the localized label for empty and default untitled titles", () => {
+    expect(getMemoDisplayTitle("", "Untitled note")).toBe("Untitled note");
+    expect(getMemoDisplayTitle(null, "Untitled note")).toBe("Untitled note");
+    expect(getMemoDisplayTitle(` ${DEFAULT_MEMO_TITLE} `, "Notatka bez tytułu")).toBe("Notatka bez tytułu");
+  });
+
+  test("keeps real titles, including Chinese ones", () => {
+    expect(getMemoDisplayTitle("  Plan  ", "Untitled note")).toBe("Plan");
+    expect(getMemoDisplayTitle("会议记录", "Untitled note")).toBe("会议记录");
   });
 });

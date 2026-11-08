@@ -12,6 +12,11 @@ export type Bindings = {
   EDGE_EVER_CONTAINER_IMAGE?: string;
   EDGE_EVER_DEPLOYMENT_TRIGGER?: string;
   EDGE_EVER_DEPLOYMENT_METHOD?: string;
+  EDGE_EVER_BUILD_CREATED_AT?: string;
+  EDGE_EVER_BUILD_TRIGGER?: string;
+  EDGE_EVER_BUILD_METHOD?: string;
+  /** Creation time of the active deployment version, supplied by a runtime adapter. */
+  deploymentVersionCreatedAt?: string;
   EDGE_EVER_AUTH_PASSWORD?: string;
   EDGE_EVER_AUTH_PASSWORD_HASH?: string;
   EDGE_EVER_AUTH_PASSWORD_FALLBACK?: string;
@@ -29,9 +34,14 @@ export type Bindings = {
   EDGE_EVER_DEMO_MODE?: string;
   EDGE_EVER_LOCAL_DEMO_SEED?: string;
   EDGE_EVER_ALLOW_UNAUTHENTICATED?: string;
+  /** HTTPS URL of the signed community registry. Unset disables the catalog. */
+  EDGE_EVER_COMMUNITY_REGISTRY_URL?: string;
 };
 
-export type WorkerBindings = Omit<Bindings, "storage" | "publicNetworkFetch"> & CloudflareStorageBindings;
+export type WorkerBindings = Omit<Bindings, "storage" | "publicNetworkFetch" | "deploymentVersionCreatedAt"> & CloudflareStorageBindings & {
+  ASSETS: Fetcher;
+  CF_VERSION_METADATA?: { timestamp?: string };
+};
 
 export type AuthContext = {
   kind: "user" | "agent";
@@ -44,6 +54,8 @@ export type AuthContext = {
   role: "owner" | "member";
   sessionId?: string;
   tokenId?: string;
+  /** Recovery-code session that must rebind TOTP before any other access. */
+  mfaRestricted?: boolean;
 };
 
 export type AuditActor = {

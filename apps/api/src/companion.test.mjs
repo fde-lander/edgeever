@@ -9,7 +9,7 @@ import { registerCompanionRoutes } from "./companion-routes.ts";
 import { beginCompanionTurn, checkpointCompanionTurn, clearCompanionHistory, companionRevision, forgetCompanionMemory,
   getCompanionTurn, importCompanionMemories, listCompanionMemories, listCompanionTurns, saveCompanionMemory } from "./companion-service.ts";
 import { parseCompanionMentionQuery } from "@edgeever/shared";
-import { COMPANION_INSTRUCTIONS, companionMessages, companionTurnInstructions, companionUserContent, selectCompanionMemories, streamCompanion } from "./companion-runtime.ts";
+import { COMPANION_INSTRUCTIONS, companionAgentInstructions, companionMessages, companionTurnInstructions, companionUserContent, selectCompanionMemories, streamCompanion } from "./test-support/companion-model.ts";
 import { applyCompanionAction, proposeCompanionAction, listCompanionActions, dismissCompanionAction } from "./companion-actions.ts";
 import { createMemoRecord, getMemoDetail, updateMemoRecord } from "./memo-service.ts";
 import { COMPANION_MCP_TOOLS } from "./companion-tool-catalog.ts";
@@ -35,14 +35,14 @@ function fixture(options = {}) {
   });
   registerCompanionRoutes(app, { isDemoMode: () => options.demo ?? false,
     loadModel: options.loadModel ?? (async () => ({ modelId: "test-model" })),
-    loadCredentials: options.loadCredentials, stream: options.stream });
+    loadCredentials: options.loadCredentials ?? options.loadModel, resolveModel: options.resolveModel, stream: options.stream });
   const request = (path, method = "GET", body, headers = {}) => app.request(`/api/v1/companion/${path}`, {
     method, headers: { "Content-Type": "application/json", ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }, { storage });
   const context = { env: { storage }, get: () => ({ kind: "user", actorType: "user", actorId: scope.ownerId, workspaceId: scope.workspaceId, role: "member", scopes: [] }) };
   return { sqlite, db: storage.db, request, context };
 }
-const parseEvents = text => text.split("\n\n").filter(Boolean).map(frame => JSON.parse(frame.slice(6)));
+const _parseEvents = text => text.split("\n\n").filter(Boolean).map(frame => JSON.parse(frame.slice(6)));
 const finish = { type: "finish", finishReason: { unified: "stop" }, usage: {
   inputTokens: { total: 12 }, outputTokens: { total: 8 },
 } };
@@ -79,7 +79,11 @@ describe("companion turn context", () => {
     expect(companionUserContent(input({
       message: "帮我新建一个RAG原理的思维导图。",
       focus: { memoId: "memo_1", notebookId: "nb_demo_features", notebookTitle: "功能演示" },
-    }))).toContain("use this open notebook");
+    }))).toContain("saved in the inbox notebook (等待分类)");
+    expect(companionUserContent(input({
+      message: "帮我新建一个RAG原理的思维导图。",
+      focus: { memoId: "memo_1", notebookId: "nb_demo_features", notebookTitle: "功能演示" },
+    }))).toContain("Do not ask which notebook");
     expect(companionUserContent(input({
       message: "根据这篇做思维导图",
       focus: {
@@ -91,6 +95,40 @@ describe("companion turn context", () => {
       message: "给这张图加一个评估节点",
       focus: { memoId: "memo_1", notebookId: "nb_demo_features", title: "RAG 原理", diagramKind: "mind-map" },
     }))).toContain("editable mind-map");
+    const independentDiagram = companionUserContent(input({
+      message: "帮我生成一个AI大模型的思维导图。",
+      focus: { memoId: "memo_distill", title: "大模型蒸馏流程图", diagramKind: "flowchart" },
+    }));
+    expect(independentDiagram).toContain("did not refer to the note open in the editor");
+    expect(independentDiagram).toContain("帮我生成一个AI大模型的思维导图。");
+    expect(independentDiagram).not.toContain("memo_distill");
+    expect(independentDiagram).not.toContain("大模型蒸馏流程图");
+    expect(independentDiagram).not.toContain("Call get_diagram");
+    const referredDiagram = companionUserContent(input({
+      message: "根据这篇生成思维导图",
+      focus: { memoId: "memo_distill", title: "大模型蒸馏流程图", diagramKind: "flowchart" },
+    }));
+    expect(referredDiagram).toContain("[note:memo_distill]");
+    expect(referredDiagram).toContain("Call get_diagram");
+    expect(referredDiagram).not.toContain("did not refer to the note open in the editor");
+    const attachedDiagram = companionUserContent(input({
+      message: "帮我生成一个AI大模型的思维导图。",
+      focus: {
+        memoId: "memo_distill", title: "大模型蒸馏流程图",
+        contentMarkdown: "教师模型、软标签、学生模型。",
+      },
+    }));
+    expect(attachedDiagram).toContain("教师模型、软标签、学生模型。");
+    expect(attachedDiagram).toContain("[note:memo_distill]");
+    for (const message of ["生成思维导图", "生成一个思维导图", "整理成思维导图", "把这个做成思维导图", "画一个流程图"]) {
+      const fromOpenNote = companionUserContent(input({
+        message,
+        focus: { memoId: "memo_distill", title: "大模型蒸馏流程图", diagramKind: "flowchart" },
+      }));
+      expect(fromOpenNote, message).toContain("[note:memo_distill]");
+      expect(fromOpenNote, message).toContain("大模型蒸馏流程图");
+      expect(fromOpenNote, message).not.toContain("did not refer to the note open in the editor");
+    }
     expect(companionUserContent(input({
       message: "整理这些",
       mentions: [{ type: "notebook", id: "nb_study", title: "学习资料" }],
@@ -100,6 +138,43 @@ describe("companion turn context", () => {
     expect(companionTurnInstructions(input({ allowNotes: true }))).toBe("");
     expect(parseCompanionMentionQuery("see @note", 9)).toEqual({ query: "note", start: 4, end: 9 });
     expect(parseCompanionMentionQuery("hello", 5)).toBeNull();
+  });
+
+  test("a replacement follow-up retains the latest translation after an older, unrelated translation", () => {
+    const next = input({ allowNotes: true, useMemory: false, message: "用翻译后的内容替换原笔记。",
+      focus: { memoId: "memo_current", title: "Napoleon quote" } });
+    const base = { thread_id: next.threadId, status: "completed", memory_revision: 3, use_memory: 0,
+      allow_notes: 1, sources_json: "[]" };
+    const history = [
+      { ...base, id: "latest", message: "翻译一下当前笔记。", response: "拿破仑说：当你的敌人正在犯错时，千万不要打断他。" },
+      { ...base, id: "older", message: "请把下面这段翻译成日文：极客知识库", response: "ギーク知識ベース" },
+    ];
+    const messages = companionMessages(next, history, 3);
+    expect(messages.map(message => message.content)).toEqual([
+      history[1].message, history[1].response, history[0].message, history[0].response,
+      expect.stringContaining("用翻译后的内容替换原笔记。"),
+    ]);
+    expect(messages.at(-1).content).toContain("[note:memo_current]");
+    expect(COMPANION_INSTRUCTIONS).toContain("An older translation of different text does not override the latest relevant translation.");
+    expect(COMPANION_INSTRUCTIONS).toContain("write inline LaTeX as \\(...\\)");
+    expect(COMPANION_INSTRUCTIONS).toContain("Do not use $...$ for inline math");
+  });
+
+  test("unqualified translations follow conversation language and ask only when source already matches", () => {
+    const instructions = (message, locale) => companionAgentInstructions(input({ locale, message, allowNotes: true }), [], []);
+    expect(instructions("翻译一下当前笔记。", "ja")).toContain("Simplified Chinese (current request)");
+    expect(instructions("このノートを翻訳して", "zh-CN")).toContain("Japanese (current request)");
+    expect(instructions("このノートを翻訳して", "zh-CN")).toContain("Reply in Japanese unless the user asks otherwise.");
+    expect(instructions("Translate this note", "zh-CN")).toContain("English (current request)");
+    expect(instructions("Translate this note", "zh-CN")).toContain("source is already mainly in English");
+    expect(instructions("Translate this note", "zh-CN")).toContain("otherwise ask which other language");
+    const next = input({ locale: "zh-CN", message: "🔄", useMemory: false });
+    const prior = { id: "prior", thread_id: next.threadId, status: "completed", memory_revision: 3, use_memory: 0,
+      allow_notes: 0, sources_json: "[]", message: "このノートを翻訳して", response: "Translation" };
+    expect(companionAgentInstructions(next, [], [], [prior], 3)).toContain("Japanese (recent conversation)");
+    expect(companionAgentInstructions(next, [], [], [{ ...prior, use_memory: 1 }], 3)).toContain("Simplified Chinese (interface)");
+    expect(companionAgentInstructions({ ...next, message: "请翻译我正在看的内容，并把译文作为回复写给我。" }, [], [], [prior], 3))
+      .toContain("Japanese (recent conversation)");
   });
 });
 
@@ -317,7 +392,7 @@ describe("companion HTTP contracts", () => {
   test("validates payloads, sanitizes provider errors and scopes export", async () => {
     const { request, db } = fixture({ loadModel: async () => { throw new Error("API-KEY-secret"); } });
     expect((await request("memories", "POST", { content: "x".repeat(501) })).status).toBe(400);
-    const failure = await request("turns", "POST", input());
+    const failure = await request("turns/prepare", "POST", input());
     expect(failure.status).toBe(503);
     expect(await failure.text()).not.toContain("API-KEY-secret");
     await saveCompanionMemory(db, scope, { content: "private" });
@@ -325,129 +400,7 @@ describe("companion HTTP contracts", () => {
     expect((await exported.json()).memories).toEqual([]);
     expect(exported.headers.get("cache-control")).toBe("no-store");
   });
-  test("persists displayed chunks and usage, recovers by ID without duplicate model calls", async () => {
-    let calls = 0;
-    const { request, db } = fixture({ stream: async args => {
-      calls++;
-      return { totalUsage: Promise.resolve({ inputTokens: 12, outputTokens: 8 }),
-        fullStream: (async function* () {
-          yield { type: "text-delta", text: "a".repeat(320) };
-          expect((await getCompanionTurn(db, scope, args.input.id)).response).toHaveLength(320);
-          yield { type: "text-delta", text: " done" };
-        })() };
-    } });
-    const payload = input();
-    const response = await request("turns", "POST", payload);
-    const events = parseEvents(await response.text());
-    expect(events.at(-1)).toMatchObject({ type: "done", turn: { status: "completed", inputTokens: 12, outputTokens: 8 } });
-    expect((await request(`turns/${payload.id}`)).status).toBe(200);
-    expect((await request(`turns/${payload.id}`, "GET", undefined, { "x-test-other": "1" })).status).toBe(404);
-    expect((await request("turns", "POST", payload)).status).toBe(409);
-    expect(calls).toBe(1);
-  });
-  test("stream failure preserves prefix but does not disclose provider details", async () => {
-    const { request, db } = fixture({ stream: async () => ({ totalUsage: Promise.resolve({}), fullStream: (async function* () {
-      yield { type: "text-delta", text: "partial response" };
-      throw new Error("provider-secret");
-    })() }) });
-    const payload = input();
-    const result = await (await request("turns", "POST", payload)).text();
-    expect(result).not.toContain("provider-secret");
-    expect(parseEvents(result).some(event => event.type === "error" && event.code === "companion_generation_failed")).toBe(true);
-    expect((await getCompanionTurn(db, scope, payload.id))).toMatchObject({ status: "failed", response: "partial response" });
-  });
-  test("maps provider HTTP 400 without leaking the response body", async () => {
-    const { request } = fixture({ stream: async () => ({ totalUsage: Promise.resolve({}), fullStream: (async function* () {
-      const error = new Error("Invalid schema sk-secret");
-      error.statusCode = 400;
-      throw error;
-    })() }) });
-    const result = await (await request("turns", "POST", input())).text();
-    expect(result).not.toContain("sk-secret");
-    expect(parseEvents(result).some(event => event.type === "error" && event.code === "ai_provider_request_rejected")).toBe(true);
-  });
-  test("concurrent memory change prevents final outdated output", async () => {
-    const { request, db } = fixture({ stream: async () => ({ totalUsage: Promise.resolve({}), fullStream: (async function* () {
-      yield { type: "text-delta", text: "a".repeat(300) };
-      await saveCompanionMemory(db, scope, { content: "new preference" });
-      yield { type: "text-delta", text: "outdated final" };
-    })() }) });
-    const payload = input();
-    const result = await (await request("turns", "POST", payload)).text();
-    expect(result).not.toContain("outdated final");
-    expect((await getCompanionTurn(db, scope, payload.id)).status).toBe("cancelled");
-    expect(parseEvents(result).some(event => event.type === "error")).toBe(true);
-  });
-  test("text before a tool is sealed as process, later text is the answer", async () => {
-    const { request } = fixture({ stream: async args => ({
-      totalUsage: Promise.resolve({}),
-      fullStream: (async function* () {
-        yield { type: "text-delta", text: "Let me read the note." };
-        args.run?.tools.push({ id: "tool-1", name: "get_memo", status: "done", effects: [] });
-        await args.run?.onProgress?.();
-        yield { type: "text-delta", text: "Created the map." };
-      })(),
-    }) });
-    const events = parseEvents(await (await request("turns", "POST", input({ allowNotes: true }))).text());
-    expect(events.some(event => event.type === "process" && event.text.includes("Let me read the note."))).toBe(true);
-    expect(events.at(-1).turn.process).toContain("Let me read the note.");
-    expect(events.at(-1).turn.response).toBe("Created the map.");
-  });
-  test("tool-only runs complete without assistant text and persist the timeline", async () => {
-    const { request, db } = fixture({ stream: async args => {
-      args.run?.tools.push({ id: "tool-1", name: "create_memo", status: "done", effects: [{ kind: "created", memoId: "memo_1", title: "New" }] });
-      await args.run?.onProgress?.();
-      return { totalUsage: Promise.resolve({ inputTokens: 4, outputTokens: 0 }), fullStream: (async function* () {})() };
-    } });
-    const payload = input({ allowNotes: true });
-    const events = parseEvents(await (await request("turns", "POST", payload)).text());
-    expect(events.some(event => event.type === "tools" && event.tools[0]?.name === "create_memo")).toBe(true);
-    expect(events.at(-1)).toMatchObject({ type: "done", turn: { status: "completed", tools: [{ name: "create_memo" }] } });
-    expect((await getCompanionTurn(db, scope, payload.id)).tools_json).toContain("create_memo");
-  });
-  test("asking the user pauses the turn until answers resume it", async () => {
-    let calls = 0;
-    const { request, db } = fixture({ stream: async args => {
-      calls++;
-      if (calls === 1) {
-        args.run?.questions.push({ id: "notebook", prompt: "Which notebook?", inputType: "single_select", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] });
-        args.run.pause.ask = true;
-        await args.run?.onProgress?.();
-      }
-      return { totalUsage: Promise.resolve({}), fullStream: (async function* () {
-        yield { type: "text-delta", text: calls === 1 ? "Need a notebook." : " Using A." };
-      })() };
-    } });
-    const payload = input({ allowNotes: true });
-    const events = parseEvents(await (await request("turns", "POST", payload)).text());
-    expect(events.at(-1).turn.status).toBe("interrupted");
-    expect(events.at(-1).turn.questions[0].id).toBe("notebook");
-    expect((await request(`turns/${payload.id}/resume`, "POST", {})).status).toBe(400);
-    const resumed = parseEvents(await (await request(`turns/${payload.id}/resume`, "POST", { answers: [{ questionId: "notebook", optionIds: ["a"] }] })).text());
-    expect(resumed.at(-1).turn.status).toBe("completed");
-    expect((await getCompanionTurn(db, scope, payload.id)).answers_json).toContain("notebook");
-  });
-  test("interrupted runs can resume on the same turn", async () => {
-    let calls = 0;
-    const { request, db } = fixture({ stream: async () => {
-      calls++;
-      return { totalUsage: Promise.resolve({}), fullStream: (async function* () {
-        if (calls === 1) {
-          yield { type: "text-delta", text: "working" };
-          throw new Error("timeout-like");
-        }
-        yield { type: "text-delta", text: " continued" };
-      })() };
-    } });
-    const payload = input({ allowNotes: true });
-    await (await request("turns", "POST", payload)).text();
-    expect((await getCompanionTurn(db, scope, payload.id)).status).toBe("failed");
-    await db.prepare("UPDATE companion_turns SET status = 'interrupted' WHERE id = ?").bind(payload.id).run();
-    const events = parseEvents(await (await request(`turns/${payload.id}/resume`, "POST", {})).text());
-    expect(calls).toBe(2);
-    expect(events.at(-1).turn.response).toContain("continued");
-    expect(events.at(-1).turn.status).toBe("completed");
-  });
+  test("retired conversation endpoints never load or call a model",async()=>{let calls=0;const {request}=fixture({stream:async()=>{calls++;throw new Error("must not call");}});for(const path of ["turns","turns/turn_12345678/resume","turns/turn_12345678/proxy","discovery/check","discovery/check/proxy"]){expect((await request(path,"POST",{})).status).toBe(410);}expect(calls).toBe(0);});
 });
 
 describe("companion client-direct HTTP contracts", () => {
@@ -457,11 +410,35 @@ describe("companion client-direct HTTP contracts", () => {
     apiKey: "direct-key",
     modelId: "direct-model",
   };
-  const directFixture = () => fixture({
+  const _directFixture = () => fixture({
     stream: async () => ({ totalUsage: Promise.resolve({}), fullStream: (async function* () {
       yield { type: "text-delta", text: "proxied" };
     })() }),
     loadCredentials: async () => credentials,
+  });
+
+  test("discovery prepare asks for the reply in the requested interface language", async () => {
+    const replyLanguage = async (query) => {
+      const setup = fixture({ loadCredentials: async () => credentials });
+      setup.sqlite.query("INSERT INTO notebooks(id, name, workspace_id) VALUES ('nb_ideas', 'Ideas', ?)").run(scope.workspaceId);
+      await createMemoRecord(setup.db, scope.workspaceId, {
+        notebookId: "nb_ideas", title: "Idea A", contentMarkdown: "First unedited thought", tags: [],
+      }, { actorType: "user", actorId: scope.ownerId }, scope.ownerId);
+      expect((await setup.request("discovery/settings", "PUT", { enabled: true, version: 0 })).status).toBe(200);
+      const response = await setup.request(`discovery/check/prepare${query}`, "POST");
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.quiet).toBe(false);
+      return body.instructions.match(/Reply in ([A-Za-z ]+)\./)?.[1];
+    };
+    expect(await replyLanguage("?locale=ja")).toBe("Japanese");
+    expect(await replyLanguage("?locale=pl")).toBe("Polish");
+    expect(await replyLanguage("?locale=ru")).toBe("Russian");
+    expect(await replyLanguage("?locale=zh-CN")).toBe("Simplified Chinese");
+    expect(await replyLanguage("?locale=en-US")).toBe("English");
+    // A missing or unknown locale keeps the previous English default.
+    expect(await replyLanguage("")).toBe("English");
+    expect(await replyLanguage("?locale=it")).toBe("English");
   });
 
   test("prepare returns model credentials and does not invoke the proxy stream", async () => {
@@ -515,20 +492,126 @@ describe("companion client-direct HTTP contracts", () => {
     expect((await getCompanionTurn(setup.db, scope, payload.id)).status).toBe("completed");
   });
 
-  test("proxy streams an already prepared running turn", async () => {
-    const { request } = directFixture();
-    const payload = input();
-    expect((await request("turns/prepare", "POST", payload)).status).toBe(200);
-    const events = parseEvents(await (await request(`turns/${payload.id}/proxy`, "POST", {})).text());
-    expect(events.some(event => event.type === "text-delta" && event.text === "proxied")).toBe(true);
-    expect(events.at(-1)).toMatchObject({ type: "done", turn: { status: "completed" } });
+  test("new and resumed turns use the default model's companion output budget (#652)", async () => {
+    const budgets = { generationMaxOutputTokens: 16000, tagSuggestionMaxOutputTokens: null, companionMaxOutputTokens: 9000 };
+    let lookups = 0;
+    const setup = fixture({ resolveModel: async () => { lookups++; return { credentials, outputBudgets: budgets }; } });
+    const payload = input({ message: "翻译这篇笔记", allowNotes: true });
+    const prepared = await setup.request("turns/prepare", "POST", payload);
+    expect(prepared.status).toBe(200);
+    const preparedBody = await prepared.json();
+    expect(preparedBody).toMatchObject({ modelId: "direct-model", maxOutputTokens: 9000 });
+    expect(Object.keys(preparedBody)).not.toContain("outputBudgets");
+    await setup.request(`turns/${payload.id}/tools`, "POST", {
+      name: "ask_user_question",
+      input: { questions: [{ id: "language", prompt: "翻译成哪种语言？", inputType: "single_select", options: [{ id: "en", label: "English" }] }] },
+      response: "", process: "",
+    });
+    await setup.request(`turns/${payload.id}/complete`, "POST", { response: "", status: "interrupted" });
+    const resumed = await setup.request(`turns/${payload.id}/resume/prepare`, "POST", { answers: [{ questionId: "language", optionIds: ["en"] }] });
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({ maxOutputTokens: 9000 });
+    expect(lookups).toBe(2);
+
+    const fallback = fixture({ loadCredentials: async () => credentials });
+    const unset = await fallback.request("turns/prepare", "POST", input({ allowNotes: true }));
+    expect((await unset.json()).maxOutputTokens).toBe(2048);
   });
+
+  test("a failed turn saves a reply clipped to the per-turn limit and rejects anything longer (#652)", async () => {
+    const setup = fixture({ loadCredentials: async () => credentials });
+    const payload = input({ allowNotes: false });
+    expect((await setup.request("turns/prepare", "POST", payload)).status).toBe(200);
+    expect((await setup.request(`turns/${payload.id}/checkpoint`, "POST", { response: "x".repeat(16001) })).status).toBe(400);
+    const completed = await setup.request(`turns/${payload.id}/complete`, "POST", { response: "x".repeat(16000), status: "failed" });
+    expect(completed.status).toBe(200);
+    expect((await completed.json()).turn).toMatchObject({ status: "failed" });
+    expect((await getCompanionTurn(setup.db, scope, payload.id)).response).toHaveLength(16000);
+  });
+
+  test("Chinese reply and process at their character limits still save and close the turn over HTTP (#652)", async () => {
+    const { streamDirectCompanion } = await import("../../../packages/client/src/companion-direct-stream.ts");
+    const setup = fixture({ loadCredentials: async () => credentials });
+    const payload = input({ allowNotes: false, message: "写一篇很长的中文回复" });
+
+    // The over-long body the maintainer measured is rejected by the request size limit.
+    const probe = input({ allowNotes: false });
+    expect((await setup.request("turns/prepare", "POST", probe)).status).toBe(200);
+    expect((await setup.request(`turns/${probe.id}/complete`, "POST", {
+      response: "答".repeat(16000), process: "过".repeat(32000), status: "failed",
+    })).status).toBe(413);
+    expect((await setup.request(`turns/${probe.id}/complete`, "POST", { response: "", status: "failed" })).status).toBe(200);
+
+    const preparedResponse = await setup.request("turns/prepare", "POST", payload);
+    expect(preparedResponse.status).toBe(200);
+    const prepared = await preparedResponse.json();
+    // A turn that already accumulated 32,000 characters of Chinese process text.
+    prepared.turn.process = `${"旧".repeat(16000)}${"新".repeat(16000)}`;
+    const chunks = Array.from({ length: 170 }, () => "答".repeat(100));
+    const statuses = [];
+    const events = [];
+    const post = async (path, body) => {
+      const response = await setup.request(path, "POST", body);
+      statuses.push(`${path.split("/").at(-1)} ${response.status}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+    await streamDirectCompanion(prepared, {
+      fetch: async () => new Response(
+        `${chunks.map((text) => `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`).join("")}data: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+      onEvent: (event) => events.push(event),
+      executeTool: async () => { throw new Error("must not execute tools"); },
+      checkpoint: async (body) => { await post(`turns/${payload.id}/checkpoint`, body); },
+      complete: (body) => post(`turns/${payload.id}/complete`, body),
+    });
+
+    expect(statuses.length).toBeGreaterThan(1);
+    expect(statuses.every((status) => status.endsWith(" 200"))).toBe(true);
+    expect(statuses.at(-1)).toBe("complete 200");
+    expect(events.at(-1)).toMatchObject({ type: "error", code: "companion_response_too_long" });
+    const stored = await getCompanionTurn(setup.db, scope, payload.id);
+    expect(stored.status).toBe("failed");
+    expect(stored.response).toBe("答".repeat(16000));
+    expect(stored.process_text.endsWith("新".repeat(16000))).toBe(true);
+    expect(stored.process_text.startsWith("…")).toBe(true);
+  });
+
+  test("resume clears answered questions so the resumed turn can complete (#637)", async () => {
+    const setup = fixture({ loadCredentials: async () => credentials });
+    const payload = input({ message: "翻译这篇笔记", allowNotes: true });
+    expect((await setup.request("turns/prepare", "POST", payload)).status).toBe(200);
+    const asked = await setup.request(`turns/${payload.id}/tools`, "POST", {
+      name: "ask_user_question",
+      input: { questions: [{ id: "language", prompt: "翻译成哪种语言？", inputType: "single_select", options: [{ id: "en", label: "English" }] }] },
+      response: "", process: "",
+    });
+    const askedBody = await asked.json();
+    expect(askedBody.pause).toBe(true);
+    expect((await setup.request(`turns/${payload.id}/complete`, "POST", { response: "", status: "interrupted" })).status).toBe(200);
+    expect((await setup.request(`turns/${payload.id}/resume/prepare`, "POST", {})).status).toBe(400);
+
+    const resumed = await setup.request(`turns/${payload.id}/resume/prepare`, "POST", {
+      answers: [{ questionId: "language", optionIds: ["en"] }],
+    });
+    expect(resumed.status).toBe(200);
+    const prepared = await resumed.json();
+    expect(prepared.turn.questions).toEqual([]);
+    expect(prepared.messages.at(-1).content).toContain("\"optionIds\":[\"en\"]");
+
+    const completed = await setup.request(`turns/${payload.id}/complete`, "POST", { response: "Translated note.", status: "completed" });
+    expect((await completed.json()).turn).toMatchObject({ status: "completed", questions: [], response: "Translated note." });
+  });
+
 });
 
 describe("actual AI SDK companion runtime", () => {
-  test("proposal reasons contain evidence instead of card boilerplate", () => {
-    expect(COMPANION_INSTRUCTIONS).toContain("All available write tools execute immediately");
-    expect(COMPANION_INSTRUCTIONS).not.toContain("user must confirm the suggestion card");
+  test("assistant instructions describe direct note edits and trustworthy receipts", () => {
+    expect(COMPANION_INSTRUCTIONS).toContain("update_memo with contentMarkdown, execute immediately");
+    expect(COMPANION_INSTRUCTIONS).toContain("Read the complete current note before replacing its body");
+    expect(COMPANION_INSTRUCTIONS).toContain("Only report a note operation as completed when the tool result says applied");
+    expect(COMPANION_INSTRUCTIONS).not.toContain("awaiting_user_confirmation");
     expect(COMPANION_INSTRUCTIONS).toContain("[Note title](#memo=memo_abc123)");
     expect(COMPANION_INSTRUCTIONS).toContain("Do not drop memo_");
     expect(COMPANION_INSTRUCTIONS).toContain("not as a heading");
@@ -539,8 +622,13 @@ describe("actual AI SDK companion runtime", () => {
     expect(COMPANION_INSTRUCTIONS).toContain("Do not ask which notebook or tag first");
     expect(COMPANION_INSTRUCTIONS).toContain("after you have already searched");
     expect(COMPANION_INSTRUCTIONS).toContain("create_diagram_memo");
+    expect(COMPANION_INSTRUCTIONS).toContain("create_infographic_memo");
+    expect(COMPANION_INSTRUCTIONS).toContain("信息图");
+    expect(COMPANION_INSTRUCTIONS).toContain("chart-pie-donut-plain-text");
     expect(COMPANION_INSTRUCTIONS).toContain("思维导图");
     expect(COMPANION_INSTRUCTIONS).toContain("架构图/architecture diagram means kind=architecture");
+    expect(COMPANION_INSTRUCTIONS).toContain("does not refer to the open note");
+    expect(COMPANION_INSTRUCTIONS).toContain("build it only from the requested topic");
     expect(COMPANION_INSTRUCTIONS).toContain("update_diagram");
     expect(COMPANION_INSTRUCTIONS).toContain("这篇");
     expect(COMPANION_INSTRUCTIONS).not.toContain("You cannot create or edit diagrams");
@@ -548,9 +636,14 @@ describe("actual AI SDK companion runtime", () => {
     expect(COMPANION_INSTRUCTIONS).toContain("use_note_template");
     expect(COMPANION_INSTRUCTIONS).toContain("todo_write");
     expect(COMPANION_INSTRUCTIONS).toContain("ask_user_question");
+    expect(COMPANION_INSTRUCTIONS).toContain("Omit notebookId and it is saved in the inbox notebook (等待分类)");
+    expect(COMPANION_INSTRUCTIONS).toContain("Do not ask which notebook, and do not use the open notebook unless the user named it");
+    expect(COMPANION_INSTRUCTIONS).not.toContain("use the open notebook from Focus DATA");
     expect(COMPANION_INSTRUCTIONS).toContain("Do not narrate");
     expect(COMPANION_INSTRUCTIONS).toContain("AI instructions");
     expect(COMPANION_INSTRUCTIONS).toContain("cannot empty the trash");
+    expect(COMPANION_INSTRUCTIONS).toContain("You can delete empty notebooks with delete_notebook");
+    expect(COMPANION_INSTRUCTIONS).toContain("Ordinary notebook deletion is not emptying the trash");
     expect(COMPANION_INSTRUCTIONS).toContain("delete note templates");
   });
 
@@ -576,7 +669,27 @@ describe("actual AI SDK companion runtime", () => {
     expect(await listCompanionActions(db, scope)).toEqual([]);
   });
 
-  test("truncated notes cannot be used for a write proposal", async () => {
+  test("the real tool loop replaces note content without a confirmation card", async () => {
+    const { db, notes, row, complete, context } = await organizationFixture();
+    const calls = [
+      { toolName: "get_memo", input: JSON.stringify({ memoId: notes[0].id }) },
+      { toolName: "update_memo", input: JSON.stringify({ memoId: notes[0].id, contentMarkdown: "Translated content" }) },
+    ];
+    const model = new MockLanguageModelV4({ doStream: async () => {
+      const call = calls.shift();
+      return { stream: simulateReadableStream({ chunks: call ? [
+        { type: "tool-call", toolCallId: crypto.randomUUID(), ...call }, { ...finish, finishReason: { unified: "tool-calls" } },
+      ] : [{ type: "text-start", id: "1" }, { type: "text-delta", id: "1", delta: "Updated." }, { type: "text-end", id: "1" }, finish] }) };
+    } });
+    const result = await streamCompanion({ db, context, scope, input: input({ id: row.id, threadId: row.thread_id, allowNotes: true }), model,
+      memories: [], history: [], revision: 0, signal: new AbortController().signal, sources: [], assertActive: async () => {} });
+    expect(await result.text).toBe("Updated.");
+    expect((await getMemoDetail(db, scope.workspaceId, notes[0].id)).contentMarkdown).toBe("Translated content");
+    await complete();
+    expect(await listCompanionActions(db, scope)).toEqual([]);
+  });
+
+  test("truncated notes cannot be used for a body edit", async () => {
     const { db, notes, row, context } = await organizationFixture();
     await updateMemoRecord(db, scope.workspaceId, notes[0].id, { contentMarkdown: "x".repeat(9000) }, { actorType: "user", actorId: scope.ownerId }, scope.ownerId);
     const calls = [

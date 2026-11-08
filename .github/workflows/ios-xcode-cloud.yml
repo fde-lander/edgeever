@@ -13,6 +13,7 @@ on:
           - monitor
           - describe
           - store-status
+          - cancel-review
         default: inspect
       workflow_id:
         description: Optional Xcode Cloud workflow ID; auto-selects a single enabled Archive workflow when empty
@@ -28,6 +29,10 @@ on:
         type: string
       app_store_build_id:
         description: App Store Connect build resource ID to inspect
+        required: false
+        type: string
+      current_review_build_id:
+        description: Exact linked build ID expected before canceling a mismatched review
         required: false
         type: string
 
@@ -57,6 +62,7 @@ jobs:
           XCODE_CLOUD_BUILD_RUN_ID: ${{ inputs.build_run_id }}
           APP_STORE_VERSION: ${{ inputs.app_store_version }}
           APP_STORE_BUILD_ID: ${{ inputs.app_store_build_id }}
+          CURRENT_REVIEW_BUILD_ID: ${{ inputs.current_review_build_id }}
         run: |
           case "$XCODE_CLOUD_MODE" in
             inspect)
@@ -94,6 +100,16 @@ jobs:
               python3 scripts/xcode-cloud-control.py store-status \
                 --version "$APP_STORE_VERSION" \
                 --build-id "$APP_STORE_BUILD_ID"
+              ;;
+            cancel-review)
+              if [[ -z "$APP_STORE_VERSION" || -z "$APP_STORE_BUILD_ID" || -z "$CURRENT_REVIEW_BUILD_ID" ]]; then
+                echo "::error::app_store_version, app_store_build_id, and current_review_build_id are required in cancel-review mode"
+                exit 1
+              fi
+              python3 scripts/xcode-cloud-control.py cancel-review \
+                --version "$APP_STORE_VERSION" \
+                --current-build-id "$CURRENT_REVIEW_BUILD_ID" \
+                --replacement-build-id "$APP_STORE_BUILD_ID"
               ;;
             *)
               echo "::error::Unsupported Xcode Cloud mode: $XCODE_CLOUD_MODE"

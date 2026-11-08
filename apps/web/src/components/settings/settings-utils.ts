@@ -1,7 +1,22 @@
 import type { TFunction } from "i18next";
+import { getConfiguredDesktopApiBaseUrl } from "@/lib/api";
 export { copyTextToClipboard } from "@/lib/clipboard";
 
 export const ALL_TOKEN_SCOPES = [
+  "read:notebooks",
+  "write:notebooks",
+  "read:memos",
+  "write:memos",
+  "read:resources",
+  "write:resources",
+  "read:tags",
+  "write:tags",
+  "ai:generate",
+];
+
+// Tokens issued before video-note summaries keep this set. They stay labeled
+// full and do not gain ai:generate until the user creates a new token.
+export const PREVIOUS_FULL_TOKEN_SCOPES = [
   "read:notebooks",
   "write:notebooks",
   "read:memos",
@@ -57,7 +72,10 @@ export const getStoredTokenAccessLevel = (
   scopes: string[],
   availableScopes: string[] = ALL_TOKEN_SCOPES,
 ): StoredTokenAccessLevel => {
-  if (sameScopes(scopes, getTokenScopesForAccessLevel("full", availableScopes))) {
+  if (
+    sameScopes(scopes, getTokenScopesForAccessLevel("full", availableScopes))
+    || sameScopes(scopes, PREVIOUS_FULL_TOKEN_SCOPES)
+  ) {
     return "full";
   }
 
@@ -70,21 +88,25 @@ export const getStoredTokenAccessLevel = (
 
 export const getTokenScopeLabel = (scope: string, t: TFunction) => t(`mcp.scopes.${scope}`, { defaultValue: scope });
 
-export const getMcpRemoteServerUrl = () => {
-  if (typeof window === "undefined") {
-    return "/mcp";
-  }
+export const EDGE_EVER_SERVER_URL_PLACEHOLDER = "https://your-edgeever-server";
 
-  return `${window.location.origin}/mcp`;
-};
-
+// MCP clients connect to the EdgeEver server, not to the page that shows the
+// settings. In the browser that is the page origin; the desktop renderer runs
+// on its own app origin (`edgeever-app://app`), so it uses the configured
+// instance URL and shows a placeholder until one is set.
 export const getEdgeEverBaseUrl = () => {
   if (typeof window === "undefined") {
-    return "https://your-domain.example";
+    return EDGE_EVER_SERVER_URL_PLACEHOLDER;
+  }
+
+  if (window.edgeeverDesktop?.isAvailable) {
+    return getConfiguredDesktopApiBaseUrl().replace(/\/+$/, "") || EDGE_EVER_SERVER_URL_PLACEHOLDER;
   }
 
   return window.location.origin;
 };
+
+export const getMcpRemoteServerUrl = () => `${getEdgeEverBaseUrl()}/mcp`;
 
 export const buildMcpRemoteConfig = (token: string) =>
   JSON.stringify(

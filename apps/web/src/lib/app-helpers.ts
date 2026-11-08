@@ -1,10 +1,9 @@
-import type { MemoSummary, Notebook, TiptapDoc } from "@edgeever/shared";
+import type { MemoSummary, Notebook } from "@edgeever/shared";
 import { DEFAULT_MEMO_TITLE } from "@edgeever/shared";
 import { getMobileNotebookSearchVisibleIds } from "@edgeever/shared/mobile-ui";
 import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
 import { buildNotebookTree, type NotebookNode, type NotebookNodeComparator } from "./utils";
 import * as React from "react";
-import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
 
 export type Pane = "notebooks" | "memos" | "editor";
@@ -26,10 +25,18 @@ export type ShortcutAction =
   | "saveAndSync"
   | "toggleReadingProtection"
   | "toggleEditorMode"
-  | "toggleOutline";
+  | "toggleOutline"
+  | "toggleSidebar"
+  | "focusTitle"
+  | "focusBody";
 export type ShortcutBinding = {
   key: string;
+  // Defaults and shortcuts saved before Control and Command were stored apart.
+  // True means the platform primary modifier: Command on Apple, Control elsewhere.
+  // A recorded shortcut also sets ctrl and meta, and those exact keys win.
   ctrlOrMeta: boolean;
+  ctrl?: boolean;
+  meta?: boolean;
   shift: boolean;
   alt: boolean;
 };
@@ -42,7 +49,9 @@ export type MemoDocumentAction =
   | "export-html"
   | "export-pdf"
   | "share-image"
-  | "save-as-template";
+  | "save-as-template"
+  | "copy-wechat";
+export type MemoWeChatCopyResult = "editor" | "copied" | "error";
 export type MemoDocumentActionRequest = {
   id: number;
   memoId: string;
@@ -65,6 +74,14 @@ export const isTextEntryTarget = (target: EventTarget | null) =>
 
 export const getSearchShortcutScope = (selectedMemoId: string | null): "note" | "memo-list" =>
   selectedMemoId ? "note" : "memo-list";
+
+export const getCreateMemoNotebookId = (
+  selectedNotebookId: string | null,
+  notebooks: ReadonlyArray<Pick<Notebook, "id">>,
+  defaultNotebookId: string | null,
+) => selectedNotebookId
+  ? notebooks.some((notebook) => notebook.id === selectedNotebookId) ? selectedNotebookId : null
+  : defaultNotebookId;
 
 export const getNotebookAncestorIds = (nodes: NotebookNode[], targetNotebookId: string) => {
   const walk = (items: NotebookNode[], ancestors: string[]): string[] | null => {
@@ -131,6 +148,7 @@ export { DEFAULT_MEMO_TITLE };
 export const IMAGE_COMPRESSION_STORAGE_KEY = "edgeever.imageCompressionEnabled";
 export const DESKTOP_FOCUS_MODE_STORAGE_KEY = "edgeever.desktopFocusMode";
 export const NOTEBOOK_SIDEBAR_COLLAPSED_STORAGE_KEY = "edgeever.notebookSidebarCollapsed";
+export const NOTEBOOK_SIDEBAR_WIDTH_STORAGE_KEY = "edgeever.notebookSidebarWidth";
 export const DESKTOP_READING_PROTECTION_STORAGE_KEY = "edgeever.desktopReadingProtection";
 export const EDITOR_OUTLINE_COLLAPSED_STORAGE_KEY = "edgeever.editorOutlineCollapsed";
 export const EDITOR_CONTENT_ALIGNMENT_STORAGE_KEY = "edgeever.editorContentAlignment";
@@ -139,12 +157,18 @@ export const EDITOR_PHONE_PREVIEW_STORAGE_KEY = "edgeever.editor.phonePreviewOpe
 export const EDITOR_PHONE_PREVIEW_FOLLOW_STORAGE_KEY = "edgeever.editor.phonePreviewFollow";
 export const MEMO_LIST_DENSITY_STORAGE_KEY = "edgeever.memoListDensity";
 export const MEMO_LIST_WIDTH_STORAGE_KEY = "edgeever.memoListWidth";
+export const MEMO_SORT_STORAGE_KEY = "edgeever.memoSort";
 export const NOTEBOOK_SORT_STORAGE_KEY = "edgeever.notebookSort";
 export const NOTEBOOK_TREE_COLLAPSED_IDS_STORAGE_KEY = "edgeever.notebookTreeCollapsedIds:v1";
+export const NOTEBOOK_SECTION_COLLAPSED_STORAGE_KEY = "edgeever.notebookSectionCollapsed";
 export const SHORTCUT_SETTINGS_STORAGE_KEY = "edgeever.shortcutSettings";
 export const DEFAULT_MEMO_LIST_WIDTH_PX = 360;
 export const MIN_MEMO_LIST_WIDTH_PX = 300;
-export const MAX_MEMO_LIST_WIDTH_PX = 540;
+export const MAX_MEMO_LIST_WIDTH_PX = 800;
+export const MIN_EDITOR_WIDTH_PX = 640;
+export const DEFAULT_NOTEBOOK_SIDEBAR_WIDTH_PX = 240;
+export const MIN_NOTEBOOK_SIDEBAR_WIDTH_PX = 180;
+export const MAX_NOTEBOOK_SIDEBAR_WIDTH_PX = 420;
 export const EDITOR_LOCAL_SAVE_DELAY_MS = 1_200;
 
 export const MEMO_DRAG_MIME = "application/x-edgeever-memos";
@@ -154,8 +178,10 @@ export const getMemoSortOptions = (t: TFunction): Array<{ value: MemoSortMode; l
   { value: "updated-desc", label: t("options.memoSort.updatedDesc") },
   { value: "created-desc", label: t("options.memoSort.createdDesc") },
   { value: "title-asc", label: t("options.memoSort.titleAsc") },
+  { value: "title-desc", label: t("options.memoSort.titleDesc") },
 ];
 
+const MEMO_SORT_VALUES: MemoSortMode[] = ["updated-desc", "created-desc", "title-asc", "title-desc"];
 const NOTEBOOK_SORT_VALUES: NotebookSortMode[] = ["custom", "name-asc", "memo-count-desc", "updated-desc"];
 
 export const getNotebookSortOptions = (t: TFunction): Array<{ value: NotebookSortMode; label: string }> => [
@@ -188,6 +214,9 @@ export const getShortcutActionOptions = (
   { value: "toggleReadingProtection", label: t("shortcuts.actions.toggleReadingProtection.label") },
   { value: "toggleEditorMode", label: t("shortcuts.actions.toggleEditorMode.label") },
   { value: "toggleOutline", label: t("shortcuts.actions.toggleOutline.label") },
+  { value: "toggleSidebar", label: t("shortcuts.actions.toggleSidebar.label") },
+  { value: "focusTitle", label: t("shortcuts.actions.focusTitle.label") },
+  { value: "focusBody", label: t("shortcuts.actions.focusBody.label") },
 ];
 
 export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = {
@@ -204,7 +233,19 @@ export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = {
   toggleReadingProtection: { key: "e", ctrlOrMeta: true, shift: false, alt: false },
   toggleEditorMode: { key: "/", ctrlOrMeta: true, shift: false, alt: false },
   toggleOutline: { key: "1", ctrlOrMeta: true, shift: true, alt: false },
+  toggleSidebar: { key: "\\", ctrlOrMeta: true, shift: false, alt: false },
+  focusTitle: { key: "t", ctrlOrMeta: true, shift: false, alt: true },
+  focusBody: { key: "b", ctrlOrMeta: true, shift: false, alt: true },
 };
+
+// Linux desktops and ChromeOS open a terminal with Ctrl+Alt+T, so the title
+// shortcut adds Shift there. Other platforms keep Primary+Alt+T.
+const LINUX_FOCUS_TITLE_SHORTCUT: ShortcutBinding = { key: "t", ctrlOrMeta: true, shift: true, alt: true };
+
+export const getDefaultShortcutSettings = (platform = readShortcutPlatform()): ShortcutSettings =>
+  /linux|cros/i.test(platform) && !/android/i.test(platform)
+    ? { ...DEFAULT_SHORTCUT_SETTINGS, focusTitle: LINUX_FOCUS_TITLE_SHORTCUT }
+    : DEFAULT_SHORTCUT_SETTINGS;
 
 const LEGACY_READING_PROTECTION_SHORTCUT: ShortcutBinding = {
   key: "l",
@@ -231,6 +272,9 @@ const SHORTCUT_ACTION_VALUES: ShortcutAction[] = [
   "toggleReadingProtection",
   "toggleEditorMode",
   "toggleOutline",
+  "toggleSidebar",
+  "focusTitle",
+  "focusBody",
 ];
 
 export const isDefaultMemoTitle = (title: string | null | undefined) => title?.trim() === DEFAULT_MEMO_TITLE;
@@ -310,6 +354,28 @@ export const readNotebookSidebarCollapsedPreference = () => {
 export const writeNotebookSidebarCollapsedPreference = (collapsed: boolean) => {
   try {
     window.localStorage.setItem(NOTEBOOK_SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const clampNotebookSidebarWidth = (width: number) =>
+  Math.min(MAX_NOTEBOOK_SIDEBAR_WIDTH_PX, Math.max(MIN_NOTEBOOK_SIDEBAR_WIDTH_PX, Math.round(width)));
+
+export const readNotebookSidebarWidthPreference = () => {
+  try {
+    const storedWidth = window.localStorage.getItem(NOTEBOOK_SIDEBAR_WIDTH_STORAGE_KEY);
+    if (storedWidth === null) return DEFAULT_NOTEBOOK_SIDEBAR_WIDTH_PX;
+    const width = Number(storedWidth);
+    return Number.isFinite(width) ? clampNotebookSidebarWidth(width) : DEFAULT_NOTEBOOK_SIDEBAR_WIDTH_PX;
+  } catch {
+    return DEFAULT_NOTEBOOK_SIDEBAR_WIDTH_PX;
+  }
+};
+
+export const writeNotebookSidebarWidthPreference = (width: number) => {
+  try {
+    window.localStorage.setItem(NOTEBOOK_SIDEBAR_WIDTH_STORAGE_KEY, String(clampNotebookSidebarWidth(width)));
   } catch {
     // Local storage can be unavailable in private or restricted browser contexts.
   }
@@ -434,9 +500,26 @@ export const writeMemoListDensityPreference = (density: MemoListDensity) => {
 export const clampMemoListWidth = (width: number) =>
   Math.min(MAX_MEMO_LIST_WIDTH_PX, Math.max(MIN_MEMO_LIST_WIDTH_PX, Math.round(width)));
 
+export const getMaxMemoListWidthForViewport = (
+  viewportWidth: number,
+  notebookSidebarWidth: number,
+) => Math.min(MAX_MEMO_LIST_WIDTH_PX, Math.max(0, viewportWidth - notebookSidebarWidth - MIN_EDITOR_WIDTH_PX));
+
+/** Reserve the editor and a usable list on compact three-pane desktops.
+ * Keep the saved preferences intact when the window temporarily gets smaller.
+ */
+export const getEditorPaneWidths = (viewportWidth: number, sidebarWidth: number, listWidth: number) => {
+  const sidebar = Math.min(sidebarWidth, Math.max(0, viewportWidth - MIN_EDITOR_WIDTH_PX - 180));
+  const maximum = getMaxMemoListWidthForViewport(viewportWidth, sidebar);
+  const minimum = Math.min(MIN_MEMO_LIST_WIDTH_PX, maximum);
+  return { sidebar, minimum, maximum, list: Math.min(maximum, Math.max(minimum, listWidth)) };
+};
+
 export const readMemoListWidthPreference = () => {
   try {
-    const width = Number(window.localStorage.getItem(MEMO_LIST_WIDTH_STORAGE_KEY));
+    const storedWidth = window.localStorage.getItem(MEMO_LIST_WIDTH_STORAGE_KEY);
+    if (storedWidth === null) return DEFAULT_MEMO_LIST_WIDTH_PX;
+    const width = Number(storedWidth);
     return Number.isFinite(width) ? clampMemoListWidth(width) : DEFAULT_MEMO_LIST_WIDTH_PX;
   } catch {
     return DEFAULT_MEMO_LIST_WIDTH_PX;
@@ -446,6 +529,23 @@ export const readMemoListWidthPreference = () => {
 export const writeMemoListWidthPreference = (width: number) => {
   try {
     window.localStorage.setItem(MEMO_LIST_WIDTH_STORAGE_KEY, String(clampMemoListWidth(width)));
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readMemoSortPreference = (): MemoSortMode => {
+  try {
+    const sortMode = window.localStorage.getItem(MEMO_SORT_STORAGE_KEY);
+    return MEMO_SORT_VALUES.includes(sortMode as MemoSortMode) ? (sortMode as MemoSortMode) : "updated-desc";
+  } catch {
+    return "updated-desc";
+  }
+};
+
+export const writeMemoSortPreference = (sortMode: MemoSortMode) => {
+  try {
+    window.localStorage.setItem(MEMO_SORT_STORAGE_KEY, sortMode);
   } catch {
     // Local storage can be unavailable in private or restricted browser contexts.
   }
@@ -490,6 +590,22 @@ export const writeNotebookTreeCollapsedIdsPreference = (notebookIds: Iterable<st
   }
 };
 
+export const readNotebookSectionCollapsedPreference = () => {
+  try {
+    return window.localStorage.getItem(NOTEBOOK_SECTION_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+
+export const writeNotebookSectionCollapsedPreference = (collapsed: boolean) => {
+  try {
+    window.localStorage.setItem(NOTEBOOK_SECTION_COLLAPSED_STORAGE_KEY, collapsed ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
 export const normalizeShortcutKey = (key: string) => {
   if (key === " ") {
     return "space";
@@ -498,40 +614,85 @@ export const normalizeShortcutKey = (key: string) => {
   return key.toLowerCase();
 };
 
+const readShortcutPlatform = () => {
+  if (typeof window !== "undefined" && window.navigator?.platform) return window.navigator.platform;
+  if (typeof navigator !== "undefined" && navigator.platform) return navigator.platform;
+  return "";
+};
+
+export const isAppleShortcutPlatform = (platform = readShortcutPlatform()) =>
+  /mac|iphone|ipad|ipod/i.test(platform);
+
+// Recorded ctrl/meta describe the keys the user pressed. Older ctrlOrMeta
+// bindings follow the modifier the settings screen drew for this platform.
+export const resolvedShortcutModifiers = (
+  binding: Pick<ShortcutBinding, "ctrlOrMeta" | "ctrl" | "meta">,
+  platform = readShortcutPlatform(),
+) => {
+  if (typeof binding.ctrl === "boolean" || typeof binding.meta === "boolean") {
+    return { ctrl: binding.ctrl === true, meta: binding.meta === true };
+  }
+
+  if (binding.ctrlOrMeta && isAppleShortcutPlatform(platform)) {
+    return { ctrl: false, meta: true };
+  }
+
+  if (binding.ctrlOrMeta) {
+    return { ctrl: true, meta: false };
+  }
+
+  return { ctrl: false, meta: false };
+};
+
+export const isPrimaryModifierPressed = (
+  event: { ctrlKey?: boolean; metaKey?: boolean },
+  platform = readShortcutPlatform(),
+) => {
+  const ctrl = event.ctrlKey === true;
+  const meta = event.metaKey === true;
+  return isAppleShortcutPlatform(platform) ? meta && !ctrl : ctrl && !meta;
+};
+
 const isShortcutBinding = (value: unknown): value is ShortcutBinding => {
+  if (!value || typeof value !== "object") return false;
   const binding = value as ShortcutBinding;
+  const splitModifiers = typeof binding.ctrl === "boolean" && typeof binding.meta === "boolean";
   return (
-    Boolean(binding) &&
     typeof binding.key === "string" &&
     binding.key.trim().length > 0 &&
-    typeof binding.ctrlOrMeta === "boolean" &&
+    (typeof binding.ctrlOrMeta === "boolean" || splitModifiers) &&
     typeof binding.shift === "boolean" &&
     typeof binding.alt === "boolean"
   );
 };
 
 export const readShortcutSettingsPreference = (): ShortcutSettings => {
+  const defaults = getDefaultShortcutSettings();
   try {
     const rawValue = window.localStorage.getItem(SHORTCUT_SETTINGS_STORAGE_KEY);
     if (!rawValue) {
-      return DEFAULT_SHORTCUT_SETTINGS;
+      return defaults;
     }
 
     const parsedValue = JSON.parse(rawValue) as Partial<ShortcutSettings>;
     return SHORTCUT_ACTION_VALUES.reduce<ShortcutSettings>((settings, action) => {
       const storedBinding = parsedValue[action];
       const normalizedBinding = isShortcutBinding(storedBinding)
-        ? { ...storedBinding, key: normalizeShortcutKey(storedBinding.key) }
-        : DEFAULT_SHORTCUT_SETTINGS[action];
+        ? {
+            ...storedBinding,
+            key: normalizeShortcutKey(storedBinding.key),
+            ctrlOrMeta: typeof storedBinding.ctrlOrMeta === "boolean" ? storedBinding.ctrlOrMeta : false,
+          }
+        : defaults[action];
       const binding = action === "toggleReadingProtection"
         && shortcutBindingsEqual(normalizedBinding, LEGACY_READING_PROTECTION_SHORTCUT)
-          ? DEFAULT_SHORTCUT_SETTINGS.toggleReadingProtection
+          ? defaults.toggleReadingProtection
           : normalizedBinding;
 
       return { ...settings, [action]: binding };
-    }, { ...DEFAULT_SHORTCUT_SETTINGS });
+    }, { ...defaults });
   } catch {
-    return DEFAULT_SHORTCUT_SETTINGS;
+    return defaults;
   }
 };
 
@@ -543,21 +704,41 @@ export const writeShortcutSettingsPreference = (settings: ShortcutSettings) => {
   }
 };
 
-export const formatShortcutBinding = (binding: ShortcutBinding) => {
-  const isMac = /mac|iphone|ipad|ipod/i.test(window.navigator.platform);
+export const formatShortcutBinding = (binding: ShortcutBinding, platform = readShortcutPlatform()) => {
+  const apple = isAppleShortcutPlatform(platform);
+  const modifiers = resolvedShortcutModifiers(binding, platform);
   const parts = [
-    binding.ctrlOrMeta ? (isMac ? "⌘" : "Ctrl") : null,
-    binding.alt ? (isMac ? "⌥" : "Alt") : null,
-    binding.shift ? (isMac ? "⇧" : "Shift") : null,
+    modifiers.ctrl ? (apple ? "⌃" : "Ctrl") : null,
+    modifiers.meta ? (apple ? "⌘" : "Meta") : null,
+    binding.alt ? (apple ? "⌥" : "Alt") : null,
+    binding.shift ? (apple ? "⇧" : "Shift") : null,
     binding.key === "space" ? "Space" : binding.key.length === 1 ? binding.key.toUpperCase() : binding.key,
   ].filter(Boolean);
 
-  return parts.join(isMac ? "" : " + ");
+  return parts.join(apple ? "" : " + ");
 };
 
-export const shortcutBindingFromKeyboardEvent = (event: KeyboardEvent): ShortcutBinding | null => {
+type ShortcutKeyEvent = {
+  key: string;
+  code?: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+};
+
+export const shortcutBindingFromKeyboardEvent = (
+  event: ShortcutKeyEvent,
+  platform = readShortcutPlatform(),
+): ShortcutBinding | null => {
   const digitKey = typeof event.code === "string" ? /^Digit([0-9])$/.exec(event.code)?.[1] : undefined;
-  const key = digitKey ?? normalizeShortcutKey(event.key);
+  // On Apple keyboards Option rewrites the key value (⌘⌥T reports "†"), so
+  // read the physical letter there, as the shortcut recorder does. Elsewhere
+  // Ctrl+Alt is AltGr and must keep typing its character.
+  const optionLetterKey = event.altKey && isAppleShortcutPlatform(platform) && !/^[a-z]$/i.test(event.key) && typeof event.code === "string"
+    ? /^Key([A-Z])$/.exec(event.code)?.[1]?.toLowerCase()
+    : undefined;
+  const key = digitKey ?? optionLetterKey ?? normalizeShortcutKey(event.key);
 
   if (["control", "meta", "shift", "alt", "escape"].includes(key)) {
     return null;
@@ -569,28 +750,49 @@ export const shortcutBindingFromKeyboardEvent = (event: KeyboardEvent): Shortcut
 
   return {
     key,
-    ctrlOrMeta: event.ctrlKey || event.metaKey,
+    ctrlOrMeta: isPrimaryModifierPressed(event, platform),
+    ctrl: event.ctrlKey,
+    meta: event.metaKey,
     shift: event.shiftKey,
     alt: event.altKey,
   };
 };
 
-export const shortcutBindingsEqual = (first: ShortcutBinding, second: ShortcutBinding) =>
-  first.key === second.key &&
-  first.ctrlOrMeta === second.ctrlOrMeta &&
-  first.shift === second.shift &&
-  first.alt === second.alt;
+export const shortcutBindingsEqual = (
+  first: ShortcutBinding,
+  second: ShortcutBinding,
+  platform = readShortcutPlatform(),
+) => {
+  const firstModifiers = resolvedShortcutModifiers(first, platform);
+  const secondModifiers = resolvedShortcutModifiers(second, platform);
+  return first.key === second.key &&
+    firstModifiers.ctrl === secondModifiers.ctrl &&
+    firstModifiers.meta === secondModifiers.meta &&
+    first.shift === second.shift &&
+    first.alt === second.alt;
+};
 
-export const getShortcutActionForEvent = (event: KeyboardEvent, settings: ShortcutSettings): ShortcutAction | null => {
-  const eventBinding = shortcutBindingFromKeyboardEvent(event);
+// The sidebar shortcut only acts when the sidebar can be seen: Focus Mode hides
+// it, so toggling there would change a persisted state without any feedback.
+export const canToggleNotebookSidebar = ({ isDesktop, focusModeActive }: {
+  isDesktop: boolean;
+  focusModeActive: boolean;
+}) => isDesktop && !focusModeActive;
+
+export const getShortcutActionForEvent = (
+  event: ShortcutKeyEvent,
+  settings: ShortcutSettings,
+  platform = readShortcutPlatform(),
+): ShortcutAction | null => {
+  const eventBinding = shortcutBindingFromKeyboardEvent(event, platform);
 
   if (!eventBinding) {
     return null;
   }
 
   return SHORTCUT_ACTION_VALUES.find((action) =>
-    shortcutBindingsEqual(settings[action], eventBinding) ||
-    (SHORTCUT_ALIASES[action] ?? []).some((binding) => shortcutBindingsEqual(binding, eventBinding))
+    shortcutBindingsEqual(settings[action], eventBinding, platform) ||
+    (SHORTCUT_ALIASES[action] ?? []).some((binding) => shortcutBindingsEqual(binding, eventBinding, platform))
   ) ?? null;
 };
 
@@ -643,14 +845,14 @@ export const sortMemos = (memos: MemoSummary[], sortMode: MemoSortMode, prioriti
       return first.isPinned ? -1 : 1;
     }
 
-    if (sortMode === "title-asc") {
+    if (sortMode === "title-asc" || sortMode === "title-desc") {
       const titleCompare = getMemoTitle(first.title).localeCompare(getMemoTitle(second.title), "zh-CN", {
         numeric: true,
         sensitivity: "base",
       });
 
       if (titleCompare !== 0) {
-        return titleCompare;
+        return sortMode === "title-desc" ? -titleCompare : titleCompare;
       }
 
       return compareDateDesc(first.updatedAt, second.updatedAt);
@@ -851,8 +1053,10 @@ export const setMemoDragPreview = (dataTransfer: DataTransfer, label: string) =>
     <svg style="width: 15px; height: 15px; color: var(--brand-green); flex-shrink: 0;" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path>
     </svg>
-    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;">${label}</span>
+    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;"></span>
   `;
+
+  dragImage.querySelector("span")!.textContent = label;
 
   Object.assign(dragImage.style, {
     position: "fixed",

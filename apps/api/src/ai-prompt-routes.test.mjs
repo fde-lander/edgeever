@@ -121,11 +121,11 @@ describe("AI prompt template routes", () => {
   test("keeps the starter catalog focused on six common workflows", () => {
     expect(DEFAULT_AI_PROMPT_SEEDS.map((prompt) => [prompt.key, prompt.name])).toEqual([
       ["summarize", "精简总结"],
-      ["translate", "全文翻译"],
-      ["improve-writing", "润色表达"],
-      ["make-shorter", "精炼表达"],
-      ["extract-todos", "提取待办"],
-      ["continue-writing", "继续写作"],
+      ["translate", "翻译"],
+      ["improve-writing", "润色改写"],
+      ["make-shorter", "精炼缩短"],
+      ["extract-todos", "提取待办事项"],
+      ["continue-writing", "接续撰写"],
     ]);
   });
 
@@ -468,6 +468,16 @@ describe("AI prompt template routes", () => {
     expect(japaneseSummary).toMatchObject({
       name: "要約する",
       description: "テーマ、結論、実行できる結果に圧縮する",
+      instruction: "Only this instruction was customized before the metadata migration.",
+    });
+
+    const polish = await app.request("/api/v1/ai/prompts?locale=pl", {}, environment);
+    const polishSummary = (await polish.json()).prompts.find(
+      (prompt) => prompt.seedKey === "summarize",
+    );
+    expect(polishSummary).toMatchObject({
+      name: "Podsumuj",
+      description: "Streść notatkę do jej tematu, wniosków i konkretnych rezultatów",
       instruction: "Only this instruction was customized before the metadata migration.",
     });
   });

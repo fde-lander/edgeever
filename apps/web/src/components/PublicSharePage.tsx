@@ -1,31 +1,45 @@
 import "katex/dist/katex.min.css";
 import { Node, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, ReactNodeViewRenderer } from "@tiptap/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Clock3, FileText, LoaderCircle, LockKeyhole, ShieldCheck } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Clock3, FileText, LoaderCircle, LockKeyhole } from "lucide-react";
+import { lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router";
+import { cn } from "@/lib/utils";
 import { ApiRequestError, api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EdgeEverCodeBlock, codeBlockLowlight } from "@/lib/code-block";
 import { withEnvironmentTitlePrefix } from "@/lib/environment-title";
 import { resolvePublicShareBody } from "@/lib/public-share-body";
+import { sanitizeAndScopeCss } from "@/lib/css-sandbox";
 import {
   parseImageWidth,
   getImageReferrerPolicy,
   createEdgeEverDocumentExtensions,
+  noteProseCssVariables,
   parsePublishedNoteBodyFont,
+  resolveNoteProse,
   type PublicMemoShare,
+  type ShareBodyAccess,
+  getMemoDisplayTitle,
 } from "@edgeever/shared";
+import { resolveSupportedLocale, type SupportedLocale } from "@edgeever/shared/i18n/locales";
+import { activateHeadingAnchorClick } from "@/lib/editor-heading-anchor";
 import { applyEditorBodyFontPreference } from "@/lib/editor-body-font";
 import { createEdgeEverMathematics } from "@edgeever/shared/mathematics";
 import { PdfAttachment } from "@/components/editor/PdfAttachment";
 import { FileAttachment } from "@/components/editor/FileAttachment";
+import { NotebookSiteCodeBlock } from "./NotebookSiteCodeBlock";
+import { NotebookSiteArticleTools } from "./NotebookSiteArticleTools";
+import { PublicArticleOutline } from "./PublicArticleOutline";
+import { NotebookSiteSearchContext } from "./NotebookSiteSearch";
+import { useAppearanceTheme } from "./ThemeProvider";
 
 const ReadOnlyX6Diagram = lazy(() => import("@/components/ReadOnlyX6Diagram"));
+const ImageViewer = lazy(() => import("@/components/editor/ImageViewer").then((module) => ({ default: module.ImageViewer })));
 
 const SharedImage = Image.extend({
   addAttributes() {
@@ -77,7 +91,11 @@ const SharedThemeBlock = Node.create({
   },
 });
 
-const SharedRichText = ({ content }: { content: PublicMemoShare["contentJson"] }) => {
+const SiteCodeBlock = EdgeEverCodeBlock.extend({ addNodeView() { return ReactNodeViewRenderer(NotebookSiteCodeBlock); } });
+const SharedRichText = ({ content, site = false }: { content: PublicMemoShare["contentJson"]; site?: boolean }) => {
+  const { t } = useTranslation();
+  const [imagePreview, setImagePreview] = useState<{ alt: string; url: string } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const editor = useEditor({
     extensions: [
       ...createEdgeEverDocumentExtensions({
@@ -88,7 +106,7 @@ const SharedRichText = ({ content }: { content: PublicMemoShare["contentJson"] }
         file: FileAttachment,
         table: { table: { renderWrapper: true } },
       }),
-      EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
+      (site ? SiteCodeBlock : EdgeEverCodeBlock).configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
       SharedThemeBlock,
     ],
     content,
@@ -96,24 +114,69 @@ const SharedRichText = ({ content }: { content: PublicMemoShare["contentJson"] }
     editorProps: {
       attributes: {
         class: "prose prose-slate max-w-none focus:outline-none",
-        "aria-label": "Shared note content",
+        "aria-label": t("sharing.contentLabel"),
       },
     },
   }, [content]);
+  useEffect(() => {
+    if (!site || !editor) return;
+    containerRef.current?.querySelectorAll("img").forEach((img) => {
+      img.tabIndex = 0; img.setAttribute("role", "button");
+      img.setAttribute("aria-label", img.alt || t("editor.imageViewer"));
+    });
+  }, [editor, site, content, t]);
 
-  return <EditorContent editor={editor} />;
+  const previewImage = (event: MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof HTMLImageElement) || !target.currentSrc) return;
+    event.preventDefault();
+    setImagePreview({ alt: target.alt, url: target.currentSrc });
+  };
+
+  const jumpToHeading = (event: MouseEvent<HTMLDivElement>) => {
+    activateHeadingAnchorClick(event, editor && !editor.isDestroyed ? editor.view : null);
+  };
+
+  return (
+    <div ref={containerRef} onClickCapture={jumpToHeading} onClick={site ? previewImage : undefined} onDoubleClick={site ? undefined : previewImage} onKeyDown={site ? (event) => {
+      if ((event.key === "Enter" || event.key === " ") && event.target instanceof HTMLImageElement) {
+        event.preventDefault(); setImagePreview({ alt: event.target.alt, url: event.target.currentSrc });
+      }
+    } : undefined}>
+      <EditorContent editor={editor} />
+      {imagePreview ? (
+        <Suspense fallback={null}>
+          <ImageViewer
+            alt={imagePreview.alt}
+            closeLabel={t("editor.closeImagePreview")}
+            open
+            src={imagePreview.url}
+            viewerLabel={t("editor.imageViewer")}
+            zoomInLabel={t("editor.imageZoomIn")}
+            zoomOutLabel={t("editor.imageZoomOut")}
+            onClose={() => setImagePreview(null)}
+          />
+        </Suspense>
+      ) : null}
+    </div>
+  );
 };
 
 const SharedDocument = ({
   locale,
   share,
   token,
+  access,
+  site = false,
 }: {
-  locale: "zh-CN" | "en-US" | "ja";
+  locale: SupportedLocale;
   share: PublicMemoShare;
   token: string;
+  access?: ShareBodyAccess;
+  site?: boolean;
 }) => {
-  const body = useMemo(() => resolvePublicShareBody(share, token), [share, token]);
+  const { resolvedTheme } = useAppearanceTheme();
+  const body = useMemo(() => resolvePublicShareBody(share, token, access), [share, token, access]);
   if (body.type === "diagram") {
     return (
       <Suspense
@@ -123,27 +186,29 @@ const SharedDocument = ({
           </div>
         }
       >
-        <ReadOnlyX6Diagram diagram={body.diagram} locale={locale} theme="light" />
+        <ReadOnlyX6Diagram diagram={body.diagram} locale={locale} theme={site ? resolvedTheme : "light"} controls={site} />
       </Suspense>
     );
   }
-  return <SharedRichText content={body.content} />;
+  return <SharedRichText content={body.content} site={site} />;
 };
 
-const isSharePasswordError = (error: unknown, code: string) =>
+export const isSharePasswordError = (error: unknown, code: string) =>
   error instanceof ApiRequestError && error.code === code;
 
-const PublicSharePasswordForm = ({
+export const PublicSharePasswordForm = ({
   token,
   onUnlocked,
+  unlock,
 }: {
   token: string;
+  unlock?: (password: string) => Promise<unknown>;
   onUnlocked: () => Promise<unknown>;
 }) => {
   const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const unlockMutation = useMutation({
-    mutationFn: () => api.unlockPublicMemoShare(token, password),
+    mutationFn: () => unlock ? unlock(password) : api.unlockPublicMemoShare(token, password),
     onSuccess: () => onUnlocked(),
   });
   const submit = (event: FormEvent) => {
@@ -151,9 +216,15 @@ const PublicSharePasswordForm = ({
     if (!password.trim() || unlockMutation.isPending) return;
     unlockMutation.mutate();
   };
+  // A link that expired while the form was open shows the expiry page instead.
+  const onUnlockedRef = useRef(onUnlocked);
+  onUnlockedRef.current = onUnlocked;
+  useEffect(() => {
+    if (isSharePasswordError(unlockMutation.error, "share_expired")) void onUnlockedRef.current();
+  }, [unlockMutation.error]);
   const errorKey = isSharePasswordError(unlockMutation.error, "share_unlock_rate_limited")
     ? "sharing.passwordRateLimited"
-    : unlockMutation.error
+    : unlockMutation.error && !isSharePasswordError(unlockMutation.error, "share_expired")
       ? "sharing.passwordInvalid"
       : null;
 
@@ -162,7 +233,6 @@ const PublicSharePasswordForm = ({
       <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-card p-8 shadow-sm">
         <LockKeyhole className="mx-auto h-9 w-9 text-slate-700" />
         <h1 className="mt-4 text-center text-xl font-semibold text-slate-900">{t("sharing.passwordRequiredTitle")}</h1>
-        <p className="mt-2 text-center text-sm leading-6 text-slate-500">{t("sharing.passwordRequiredHint")}</p>
         <form className="mt-6 space-y-3" onSubmit={submit}>
           <Input
             type="password"
@@ -184,8 +254,11 @@ const PublicSharePasswordForm = ({
 };
 
 export const PublicSharePage = () => {
-  const { t, i18n } = useTranslation();
-  const { token = "" } = useParams();
+  const { t } = useTranslation();
+  const { token: routeToken = "" } = useParams();
+  // The dev server answers `/share/<token>.md` itself. If the app shell still
+  // loads that address, the suffix is not part of the share token.
+  const token = routeToken.endsWith(".md") ? routeToken.slice(0, -3) : routeToken;
   const shareQuery = useQuery({
     queryKey: ["public-share", token],
     queryFn: () => api.getPublicMemoShare(token),
@@ -194,20 +267,7 @@ export const PublicSharePage = () => {
   });
   const share = shareQuery.data?.share;
   const passwordRequired = isSharePasswordError(shareQuery.error, "share_password_required");
-  const publishedBodyFont = share ? parsePublishedNoteBodyFont(share.bodyFont) : undefined;
-
-  useEffect(() => {
-    if (publishedBodyFont === undefined) return undefined;
-    if (!publishedBodyFont) {
-      delete document.documentElement.dataset.editorBodyFont;
-      document.documentElement.style.removeProperty("--editor-body-font-family");
-    } else {
-      applyEditorBodyFontPreference({ choice: publishedBodyFont, customFamily: "" });
-    }
-    return () => {
-      applyEditorBodyFontPreference();
-    };
-  }, [publishedBodyFont]);
+  const expired = isSharePasswordError(shareQuery.error, "share_expired");
 
   useEffect(() => {
     const previousTitle = document.title;
@@ -217,7 +277,7 @@ export const PublicSharePage = () => {
     document.head.appendChild(robots);
     if (share) {
       document.title = withEnvironmentTitlePrefix(
-        `${share.title?.trim() || t("common.untitledMemo")} · EdgeEver`,
+        `${getMemoDisplayTitle(share.title, t("common.untitledMemo"))} · EdgeEver`,
         { development: import.meta.env.DEV, profile: __EDGEEVER_DEVELOPMENT_PROFILE__ },
       );
     } else if (passwordRequired) {
@@ -248,46 +308,161 @@ export const PublicSharePage = () => {
     return (
       <main className="flex min-h-[100dvh] items-center justify-center bg-slate-50 px-5">
         <section className="max-w-md rounded-2xl border border-slate-200 bg-card p-8 text-center shadow-sm">
-          <FileText className="mx-auto h-9 w-9 text-slate-400" />
-          <h1 className="mt-4 text-xl font-semibold text-slate-900">{t("sharing.publicUnavailable")}</h1>
-          <p className="mt-2 text-sm leading-6 text-slate-500">{t("sharing.publicUnavailableHint")}</p>
+          {expired ? <Clock3 className="mx-auto h-9 w-9 text-slate-400" /> : <FileText className="mx-auto h-9 w-9 text-slate-400" />}
+          <h1 className="mt-4 text-xl font-semibold text-slate-900">{t(expired ? "sharing.publicExpired" : "sharing.publicUnavailable")}</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-500">{t(expired ? "sharing.publicExpiredHint" : "sharing.publicUnavailableHint")}</p>
         </section>
       </main>
     );
   }
 
+  return <main className="min-h-[100dvh] bg-slate-50"><PublicShareArticle share={share} token={token} /></main>;
+};
+
+export const PublicShareArticle = ({
+  share,
+  token,
+  access,
+  layout = "standalone",
+}: {
+  share: PublicMemoShare;
+  token: string;
+  access?: ShareBodyAccess;
+  layout?: "standalone" | "site";
+}) => {
+  const { t, i18n } = useTranslation();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [outlineAvailable, setOutlineAvailable] = useState(false);
+  const openSearch = useContext(NotebookSiteSearchContext);
+  const publishedBodyFont = parsePublishedNoteBodyFont(share.bodyFont);
+  const showUpdatedAt = layout === "site" || share.showUpdatedAt !== false;
+  const showBranding = layout === "standalone" && share.showBranding !== false;
+
+  useEffect(() => {
+    if (publishedBodyFont === undefined) return undefined;
+    if (!publishedBodyFont) {
+      applyEditorBodyFontPreference({ choice: "system", customFamily: "" });
+    } else {
+      applyEditorBodyFontPreference({
+        choice: publishedBodyFont,
+        customFamily: "",
+      });
+    }
+    return () => {
+      applyEditorBodyFontPreference();
+    };
+  }, [publishedBodyFont]);
+
+  const prose = resolveNoteProse(share.prose);
   return (
-    <main className="edgeever-public-share min-h-[100dvh] bg-slate-50 px-4 py-6 sm:px-8 sm:py-10">
-      <article className="mx-auto max-w-4xl overflow-hidden rounded-2xl border border-slate-200 bg-card shadow-sm">
-        <header className="border-b border-slate-200 px-5 py-6 sm:px-10 sm:py-8">
-          <div className="mb-5 flex items-center justify-between gap-4 text-xs text-slate-500">
-            <span className="flex items-center gap-1.5 font-semibold text-slate-700">
-              <ShieldCheck className="h-4 w-4" /> EdgeEver · {t("sharing.readOnly")}
-            </span>
-            <span className="flex items-center gap-1.5">
-              <Clock3 className="h-4 w-4" />
-              {t("sharing.publicUpdated", {
-                time: new Intl.DateTimeFormat(i18n.resolvedLanguage || i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(share.updatedAt)),
-              })}
-            </span>
-          </div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">
-            {share.title?.trim() || t("common.untitledMemo")}
+    <div
+      ref={containerRef}
+      className={cn(
+        "edgeever-public-share relative",
+        layout === "site"
+          ? "py-6 sm:py-8 xl:pr-56"
+          : cn("px-4 py-6 sm:px-8 sm:py-10", outlineAvailable && "xl:pr-56"),
+      )}
+    >
+      <article
+        className={cn(
+          "mx-auto max-w-4xl overflow-hidden",
+          layout === "standalone" &&
+            "rounded-2xl border border-slate-200 bg-card shadow-sm",
+        )}
+      >
+        <header
+          className={cn(
+            "px-5 sm:px-10",
+            layout === "site"
+              ? "flex flex-col pb-5"
+              : "border-b border-slate-200 py-6 sm:py-8",
+          )}
+        >
+          <h1
+            className={cn(
+              "break-words text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl",
+              layout === "site" && "order-1",
+            )}
+          >
+            {getMemoDisplayTitle(share.title, t("common.untitledMemo"))}
           </h1>
+          {showUpdatedAt ? (
+            <div
+              className={cn(
+                "mt-4 flex items-center gap-1.5 text-xs text-slate-500",
+                layout === "site" && "order-2",
+              )}
+            >
+              <Clock3 className="h-4 w-4" />
+              <time dateTime={share.updatedAt}>
+                {t("sharing.publicUpdated", {
+                  time: new Intl.DateTimeFormat(
+                    i18n.resolvedLanguage || i18n.language,
+                    { dateStyle: "medium", timeStyle: "short" },
+                  ).format(new Date(share.updatedAt)),
+                })}
+              </time>
+            </div>
+          ) : null}
           {share.tags.length > 0 ? (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {share.tags.map((tag) => <span key={tag} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">#{tag}</span>)}
+            <div
+              className={cn(
+                "mt-4 flex flex-wrap gap-2",
+                layout === "site" && "order-3",
+              )}
+            >
+              {share.tags.map((tag) => layout === "site" ? (
+                <button type="button"
+                  key={tag}
+                  onClick={() => openSearch(tag)}
+                  className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600"
+                >
+                  #{tag}
+                </button>
+              ) : <span key={tag} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">#{tag}</span>)}
             </div>
           ) : null}
         </header>
-        <div className="edgeever-editor px-1 py-4 sm:px-4 sm:py-7" data-editor-theme="default">
+        <div
+          className={cn(
+            "edgeever-editor",
+            layout === "site" ? "py-4 sm:py-5" : "px-1 py-4 sm:px-4 sm:py-7",
+          )}
+          data-editor-theme="default"
+          data-note-palette={prose.palette}
+          style={noteProseCssVariables(prose) as CSSProperties}
+        >
+          {prose.customCss ? (
+            <style
+              dangerouslySetInnerHTML={{
+                __html: sanitizeAndScopeCss(prose.customCss),
+              }}
+            />
+          ) : null}
           <SharedDocument
-            locale={(i18n.resolvedLanguage || i18n.language || "zh-CN").startsWith("en") ? "en-US" : "zh-CN"}
+            locale={resolveSupportedLocale(i18n.resolvedLanguage || i18n.language)}
             share={share}
             token={token}
+            access={access}
+            site={layout === "site"}
           />
         </div>
+        {showBranding ? (
+          <footer className="px-5 pb-6 pt-2 text-center text-xs text-slate-500 sm:px-10 sm:pb-8">
+            <a
+              href="https://edgeever.org/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-sm transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+            >
+              {t("sharing.publishedWith")}
+            </a>
+          </footer>
+        ) : null}
       </article>
-    </main>
+      <PublicArticleOutline containerRef={containerRef} onAvailableChange={setOutlineAvailable} />
+      {layout === "site" && <NotebookSiteArticleTools containerRef={containerRef} token={token} memoUrls={access?.memoUrls ?? {}} />}
+    </div>
   );
 };

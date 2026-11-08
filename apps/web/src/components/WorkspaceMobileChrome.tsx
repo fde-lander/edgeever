@@ -11,6 +11,7 @@ import {
   DrawerTitle,
 } from "@/components/ui/drawer";
 import { cn } from "@/lib/utils";
+import { useDeployedUpdateNotice } from "@/hooks/useDeployedUpdateNotice";
 import { BETA_BADGE_CLASSNAME } from "@/lib/workspace-ui";
 import type { NoteCreateKind, Notebook } from "@edgeever/shared";
 import type { MobileBottomNavItem, NotebookNode } from "@/lib/app-helpers";
@@ -19,18 +20,19 @@ import {
   filterNotebookTree,
   getExpandableNotebookIds,
   getNotebookAncestorIds,
-  notebookTreeContainsId,
 } from "@/lib/app-helpers";
 
 const MobileBottomNavButton = ({
   active = false,
   icon,
   label,
+  notice = false,
   onClick,
 }: {
   active?: boolean;
   icon: ReactNode;
   label: string;
+  notice?: boolean;
   onClick: () => void;
 }) => (
   <button
@@ -46,7 +48,10 @@ const MobileBottomNavButton = ({
     onClick={onClick}
   >
     {active ? <span aria-hidden="true" className="absolute top-0 h-0.5 w-5 rounded-full bg-slate-950" /> : null}
-    {icon}
+    <span className="relative">
+      {icon}
+      {notice ? <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-card" /> : null}
+    </span>
     <span>{label}</span>
   </button>
 );
@@ -67,6 +72,7 @@ export const MobileBottomNav = ({
   onOpenSettings: () => void;
 }) => {
   const { t } = useTranslation();
+  const { unseen: deployedUpdateUnseen } = useDeployedUpdateNotice();
   const createMemoLabel = !canCreateMemo ? t("nav.createDisabled") : isCreating ? t("nav.creating") : t("nav.createMemo");
 
   return (
@@ -108,16 +114,19 @@ export const MobileBottomNav = ({
             <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("infographic")}>
               <PieChart className="h-4 w-4 shrink-0" />
               <span className="min-w-0 flex-1 truncate">{t("infographic.name")}</span>
-              <span className={BETA_BADGE_CLASSNAME}>Beta</span>
             </DropdownMenuItem>
-            <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("table")}>
+            <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("poster")}>
+        <FileText className="h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{t("poster.name")}</span>
+        <span className={BETA_BADGE_CLASSNAME}>Beta</span>
+      </DropdownMenuItem>
+      <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("table")}>
               <Table2 className="h-4 w-4 shrink-0" />
               <span className="min-w-0 flex-1 truncate">{t("structuredTable.name")}</span>
-              <span className={BETA_BADGE_CLASSNAME}>Beta</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <MobileBottomNavButton active={activeItem === "settings"} icon={<UserRound className="h-5 w-5" />} label={t("nav.mine")} onClick={onOpenSettings} />
+        <MobileBottomNavButton active={activeItem === "settings"} icon={<UserRound className="h-5 w-5" />} label={t("nav.mine")} notice={deployedUpdateUnseen} onClick={onOpenSettings} />
       </div>
     </nav>
   );
@@ -325,7 +334,6 @@ const MobileNotebookPickerItem = ({
   const { t } = useTranslation();
   const selected = node.id === selectedNotebookId;
   const hasChildren = node.children.length > 0;
-  const hasSelectedDescendant = selectedNotebookId ? notebookTreeContainsId(node.children, selectedNotebookId) : false;
   const expanded = searchActive || expandedNotebookIds.has(node.id);
 
   return (
@@ -335,18 +343,17 @@ const MobileNotebookPickerItem = ({
         className={cn(
           "flex h-12 w-full items-center gap-3 rounded-md px-3 text-left text-sm transition",
           selected
-            ? "bg-slate-100 font-semibold text-slate-950"
-            : hasSelectedDescendant
-              ? "bg-slate-50 text-slate-900 hover:bg-slate-100"
-              : "text-slate-800 hover:bg-slate-50"
+            ? "bg-slate-100 font-semibold text-black dark:text-slate-950"
+            : "text-slate-800 hover:bg-slate-50"
         )}
         style={{ paddingLeft: `${12 + depth * 18}px` }}
       >
         {hasChildren ? (
           <button
             className={cn(
-              "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition",
-              searchActive ? "cursor-default" : "hover:bg-slate-100 hover:text-slate-700"
+              "flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition",
+              selected ? "text-slate-950" : "text-slate-400",
+              searchActive ? "cursor-default" : selected ? "hover:bg-slate-100" : "hover:bg-slate-100 hover:text-slate-700"
             )}
             type="button"
             disabled={searchActive}

@@ -1,9 +1,15 @@
-import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, type ClipboardEvent as ReactClipboardEvent } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, type ClipboardEvent as ReactClipboardEvent } from "react";
 import CodeMirror, {
   EditorView,
+  Decoration,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
   type ReactCodeMirrorRef,
   type Extension,
 } from "@uiw/react-codemirror";
+import { isolateHistory } from "@codemirror/commands";
+import { getMarkdownReplacementChanges, getMarkdownSearchMatches } from "./markdown-source-search";
 import { markdown } from "@codemirror/lang-markdown";
 import {
   githubLightInit,
@@ -24,9 +30,11 @@ import {
   gruvboxDark,
 } from "@uiw/codemirror-themes-all";
 import type { MarkdownThemeName } from "../ThemeProvider";
+import { isPrimaryModifierPressed } from "@/lib/app-helpers";
 import { getAiSlashCommandStart } from "@/lib/editor-shortcuts";
 import { lightMarkdownHighlightStyles } from "@/lib/markdown-source-highlight";
 import { cn } from "@/lib/utils";
+import { editorFontLoadState } from "@/lib/editor-catalog-fonts";
 import { getResourceFilesFromDataTransfer } from "./editor-pane-helpers";
 
 type PendingPaste = { from: number; to: number; originalText: string };
@@ -35,8 +43,12 @@ export interface MarkdownSourceEditorRef {
   getScrollContainer: () => HTMLElement | null;
   getSelection: () => { from: number; to: number };
   setSelection: (from: number, to: number) => void;
+  replaceDocument: (value: string) => void;
+  replaceSearchMatches: (query: string, replacement: string) => void;
   focus: () => void;
   insertText: (text: string, from?: number, to?: number) => void;
+  sliceText: (from: number, to: number) => string;
+  getDocumentLength: () => number;
   getSelectionCoordinates: () => { top: number; left: number; bottom: number; right: number } | null;
 }
 
@@ -52,6 +64,10 @@ export interface MarkdownSourceEditorProps {
   ariaLabel?: string;
   onSlashCommandTrigger?: (commandStart: number) => void;
   onLinkShortcut?: () => void;
+  onSelectionChange?: () => void;
+  onReady?: () => void;
+  searchQuery?: string;
+  searchIndex?: number;
 }
 
 export const CODE_MIRROR_THEME_MAP: Record<MarkdownThemeName, Extension> = {
@@ -77,9 +93,9 @@ const baseEditorTheme = EditorView.theme({
   "&": {
     height: "100%",
     width: "100%",
-    fontSize: "14px",
+    fontSize: "var(--editor-body-font-size, 16px)",
     fontFamily:
-      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      'var(--editor-code-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace)',
   },
   ".cm-scroller": {
     overflow: "auto",
@@ -93,7 +109,7 @@ const baseEditorTheme = EditorView.theme({
   },
   "@media (min-width: 1024px)": {
     ".cm-scroller": {
-      scrollbarGutter: "stable both-edges",
+      scrollbarGutter: "stable",
     },
   },
   ".cm-line": {
@@ -122,6 +138,10 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
       ariaLabel,
       onSlashCommandTrigger,
       onLinkShortcut,
+      onSelectionChange,
+      onReady,
+      searchQuery = "",
+      searchIndex = 0,
     },
     ref,
   ) => {
@@ -129,6 +149,37 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
     const memoIdRef = useRef(memoId);
     memoIdRef.current = memoId;
     const pendingPastesRef = useRef(new Set<PendingPaste>());
+    const onSelectionChangeRef = useRef(onSelectionChange);
+    onSelectionChangeRef.current = onSelectionChange;
+
+    useEffect(() => {
+      // A CSS variable change and a later font download can both change glyph
+      // widths without changing the document. Refresh CodeMirror's measurements.
+      const measure = () => cmRef.current?.view?.requestMeasure();
+      const observer = new MutationObserver(measure);
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["style", "data-editor-code-font"],
+      });
+      const unsubscribe = editorFontLoadState.subscribe(measure);
+      return () => { observer.disconnect(); unsubscribe(); };
+    }, []);
+
+    useEffect(() => {
+      let frame = 0;
+      let cancelled = false;
+      let attempts = 0;
+      const notifyWhenReady = () => {
+        if (cancelled) return;
+        if (cmRef.current?.view) onReady?.();
+        else if (attempts++ < 120) frame = window.requestAnimationFrame(notifyWhenReady);
+      };
+      notifyWhenReady();
+      return () => {
+        cancelled = true;
+        window.cancelAnimationFrame(frame);
+      };
+    }, [onReady]);
 
     useImperativeHandle(
       ref,
@@ -155,6 +206,21 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
             scrollIntoView: true,
           });
         },
+        replaceSearchMatches: (query: string, replacement: string) => {
+          const view = cmRef.current?.view;
+          if (!view || view.state.readOnly) return;
+          const changes = getMarkdownReplacementChanges(view.state.doc, query, replacement);
+          if (changes.length) view.dispatch({ changes, userEvent: "input.replace", annotations: isolateHistory.of("full") });
+        },
+        replaceDocument: (value: string) => {
+          const view = cmRef.current?.view;
+          if (!view || view.state.doc.toString() === value) return;
+          const anchor = Math.min(view.state.selection.main.anchor, value.length);
+          view.dispatch({
+            changes: { from: 0, to: view.state.doc.length, insert: value },
+            selection: { anchor },
+          });
+        },
         focus: () => {
           cmRef.current?.view?.focus();
         },
@@ -170,6 +236,15 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
             scrollIntoView: true,
           });
         },
+        sliceText: (from: number, to: number) => {
+          const view = cmRef.current?.view;
+          if (!view) return "";
+          const length = view.state.doc.length;
+          const safeFrom = Math.max(0, Math.min(from, length));
+          const safeTo = Math.max(safeFrom, Math.min(to, length));
+          return view.state.doc.sliceString(safeFrom, safeTo);
+        },
+        getDocumentLength: () => cmRef.current?.view?.state.doc.length ?? 0,
         getSelectionCoordinates: () => {
           const view = cmRef.current?.view;
           if (!view) return null;
@@ -193,18 +268,33 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
 
     const extensions = useMemo(() => {
       return [
+        ViewPlugin.fromClass(class {
+          decorations: DecorationSet;
+          constructor(view: EditorView) { this.decorations = this.highlight(view); }
+          update(update: ViewUpdate) {
+            if (update.docChanged) this.decorations = this.highlight(update.view);
+          }
+          highlight(view: EditorView) {
+            return Decoration.set(getMarkdownSearchMatches(view.state.doc, searchQuery).map((match, index) =>
+              Decoration.mark({ class: index === searchIndex
+                ? "edgeever-search-match edgeever-search-match-active"
+                : "edgeever-search-match" }).range(match.from, match.to)), true);
+          }
+        }, { decorations: (plugin) => plugin.decorations }),
         markdown(),
         EditorView.lineWrapping,
         baseEditorTheme,
         EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          for (const pending of pendingPastesRef.current) {
-            pending.from = update.changes.mapPos(pending.from, -1);
-            pending.to = update.changes.mapPos(pending.to, 1);
+          if (update.docChanged) {
+            for (const pending of pendingPastesRef.current) {
+              pending.from = update.changes.mapPos(pending.from, -1);
+              pending.to = update.changes.mapPos(pending.to, 1);
+            }
           }
+          if (update.selectionSet || update.docChanged) onSelectionChangeRef.current?.();
         }),
       ];
-    }, []);
+    }, [searchQuery, searchIndex]);
 
     const handlePasteCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
       if (readOnly || !onPasteFiles) return;
@@ -240,9 +330,9 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent | KeyboardEvent) => {
-        // Link shortcut: Cmd+K / Ctrl+K
+        // Link shortcut uses the platform primary modifier, leaving macOS Control+K for deleting to the line end.
         if (
-          (event.ctrlKey || event.metaKey) &&
+          isPrimaryModifierPressed(event) &&
           !event.altKey &&
           !event.shiftKey &&
           event.key.toLowerCase() === "k"
@@ -333,7 +423,7 @@ export const MarkdownSourceEditor = forwardRef<MarkdownSourceEditorRef, Markdown
             // lights up later list items and looks like extra selection.
             highlightSelectionMatches: false,
             closeBracketsKeymap: true,
-            searchKeymap: true,
+            searchKeymap: false,
             foldKeymap: false,
             completionKeymap: false,
             lintKeymap: false,

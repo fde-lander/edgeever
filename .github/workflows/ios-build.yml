@@ -69,6 +69,7 @@ jobs:
           DEST="$(
             xcodebuild -project EdgeEver.xcodeproj -scheme EdgeEver -showdestinations 2>/dev/null \
               | sed -n 's/.*name:\(iPhone[^,}]*\).*/\1/p' \
+              | sed 's/[[:space:]]*$//' \
               | head -1
           )"
           if [[ -z "$DEST" ]]; then

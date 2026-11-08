@@ -24,6 +24,15 @@ const createApp = (overrides = {}) => {
   return app;
 };
 
+test("poster previews emit MCP image content without duplicating base64 in metadata", async () => {
+  const app = createApp({ callTool: async () => ({ available: true, revision: 1, image: { data: "AQID", mimeType: "image/png" } }) });
+  const response = await app.request("/mcp", mcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_poster_preview", arguments: { memoId: "poster" } } }, { "MCP-Protocol-Version": "2025-11-25" }));
+  const result = (await response.json()).result;
+  expect(result.content[1]).toEqual({ type: "image", data: "AQID", mimeType: "image/png" });
+  expect(result.content[0].text).not.toContain("AQID");
+  expect(result.structuredContent.image).toBeUndefined();
+});
+
 const mcpRequest = (payload, headers = {}) => ({
   method: "POST",
   headers: {
@@ -36,12 +45,12 @@ const mcpRequest = (payload, headers = {}) => ({
 
 const modernMcpRequest = (payload, headers = {}) => {
   const params = {
-    ...(payload.params ?? {}),
+    ...payload.params,
     _meta: {
       "io.modelcontextprotocol/protocolVersion": "2026-07-28",
       "io.modelcontextprotocol/clientInfo": { name: "edgeever-test", version: "1.0.0" },
       "io.modelcontextprotocol/clientCapabilities": {},
-      ...(payload.params?._meta ?? {}),
+      ...payload.params?._meta,
     },
   };
   const name = payload.method === "resources/read" ? params.uri : params.name;
@@ -134,6 +143,14 @@ describe("MCP HTTP routes", () => {
       _meta: { "io.modelcontextprotocol/serverInfo": { name: "edgeever" } },
     });
     expect(body.result.tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "get_current_user" })]));
+    expect(body.result.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "get_table_records", annotations: expect.objectContaining({ readOnlyHint: true }) }),
+      expect.objectContaining({ name: "add_table_record" }),
+      expect.objectContaining({ name: "update_table_record" }),
+      expect.objectContaining({ name: "delete_table_record" }),
+      expect.objectContaining({ name: "create_table_memo" }),
+      expect.objectContaining({ name: "update_table_schema" }),
+    ]));
   });
 
   test("requires matching 2026 transport headers and per-request metadata", async () => {
@@ -218,7 +235,22 @@ describe("MCP HTTP routes", () => {
 
     expect(response.status).toBe(401);
     expect(response.headers.get("WWW-Authenticate")).toBe('Bearer realm="EdgeEver MCP"');
-    expect(await response.json()).toMatchObject({ error: { code: -32001 } });
+    expect(await response.json()).toMatchObject({
+      error: { code: -32001, message: expect.stringContaining("Authorization: Bearer <token>") },
+    });
+  });
+
+  test("reports a rejected bearer token as invalid_token", async () => {
+    const response = await createApp({ authenticateRequest: async () => null }).request(
+      "/mcp",
+      mcpRequest({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { Authorization: "Bearer eev_revoked" }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toBe('Bearer realm="EdgeEver MCP", error="invalid_token"');
+    expect(await response.json()).toMatchObject({
+      error: { code: -32001, message: expect.stringContaining("Invalid or revoked API token") },
+    });
   });
 
   test("delegates known tool calls and preserves structured output", async () => {

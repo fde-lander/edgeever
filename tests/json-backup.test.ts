@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AiPromptTemplate, JsonBackupMemo, JsonBackupNotebook, MemoDetail, Notebook, Resource } from "@edgeever/shared";
+import { splitMarkdownFrontMatter } from "@edgeever/shared";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import {
   createEdgeEverZip,
@@ -14,7 +15,12 @@ const notebook = (id: string, name: string, parentId: string | null = null): Not
   name,
   slug: id,
   icon: "notebook",
-  color: null,
+  color: "#2563eb",
+  textColor: "#123456",
+  colorTarget: "both",
+  isBold: true,
+  iconInverted: true,
+  rowInverted: true,
   sortOrder: parentId ? 20 : 10,
   memoCount: 1,
   lastMemoUpdatedAt: "2026-07-14T00:00:00.000Z",
@@ -78,8 +84,29 @@ const prompt: AiPromptTemplate = {
 };
 
 describe("EdgeEver ZIP", () => {
+  test("passes server-provided continuation cursors to later ZIP pages", async () => {
+    const cursors: (string | undefined)[] = [];
+    const blob = await createEdgeEverZip({
+      listNotebooks: async () => ({ notebooks: [notebook("nb_child", "Child")] }),
+      listPrompts: async () => ({ prompts: [] }),
+      getPage: async (offset, _limit, cursor) => {
+        cursors.push(cursor);
+        return { memos: [{ ...memo, id: `memo_cursor_${offset}`, contentMarkdown: "body" }], resources: [], revisions: [],
+          ...(offset === 0 ? { totalCount: 2 } : {}), nextOffset: offset === 0 ? 1 : null, nextCursor: offset === 0 ? "next-page" : null };
+      },
+      getResourceResponse: async () => new Response(),
+    }, { edgeeverVersion: "2.16.1", buildId: "cursor" });
+    expect(cursors).toEqual([undefined, "next-page"]);
+    expect((await parseEdgeEverZip(blob)).manifest.counts.memos).toBe(2);
+  });
+
   test("reports actionable archive validation errors", async () => {
     await expect(parseEdgeEverZip(new Blob(["not a zip"]))).rejects.toEqual(
+      expect.objectContaining({ code: "invalidZip" })
+    );
+    const localHeaderOnly = new Uint8Array(64);
+    localHeaderOnly.set([0x50, 0x4b, 0x03, 0x04]);
+    await expect(parseEdgeEverZip(new Blob([localHeaderOnly]))).rejects.toEqual(
       expect.objectContaining({ code: "invalidZip" })
     );
 
@@ -104,6 +131,24 @@ describe("EdgeEver ZIP", () => {
     await expect(parseEdgeEverZip(new Blob([zipSync({
       "manifest.json": strToU8(JSON.stringify({ ...manifest, format: "edgeever-zip", formatVersion: 99 })),
     })]))).rejects.toEqual(expect.objectContaining({ code: "unsupportedVersion" }));
+  });
+
+  test("keeps archive counts and progress when later pages omit totals", async () => {
+    const progress: { completed: number; total: number }[] = [];
+    const blob = await createEdgeEverZip({
+      listNotebooks: async () => ({ notebooks: [notebook("nb_child", "Child")] }),
+      listPrompts: async () => ({ prompts: [] }),
+      getPage: async (offset) => ({
+        memos: [{ ...memo, id: `memo_page_${offset}`, contentMarkdown: "body" }],
+        resources: [], revisions: [],
+        ...(offset === 0 ? { totalCount: 2 } : {}), nextOffset: offset === 0 ? 1 : null,
+      }),
+      getResourceResponse: async () => new Response(),
+    }, { edgeeverVersion: "2.16.0", buildId: "pagination" }, (value) => progress.push(value));
+    const parsed = await parseEdgeEverZip(blob);
+    expect(parsed.manifest.counts.memos).toBe(2);
+    expect(progress.every((value) => value.total === 2)).toBe(true);
+    expect(progress.at(-1)?.completed).toBe(2);
   });
 
   test("combines readable Markdown with versioned recovery data", async () => {
@@ -148,6 +193,10 @@ describe("EdgeEver ZIP", () => {
     expect(backup.manifest.format).toBe("edgeever-zip");
     expect(backup.manifest.formatVersion).toBe(2);
     expect(backup.manifest.counts).toEqual({ notebooks: 2, memos: 1, revisions: 1, resources: 1, prompts: 1 });
+    expect(backup.notebooks.find((item) => item.id === "nb_child")).toMatchObject({
+      color: "#2563eb", textColor: "#123456", colorTarget: "both",
+      isBold: true, iconInverted: true, rowInverted: true,
+    });
     expect(backup.prompts).toEqual([prompt]);
     expect(backup.notebooks.map((item) => item.id)).toEqual(["nb_root", "nb_child"]);
     expect(backup.memos[0].memo.contentMarkdown).toBe(memo.contentMarkdown);
@@ -156,7 +205,7 @@ describe("EdgeEver ZIP", () => {
     const files = unzipSync(new Uint8Array(await blob.arrayBuffer()));
     expect(Array.from(files[backup.memos[0].resources[0].archivePath])).toEqual([1, 2, 3]);
     const markdown = strFromU8(files["notes/Root/Child/Backup note.md"]);
-    expect(markdown).toContain("edgeever_id: \"memo_backup\"");
+    expect(splitMarkdownFrontMatter(markdown)?.values?.edgeever_id).toBe("memo_backup");
     expect(markdown).toContain("![asset](Backup%20note.assets/asset.png)");
     expect(backup.memos[0].resources[0].archivePath).toBe("notes/Root/Child/Backup note.assets/asset.png");
   });
@@ -181,7 +230,70 @@ describe("EdgeEver ZIP", () => {
     expect(backup.prompts).toEqual([]);
   });
 
-  test("inspects multi-gigabyte archives through their stream instead of buffering the ZIP", async () => {
+  test("imports Markdown attachments without counting them as notes in v1 and v2 backups", async () => {
+    const attachment = strToU8("# Attached Markdown\n");
+    const blob = await createEdgeEverZip({
+      listNotebooks: async () => ({ notebooks: [notebook("nb_child", "Child")] }),
+      listPrompts: async () => ({ prompts: [] }),
+      getPage: async () => ({
+        memos: [memo],
+        resources: [{
+          ...resource,
+          kind: "attachment",
+          mimeType: "text/markdown",
+          filename: "reference.md",
+          byteSize: attachment.byteLength,
+          sha256: null,
+        }],
+        revisions: [],
+        totalCount: 1,
+        nextOffset: null,
+      }),
+      getResourceResponse: async () => new Response(attachment),
+    }, { edgeeverVersion: "1.125.0", buildId: "markdown-attachment" });
+    const files = unzipSync(new Uint8Array(await blob.arrayBuffer()));
+    const manifest = JSON.parse(strFromU8(files["manifest.json"]));
+    const attachmentPath = "notes/Child/Backup note.assets/reference.md";
+    expect(files[attachmentPath]).toEqual(attachment);
+
+    for (const formatVersion of [1, 2]) {
+      const archiveFiles = { ...files };
+      archiveFiles["manifest.json"] = strToU8(JSON.stringify({ ...manifest, formatVersion }));
+      if (formatVersion === 1) delete archiveFiles["prompts.json"];
+      const backup = await parseEdgeEverZip(new Blob([zipSync(archiveFiles)]));
+      expect(backup.memos).toHaveLength(1);
+      expect(backup.memos[0].resources[0].archivePath).toBe(attachmentPath);
+      const restored: Uint8Array[] = [];
+      await restoreEdgeEverZip(backup, {
+        restoreNotebooks: async () => {},
+        restoreMemos: async () => {},
+        restorePrompts: async () => {},
+        createResourceRestoreSink: async () => ({
+          write: async (chunk) => { restored.push(new Uint8Array(chunk)); },
+          close: async () => {},
+          abort: async () => {},
+        }),
+      });
+      expect(restored).toEqual([attachment]);
+
+      for (const missingPath of ["memos/memo_backup.json", "notes/Child/Backup note.md", attachmentPath]) {
+        const incomplete = { ...archiveFiles };
+        delete incomplete[missingPath];
+        await expect(parseEdgeEverZip(new Blob([zipSync(incomplete)]))).rejects.toEqual(
+          expect.objectContaining({ code: missingPath === attachmentPath ? "incompleteResources" : "incompleteData" }),
+        );
+      }
+      const missingRevision = { ...archiveFiles };
+      missingRevision["manifest.json"] = strToU8(JSON.stringify({
+        ...manifest, formatVersion, counts: { ...manifest.counts, revisions: 1 },
+      }));
+      await expect(parseEdgeEverZip(new Blob([zipSync(missingRevision)]))).rejects.toEqual(
+        expect.objectContaining({ code: "incompleteData" }),
+      );
+    }
+  });
+
+  test("reads large archives by bounded ranges instead of buffering the ZIP", async () => {
     const manifest = {
       format: "edgeever-zip",
       formatVersion: 1,
@@ -192,16 +304,28 @@ describe("EdgeEver ZIP", () => {
       includesTrash: false,
       counts: { notebooks: 0, memos: 0, revisions: 0, resources: 0 },
     };
+    const storedPayload = new Uint8Array(1024 * 1024 + 10);
     const actualArchive = new Blob([zipSync({
       "manifest.json": strToU8(JSON.stringify(manifest)),
       "notebooks.json": strToU8("[]"),
-    })]);
+      "pad.bin": storedPayload,
+    }, { level: 0 })]);
+    const rangeLengths: number[] = [];
     let wholeArchiveBuffered = false;
     const largeStreamingArchive = {
-      size: 2 * 1024 * 1024 * 1024,
+      size: actualArchive.size,
       type: "application/zip",
-      slice: actualArchive.slice.bind(actualArchive),
-      stream: actualArchive.stream.bind(actualArchive),
+      slice(start?: number, end?: number) {
+        const from = start ?? 0;
+        const to = end ?? actualArchive.size;
+        const length = to - from;
+        rangeLengths.push(length);
+        if (length > 1024 * 1024) throw new Error(`Buffered ${length} bytes from the archive`);
+        return actualArchive.slice(from, to);
+      },
+      stream() {
+        throw new Error("The whole archive must not be streamed");
+      },
       arrayBuffer: async () => {
         wholeArchiveBuffered = true;
         throw new Error("The whole archive must not be buffered");
@@ -213,6 +337,107 @@ describe("EdgeEver ZIP", () => {
     expect(backup.manifest.buildId).toBe("large-stream-test");
     expect(backup.archive).toBe(largeStreamingArchive);
     expect(wholeArchiveBuffered).toBe(false);
+    expect(rangeLengths).toContain(1024 * 1024);
+    expect(Math.max(...rangeLengths)).toBeLessThanOrEqual(1024 * 1024);
+  });
+
+  test("restores stored Office attachments that contain their own ZIP entries", async () => {
+    const docx = zipSync({
+      "[Content_Types].xml": strToU8("<Types></Types>"),
+      "word/document.xml": strToU8("<document>hello</document>"),
+    });
+    const xlsx = zipSync({
+      "[Content_Types].xml": strToU8("<Types></Types>"),
+      "xl/workbook.xml": strToU8("<workbook/>"),
+    });
+    const officeNotebook = notebook("nb_office", "资料");
+    const officeMemo: MemoDetail = {
+      ...memo,
+      id: "memo_office",
+      notebookId: officeNotebook.id,
+      title: "Office",
+      contentMarkdown: "office",
+    };
+    const officeResource = (
+      id: string,
+      filename: string,
+      mimeType: string,
+      bytes: Uint8Array,
+    ): Resource => ({
+      ...resource,
+      id,
+      memoId: officeMemo.id,
+      kind: "attachment",
+      mimeType,
+      filename,
+      byteSize: bytes.byteLength,
+      sha256: null,
+      width: null,
+      height: null,
+      url: `/api/v1/resources/${id}/blob`,
+    });
+    const docxResource = officeResource(
+      "res_docx",
+      "brief.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      docx,
+    );
+    const xlsxResource = officeResource(
+      "res_xlsx",
+      "sheet.xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      xlsx,
+    );
+    const files = new Map<string, Uint8Array>([
+      [docxResource.url, docx],
+      [xlsxResource.url, xlsx],
+    ]);
+    const blob = await createEdgeEverZip({
+      listNotebooks: async () => ({ notebooks: [officeNotebook] }),
+      listPrompts: async () => ({ prompts: [] }),
+      getPage: async () => ({
+        memos: [officeMemo],
+        resources: [docxResource, xlsxResource],
+        revisions: [],
+        totalCount: 1,
+        nextOffset: null,
+      }),
+      getResourceResponse: async (url) => new Response(files.get(url)),
+    }, { edgeeverVersion: "1.95.0", buildId: "office-zip" });
+
+    const backup = await parseEdgeEverZip(blob);
+    const restored = new Map<string, Uint8Array>();
+    await restoreEdgeEverZip(backup, {
+      restoreNotebooks: async () => {},
+      restoreMemos: async () => {},
+      restorePrompts: async () => {},
+      createResourceRestoreSink: async (resourceId) => {
+        const chunks: Uint8Array[] = [];
+        return {
+          write: async (chunk) => {
+            chunks.push(new Uint8Array(chunk));
+          },
+          close: async () => {
+            const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            restored.set(resourceId, bytes);
+          },
+          abort: async () => {},
+        };
+      },
+    });
+
+    expect(backup.manifest.counts.resources).toBe(2);
+    expect(backup.memos[0].resources.map((item) => item.archivePath)).toEqual([
+      "notes/资料/Office.assets/brief.docx",
+      "notes/资料/Office.assets/sheet.xlsx",
+    ]);
+    expect(restored.get("res_docx")).toEqual(docx);
+    expect(restored.get("res_xlsx")).toEqual(xlsx);
   });
 
   test("restores notebooks before memos and binary resources", async () => {

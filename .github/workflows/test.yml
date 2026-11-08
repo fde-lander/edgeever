@@ -1,0 +1,129 @@
+name: Test
+
+# Runs regression tests, focused browser tests, lint, type checks and the web build for every
+# pull request and every push to main, so failures surface before a release
+# instead of in the release workflow.
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "marketing/video/**"
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "marketing/video/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgeever-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # Forks that deploy their own copy do not spend runners on this; pull
+    # requests opened against this repository still run here.
+    if: github.repository == 'tianma-if/edgeever'
+    name: Type check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Type check mobile
+        run: bun run typecheck:mobile
+
+      - name: Build web
+        run: bun run build:web
+
+  tests:
+    if: github.repository == 'tianma-if/edgeever'
+    name: Regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
+
+      - name: Run regression tests
+        run: bun run test
+
+  notebook-appearance:
+    if: github.repository == 'tianma-if/edgeever'
+    name: Notebook appearance (Chromium and WebKit)
+    # Safari's mouse-focus behavior differs from Chromium and from Linux WebKit.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
+
+      - name: Install Chromium and WebKit
+        run: bun run test:e2e:install
+
+      - name: Test notebook appearance, memo sort persistence and note focus shortcuts
+        run: bun run test:e2e tests/e2e/notebook-appearance.spec.ts tests/e2e/memo-sort-preference.spec.ts tests/e2e/note-focus-shortcuts.spec.ts tests/e2e/ai-model-output-budgets.spec.ts tests/e2e/memo-list-density.spec.ts tests/e2e/memo-startup-selection.spec.ts

@@ -4,6 +4,8 @@ import { contrastRatio } from "./color-contrast";
 import {
   DEFAULT_CUSTOM_DARK_COLORS,
   DEFAULT_CUSTOM_LIGHT_COLORS,
+  MERMAID_THEME_PREFERENCES,
+  normalizeMermaidThemePreference,
   resolveMermaidTheme,
 } from "../components/ThemeProvider";
 
@@ -42,7 +44,7 @@ describe("dark theme contracts", () => {
     const memoCard = readFileSync(new URL("../components/MemoCard.tsx", import.meta.url), "utf8");
     expect(css).toContain(":root.dark .edgeever-public-share .ProseMirror");
     expect(css).toContain("color: hsl(var(--foreground));");
-    expect(css).toContain("--workspace-memo-divider: #3b4540;");
+    expect(css).toContain("--workspace-memo-divider: #383a3d;");
     expect(css).toContain(":root.dark .edgeever-workspace-memo-list .edgeever-memo-divider");
     expect(memoCard).toContain("edgeever-memo-divider");
     expect(memoCard).not.toContain("dark:lg:border-slate-300");
@@ -67,22 +69,24 @@ describe("dark theme contracts", () => {
   test("workspace dark surfaces stay neutral and bundled editor themes blend into the canvas", () => {
     const css = readFileSync(new URL("../styles/globals.css", import.meta.url), "utf8");
 
-    expect(css).toContain("--workspace-canvas: #101311;");
-    expect(css).toContain("--workspace-sidebar: #121612;");
-    expect(css).toContain("--workspace-memo-list: #151a17;");
-    expect(css).toContain("--workspace-editor: #191e1b;");
+    expect(css).toContain("--workspace-canvas: #121315;");
+    expect(css).toContain("--workspace-sidebar: #17181a;");
+    expect(css).toContain("--workspace-memo-list: #1d1e20;");
+    expect(css).toContain("--workspace-editor: #222325;");
+    expect(css).toContain("--workspace-selection: #333638;");
+    expect(css).toContain("--workspace-hover: color-mix(in srgb, var(--workspace-sidebar) 90%, white);");
+    expect(css).toContain("--slate-500-rgb: 161 161 161;");
     expect(css).toContain(':not([data-editor-theme="custom"])');
     expect(css).toContain("--editor-theme-bg: var(--workspace-editor);");
-    expect(contrastRatio("#cad4ce", "#191e1b")).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio("#9aa9a0", "#191e1b")).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio("#dedede", "#222325")).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio("#a3a3a3", "#222325")).toBeGreaterThanOrEqual(4.5);
   });
 
   test("dark chrome uses workspace tokens instead of leftover blue-slate", () => {
     const css = readFileSync(new URL("../styles/globals.css", import.meta.url), "utf8");
 
-    expect(css).toContain("html.dark[data-edgeever-environment=\"local\"] body::after");
-    expect(css).toContain("--tooltip-bg: #2c3330;");
-    expect(css).toContain("--scrollbar-thumb: rgb(137 150 142 / 0.38);");
+    expect(css).toContain("--tooltip-bg: #303234;");
+    expect(css).toContain("--scrollbar-thumb: rgb(145 145 145 / 0.38);");
     expect(css).toContain("--search-match: rgb(22 160 110 / 0.32);");
     expect(css).toContain(":root.dark .ProseMirror .edgeever-mermaid-preview");
     expect(css).toContain("background: var(--workspace-editor);");
@@ -98,9 +102,9 @@ describe("dark theme contracts", () => {
       const { tokens } = readDarkThemeTokens(theme);
 
       expect(tokens.bg).toBe("var(--workspace-editor)");
-      expect(contrastRatio(tokens.text, "#191e1b")).toBeGreaterThanOrEqual(4.5);
-      expect(contrastRatio(tokens.heading, "#191e1b")).toBeGreaterThanOrEqual(4.5);
-      expect(contrastRatio(tokens.accent, "#191e1b")).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(tokens.text, "#222325")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(tokens.heading, "#222325")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(tokens.accent, "#222325")).toBeGreaterThanOrEqual(3);
       expect(contrastRatio(tokens.muted, tokens.soft)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(tokens["code-text"], tokens["code-bg"])).toBeGreaterThanOrEqual(4.5);
     }
@@ -109,14 +113,29 @@ describe("dark theme contracts", () => {
   test("automatic Mermaid themes follow the resolved appearance", () => {
     expect(resolveMermaidTheme("auto", "light")).toBe("zinc-light");
     expect(resolveMermaidTheme("auto", "dark")).toBe("zinc-dark");
-    expect(resolveMermaidTheme("dracula", "light")).toBe("dracula");
+    expect(resolveMermaidTheme("zinc-dark", "light")).toBe("zinc-dark");
+  });
+
+  test("maps retired Mermaid preferences to the original brightness", () => {
+    expect(MERMAID_THEME_PREFERENCES).toEqual(["auto", "zinc-light", "zinc-dark"]);
+    for (const name of ["tokyo-night-light", "catppuccin-latte", "nord-light", "github-light", "solarized-light"]) {
+      expect(normalizeMermaidThemePreference(name)).toBe("zinc-light");
+    }
+    for (const name of ["tokyo-night", "tokyo-night-storm", "catppuccin-mocha", "nord", "dracula", "github-dark", "solarized-dark", "one-dark"]) {
+      expect(normalizeMermaidThemePreference(name)).toBe("zinc-dark");
+    }
+    for (const name of [null, "auto", "unknown", "constructor"]) {
+      expect(normalizeMermaidThemePreference(name)).toBe("auto");
+    }
   });
 
   test("appearance changes stay out of the editor React render path", () => {
     const editorPane = readFileSync(new URL("../components/EditorPane.tsx", import.meta.url), "utf8");
     const editorThemeCss = readFileSync(new URL("../styles/editor-themes/base.css", import.meta.url), "utf8");
 
-    expect(editorPane).toContain("useEditorTheme()");
+    expect(editorPane).toContain('data-editor-theme="default"');
+    expect(editorPane).toContain("noteProseCssVariables(noteProse)");
+    expect(editorPane).not.toContain("useEditorTheme()");
     expect(editorPane).not.toContain("resolvedTheme");
     expect(editorThemeCss).toContain(':root.dark .edgeever-editor[data-editor-theme="custom"]:not([data-editor-theme="default"])');
     expect(editorThemeCss).toContain("--editor-theme-dark-bg");

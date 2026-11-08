@@ -66,7 +66,7 @@ export const localizeStoredCustomThemeName = (
 export const CUSTOM_EDITOR_THEME_FILE_SCHEMA = "edgeever.editor-theme";
 export const CUSTOM_EDITOR_THEME_FILE_VERSION = 1;
 export const MAX_CUSTOM_EDITOR_THEME_FILE_BYTES = 64 * 1024;
-export const MAX_CUSTOM_EDITOR_THEME_CSS_LENGTH = 2000;
+export const MAX_CUSTOM_EDITOR_THEME_CSS_LENGTH = 8 * 1024;
 
 const LEGACY_COLOR_FIELDS = ["background", "text", "muted", "heading", "accent", "soft", "border"] as const;
 const COLOR_FIELDS = [...LEGACY_COLOR_FIELDS, "codeBackground"] as const;
@@ -173,6 +173,7 @@ export const parseCustomEditorThemeFile = (source: string): PortableCustomEditor
 export const customEditorThemeFileName = (name: string) => {
   const safeName = name
     .trim()
+    // oxlint-disable-next-line no-control-regex -- replaces control characters in theme filenames
     .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "-")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")

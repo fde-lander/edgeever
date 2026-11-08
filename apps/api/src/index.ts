@@ -1,3 +1,4 @@
+import { isDatabaseDailyQuotaError } from "./database-errors";
 import {
   createExcerpt,
   docToText,
@@ -5,6 +6,7 @@ import {
   normalizeTags,
 } from "@edgeever/shared";
 import { Hono } from "hono";
+import { registerImportContextGuard, registerImportRoutes } from "./import-routes";
 import { cors } from "hono/cors";
 import { resolveContainerImageSource } from "./container-image-source";
 import apiProbe from "../../../docs/openapi.json";
@@ -22,6 +24,7 @@ import {
   tooManyLoginAttempts,
   verifyLogin,
 } from "./auth-service";
+import type { AuthenticateOptions } from "./auth-service";
 import {
   isDatabaseNotReadyError,
 } from "./auth-state";
@@ -50,8 +53,9 @@ import {
   restoreJsonNotebooks as restoreJsonNotebooksService,
 } from "./backup-service";
 import { sha256, sha256Bytes } from "./hash-utils";
+import { PUBLIC_PAGE_HEADERS } from "@edgeever/shared/public-page-headers";
 import { INSTANCE_BUILD_ID } from "./instance-build";
-import { resolveInstanceDeploymentMetadata } from "./instance-deployment";
+import { resolveDeploymentVersionCreatedAt, resolveImageBuildMetadata, resolveInstanceDeploymentMetadata } from "./instance-deployment";
 import type {
   DatabaseAdapter,
   PreparedStatementAdapter,
@@ -63,6 +67,7 @@ import {
   apiError,
   authNotConfigured,
   databaseNotReady,
+  httpExceptionError,
   unauthorized,
 } from "./http-errors";
 import { audit } from "./audit";
@@ -92,6 +97,7 @@ import {
   uploadResourcePart,
 } from "./resource-upload-service";
 import { registerPluginDistributionRoutes } from "./plugin-distribution-routes";
+import { registerPosterRenderRoutes } from "./poster-render-routes";
 import { registerSyncRoutes } from "./sync-routes";
 import { registerMemoRoutes } from "./memo-routes";
 import { registerScheduledTaskRoutes } from "./scheduled-task-routes";
@@ -105,21 +111,15 @@ import {
   deleteMemoRecord,
   deleteMemosRecord,
   emptyTrashMemosRecord,
-  getCurrentWorkspaceIdentity,
   getMemoDetail,
   getMemoDetailRow,
-  getMemosForBulkAction,
-  importMemosRecord,
-  listMemosForMcp,
   mapMemoDetail,
   mergeMemosRecord,
   moveMemosRecord,
-  moveMemosToNotebook,
   restoreMemoRecord,
-  restoreMemosRecord,
-  searchMemoSummaries,
   updateMemoRecord,
 } from "./memo-service";
+import { duplicateMemoRecord } from "./memo-duplicate-service";
 
 export { createMemoEditSession, mergeMemosRecord, updateMemoRecord };
 import { listMemos } from "./memo-list-service";
@@ -127,12 +127,16 @@ import {
   registerUserRoutes,
 } from "./user-routes";
 import { registerNotebookRoutes } from "./notebook-routes";
+import { registerNotebookShareRoutes, registerPublicNotebookShareRoutes } from "./notebook-share-routes";
+import { isNotebookSitePagePath, renderNotebookSitePage } from "./notebook-site-page";
+import { isPublicMemoSharePagePath, renderPublicMemoSharePage } from "./share-page";
 import { registerMemoShareRoutes, registerPublicShareRoutes } from "./share-routes";
 import { registerPublicTableFormRoutes, registerTableFormRoutes } from "./table-form-routes";
 import {
   deleteStoredObjects,
   getActiveObjectStorageConfig,
 } from "./object-storage";
+import { ensureWorkspaceExampleSeed } from "./workspace-example-seed";
 import {
   DEFAULT_WORKSPACE_ID,
   ensureUserWorkspace,
@@ -167,7 +171,7 @@ app.use(
   "/api/*",
   cors({
     origin: API_CORS_ORIGINS,
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "x-edgeever-import-context"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })
@@ -182,6 +186,16 @@ app.use(
     credentials: true,
   })
 );
+
+// Every anonymous share/form response, including errors, stays out of search
+// indexes and shared caches. Routes may still set a stricter Cache-Control.
+app.use("/api/public/*", async (c, next) => {
+  await next();
+  for (const [name, value] of Object.entries(PUBLIC_PAGE_HEADERS)) {
+    if (name === "Cache-Control" && c.res.headers.has(name)) continue;
+    c.res.headers.set(name, value);
+  }
+});
 
 app.get("/api/release", (c) => c.json(releaseSummary));
 
@@ -233,11 +247,15 @@ app.get("/api/health", async (c) => {
     name: "edgeever",
     runtime,
     ...(runtime === "self-hosted-bun"
-      ? { containerImageSource: resolveContainerImageSource(c.env.EDGE_EVER_CONTAINER_IMAGE) }
+      ? {
+          containerImageSource: resolveContainerImageSource(c.env.EDGE_EVER_CONTAINER_IMAGE),
+          ...resolveImageBuildMetadata(c.env),
+        }
       : {}),
     authMode,
     build: INSTANCE_BUILD_ID.slice(0, 12),
     deployment: resolveInstanceDeploymentMetadata(c.env),
+    deploymentVersionCreatedAt: resolveDeploymentVersionCreatedAt(c.env),
     migration: await getAppliedMigration(c.env),
     storage: {
       database: c.env.storage.diagnostics.database,
@@ -251,6 +269,7 @@ app.get("/api/health", async (c) => {
 app.get("/api/openapi.json", (c) => c.json(apiProbe));
 
 registerPublicShareRoutes(app);
+registerPublicNotebookShareRoutes(app);
 registerPublicTableFormRoutes(app);
 
 registerAuthRoutes(app, {
@@ -296,19 +315,33 @@ app.use("/api/v1/*", async (c, next) => {
       workspaceId: DEFAULT_WORKSPACE_ID,
       role: "owner",
     });
+    await ensureWorkspaceExampleSeed(c.env, DEFAULT_WORKSPACE_ID).catch((error) => {
+      console.error("EdgeEver example seed failed", error);
+    });
     await next();
     return;
   }
 
-  const auth = await authenticateRequestWithHiding(c, true);
+  const auth = await authenticateRequestWithHiding(c, true, { allowMfaRestricted: true });
 
   if (!auth) {
     return unauthorized(c, "Authentication required.");
   }
 
+  if (auth.mfaRestricted) {
+    return apiError(
+      c,
+      "mfa_rebind_required",
+      "Bind a new authenticator to finish signing in with a recovery code.",
+      403,
+    );
+  }
+
   c.set("auth", auth);
   await next();
 });
+
+registerImportContextGuard(app);
 
 registerObjectStorageRoutes(app, {
   isDemoMode: (...args) => isDemoMode(...args),
@@ -333,11 +366,14 @@ registerSyncRoutes(app, {
   clampNumber: (...args) => clampNumber(...args),
   mapMemoDetail: (...args) => mapMemoDetail(...args),
 });
+registerImportRoutes(app);
 registerTagRoutes(app);
+registerPosterRenderRoutes(app);
 registerPluginDistributionRoutes(app);
 registerScheduledTaskRoutes(app);
 registerWorkspaceExtensionRoutes(app, { isDemoMode: (...args) => isDemoMode(...args) });
 registerMemoShareRoutes(app);
+registerNotebookShareRoutes(app);
 registerTableFormRoutes(app);
 registerTemplateRoutes(app, {
   createMemoRecord: (...args) => createMemoRecord(...args),
@@ -355,6 +391,7 @@ registerMemoRoutes(app, {
   getMemoDetail: (...args) => getMemoDetail(...args),
   listMemos: (...args) => listMemos(...args),
   listMemoRevisions: (...args) => listMemoRevisionsService(...args, getMemoDetail, false),
+  duplicateMemo: (...args) => duplicateMemoRecord(...args),
   mergeMemos: (...args) => mergeMemosRecord(...args),
   moveMemos: (...args) => moveMemosRecord(...args),
   restoreMemo: (...args) => restoreMemoRecord(...args),
@@ -442,8 +479,9 @@ app.post("/api/v1/demo/reset", async (c) => {
 const authenticateRequestWithHiding = async (
   c: AppContext,
   requireAuth = false,
+  options: AuthenticateOptions = {},
 ) => {
-  const auth = await authenticateRequest(c, requireAuth);
+  const auth = await authenticateRequest(c, requireAuth, options);
 
   // Only inject for agent (API token) requests with a tokenId
   if (auth && auth.kind === "agent" && auth.tokenId) {
@@ -494,9 +532,24 @@ export const fetchEdgeEverApp = async (
 
 const worker = {
   async fetch(request: Request, env: WorkerBindings, ctx: ExecutionContext) {
+    const { pathname } = new URL(request.url);
+    const loadAppShell = () => env.ASSETS.fetch(new Request(new URL("/", request.url), { method: "GET" }));
+    if (isNotebookSitePagePath(pathname)) {
+      return (await renderNotebookSitePage(request, createCloudflareStorageAdapter(env).db, loadAppShell))!;
+    }
+    // `/share/*` runs the worker first. Unknown share paths still fall through
+    // to the asset shell so a typo does not become a JSON 404.
+    if (pathname.startsWith("/share/")) {
+      if (isPublicMemoSharePagePath(pathname)) {
+        const page = await renderPublicMemoSharePage(request, createCloudflareStorageAdapter(env).db, loadAppShell);
+        if (page) return page;
+      }
+      return env.ASSETS.fetch(request);
+    }
     return fetchEdgeEverApp(request, {
       ...env,
       storage: createCloudflareStorageAdapter(env),
+      deploymentVersionCreatedAt: env.CF_VERSION_METADATA?.timestamp,
       // workerd's default Internet egress checks resolved addresses against its public-only network policy.
       publicNetworkFetch: (url, init) => fetch(url, init),
     }, ctx);
@@ -532,6 +585,15 @@ app.onError((error, c) => {
     return apiError(c, error.code, error.message, error.status);
   }
 
+  const requestError = httpExceptionError(c, error);
+  if (requestError) return requestError;
+
+  if (isDatabaseDailyQuotaError(error)) {
+    console.error("EdgeEver database daily quota exhausted", error);
+    return apiError(c, "database_daily_quota_exceeded",
+      "The instance's Cloudflare D1 daily database quota is exhausted. Daily quotas reset at 00:00 UTC. The instance owner can also upgrade the Workers plan.", 503);
+  }
+
   if (isDatabaseNotReadyError(error)) {
     console.error("EdgeEver database readiness check failed", error);
     return databaseNotReady(c);
@@ -554,6 +616,9 @@ const isDemoMode = (env: Bindings) => isDemoModeEnabled(env.EDGE_EVER_DEMO_MODE)
 const isLocalDemoSeedEnabled = (env: Bindings) =>
   env.EDGE_EVER_LOCAL_DEMO_SEED?.trim().toLowerCase() === "true";
 
+const rotateWorkspaceSyncIdentity = (db: Bindings["storage"]["db"], at: string) =>
+  db.prepare(`UPDATE workspaces SET created_at = ?`).bind(at).run();
+
 let localDemoSeedPromise: Promise<void> | null = null;
 
 const ensureLocalDemoSeed = (env: Bindings) => {
@@ -569,6 +634,10 @@ const ensureLocalDemoSeed = (env: Bindings) => {
     ]);
 
     await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
+    // The wipe deletes the changelog before the memo deletes, so a browser
+    // already caught up never sees those deletes. A new sync identity forces
+    // that browser to rebuild from this snapshot instead of keeping the old notes.
+    await rotateWorkspaceSyncIdentity(env.storage.db, isoNow());
     await audit(env.storage.db, "system", null, "demo.local_seed", "demo", "edgeever-local", {
       seedMemoCount: DEMO_SEED_MEMOS.length,
       mode: "sync-seed",
@@ -974,6 +1043,7 @@ const resetDemoData = async (
     await db.batch(resetStatements);
 
     await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
+    await rotateWorkspaceSyncIdentity(db, isoNow());
     await audit(db, "system", null, "demo.reset", "demo", "edgeever-demo", {
       scheduledTime: new Date(scheduledTime).toISOString(),
       seedMemoCount: DEMO_SEED_MEMOS.length,

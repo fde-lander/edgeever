@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { FileAttachment, PdfAttachment } from "@edgeever/shared";
-import { findAttachmentRange, removeAttachmentAt, renameAttachmentAt } from "./attachment-editor-range.ts";
+import { ensureTestWindowDom } from "../../lib/restore-test-global.mjs";
+import { findAttachmentRange, insertTranscriptAfterAttachment, removeAttachmentAt, renameAttachmentAt } from "./attachment-editor-range.ts";
 
 const videoUrl = "edgeever-resource://resource/res_video";
 const videoApiUrl = "/api/v1/resources/res_video/blob";
@@ -35,10 +36,13 @@ const pdfNode = (url, filename) => ({
 
 const paragraph = (...content) => ({ type: "paragraph", content });
 
-const makeEditor = (content) => new Editor({
-  extensions: [StarterKit, FileAttachment, PdfAttachment],
-  content: { type: "doc", content },
-});
+const makeEditor = (content) => {
+  ensureTestWindowDom();
+  return new Editor({
+    extensions: [StarterKit, FileAttachment, PdfAttachment],
+    content: { type: "doc", content },
+  });
+};
 
 describe("attachment editor range", () => {
   test("removes a video file-attachment node whose hover URL is the API blob path", () => {
@@ -107,6 +111,36 @@ describe("attachment editor range", () => {
     ]);
     expect(removeAttachmentAt(editor, { url: otherUrl, resourceId: "res_other" })).toBe(false);
     expect(editor.getJSON().content).toHaveLength(2);
+    editor.destroy();
+  });
+
+  test("inserts a transcript directly below its attachment without moving surrounding note text", () => {
+    const editor = makeEditor([
+      paragraph({ type: "text", text: "intro" }),
+      paragraph(fileNode(videoUrl, "clip.mp4", "video/mp4")),
+      paragraph({ type: "text", text: "following content" }),
+    ]);
+
+    expect(insertTranscriptAfterAttachment(
+      editor,
+      { url: videoApiUrl, resourceId: "res_video" },
+      "First line\nSecond line",
+      "Transcript",
+    )).toBe(true);
+    expect(editor.getJSON().content.map((node) => node.type)).toEqual([
+      "paragraph", "paragraph", "heading", "paragraph", "paragraph", "paragraph",
+    ]);
+    expect(editor.getJSON().content.slice(2, 5).map((node) => node.content?.[0]?.text)).toEqual([
+      "Transcript", "First line", "Second line",
+    ]);
+    expect(editor.getJSON().content[5].content[0].text).toBe("following content");
+    editor.destroy();
+  });
+
+  test("does not insert a transcript if the attachment was removed", () => {
+    const editor = makeEditor([paragraph({ type: "text", text: "keep" })]);
+    expect(insertTranscriptAfterAttachment(editor, { url: videoApiUrl, resourceId: "res_video" }, "text", "Transcript")).toBe(false);
+    expect(editor.getJSON().content).toEqual([paragraph({ type: "text", text: "keep" })]);
     editor.destroy();
   });
 });

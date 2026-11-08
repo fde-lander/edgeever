@@ -7,13 +7,15 @@ import { FileAttachment } from "@/components/editor/FileAttachment";
 import Image from "@tiptap/extension-image";
 import { mergeAttributes } from "@tiptap/core";
 import Placeholder from "@tiptap/extension-placeholder";
-import { createExcerpt, createEdgeEverDocumentExtensions, docToMarkdown, docToText, emptyDoc, getImageReferrerPolicy, isPdfAttachment, wrapDetailsContentHtml, type MemoDetail, type MemoEditSession, type Notebook, type TagSummary, type TiptapDoc } from "@edgeever/shared";
+import { ImageGallery, createExcerpt, createEdgeEverDocumentExtensions, docToMarkdown, docToText, emptyDoc, getImageReferrerPolicy, isPdfAttachment, wrapDetailsContentHtml, type MemoDetail, type MemoEditSession, type Notebook, type TagSummary, type TiptapDoc } from "@edgeever/shared";
 import { createEdgeEverMathematics } from "@edgeever/shared/mathematics";
+import { createNativeImageGalleryView, NATIVE_IMAGE_GALLERY_CSS } from "@edgeever/shared/native-image-gallery";
 import { NEW_IMAGE_WIDTH_PERCENT } from "@edgeever/shared/image-display";
 import { insertUploadedResources } from "@/lib/resource-insertion";
 import { getResourceInsertionTarget } from "@/lib/resource-insertion-target";
-import { getMobileEditorInputAttributes, getMobileEditorPlaceholder } from "@edgeever/shared/mobile-editor";
+import { clearMobileEditorUndoHistory, getMobileEditorInputAttributes, getMobileEditorPlaceholder } from "@edgeever/shared/mobile-editor";
 import { EdgeEverLink } from "@edgeever/shared/editor-link";
+import { activateHeadingAnchorClick } from "@/lib/editor-heading-anchor";
 import { createInlineFieldExtension } from "@/components/editor/InlineField";
 import {
   MobileEditorFallback,
@@ -86,6 +88,8 @@ export const MobileStandaloneTiptapEditor = ({
   const { t, i18n } = useTranslation();
   const memoId = memoIdProp ?? params.get("memoId");
   const locale = normalizeLocale(i18n.resolvedLanguage ?? i18n.language) ?? defaultLocale;
+  const localeRef = useRef(locale);
+  localeRef.current = locale;
   const draftKey = getMobileEditorDraftKey(memoId);
   const [memo, setMemo] = useState<MemoDetail | null>(null);
   const memoRef = useRef<MemoDetail | null>(null);
@@ -196,7 +200,7 @@ export const MobileStandaloneTiptapEditor = ({
     };
   }, [memoId, readLocalDraft]);
 
-  const inlineFieldExtension = useMemo(() => createInlineFieldExtension(locale), [locale]);
+  const inlineFieldExtension = useMemo(() => createInlineFieldExtension(i18n.getFixedT(locale)), [i18n, locale]);
   const editor = useEditor({
     extensions: [
       ...createEdgeEverDocumentExtensions({
@@ -205,6 +209,9 @@ export const MobileStandaloneTiptapEditor = ({
         image: ProtectedExternalImage.configure({
           allowBase64: false,
           inline: false,
+        }),
+        gallery: ImageGallery.extend({
+          addNodeView() { return createNativeImageGalleryView(() => localeRef.current); },
         }),
         pdf: PdfAttachment,
         file: FileAttachment,
@@ -789,6 +796,7 @@ export const MobileStandaloneTiptapEditor = ({
           tagsTextRef.current = draft.tagsText || "";
           contentJsonRef.current = draft.contentJson || emptyDoc();
           editor.commands.setContent(contentJsonRef.current, { emitUpdate: false });
+          clearMobileEditorUndoHistory(editor);
           dirtyRef.current = true;
           setSaveStateStable("local-draft");
           scheduleMetadataSave();
@@ -802,6 +810,7 @@ export const MobileStandaloneTiptapEditor = ({
           tagsTextRef.current = queuedTagsText;
           contentJsonRef.current = queuedPayload.contentJson || emptyDoc();
           editor.commands.setContent(contentJsonRef.current, { emitUpdate: false });
+          clearMobileEditorUndoHistory(editor);
           lastSavedSnapshotRef.current = JSON.stringify({
             title: queuedTitle,
             tagsText: queuedTagsText,
@@ -817,6 +826,7 @@ export const MobileStandaloneTiptapEditor = ({
           tagsTextRef.current = nextTagsText;
           contentJsonRef.current = nextContentJson;
           editor.commands.setContent(nextContentJson, { emitUpdate: false });
+          clearMobileEditorUndoHistory(editor);
           lastSavedSnapshotRef.current = JSON.stringify({
             title: nextTitle,
             tagsText: nextTagsText,
@@ -933,6 +943,14 @@ export const MobileStandaloneTiptapEditor = ({
   const currentNotebookLabel =
     notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? t("editor.notebookFallback");
   const activeListItemType = editor?.isActive("taskItem") ? "taskItem" : "listItem";
+  const historyAvailable = (command: "undo" | "redo") => {
+    if (!editor || editor.isDestroyed) return false;
+    try {
+      return editor.can().chain().focus()[command]().run();
+    } catch {
+      return false;
+    }
+  };
   const canWrapIndentedParagraph = Boolean(editor && wrapIndentedParagraphInList(editor.state, undefined));
 
   const fallbackMarkdown = memo ? docToMarkdown(contentJsonRef.current) : "";
@@ -947,6 +965,7 @@ export const MobileStandaloneTiptapEditor = ({
 
   return (
     <div className="mobile-editor-shell">
+      <style>{NATIVE_IMAGE_GALLERY_CSS}</style>
       <MobileEditorHeader saveLabel={saveLabel} statusClassName={statusClassName} saveState={saveState} onLeave={() => void leavePage()} />
 
       <main className="mobile-editor-main">
@@ -978,6 +997,8 @@ export const MobileStandaloneTiptapEditor = ({
 
         <MobileEditorToolbar
           disabled={editorActionDisabled}
+          undoAvailable={historyAvailable("undo")}
+          redoAvailable={historyAvailable("redo")}
           boldActive={Boolean(editor?.isActive("bold"))}
           bulletListActive={Boolean(editor?.isActive("bulletList"))}
           taskListActive={Boolean(editor?.isActive("taskList"))}
@@ -985,6 +1006,8 @@ export const MobileStandaloneTiptapEditor = ({
           decreaseListIndentAvailable={Boolean(editor?.can().chain().focus().liftListItem(activeListItemType).run())}
           blockquoteActive={Boolean(editor?.isActive("blockquote"))}
           locale={locale}
+          onUndo={() => runEditorCommand(() => editor?.chain().focus().undo().run() ?? false)}
+          onRedo={() => runEditorCommand(() => editor?.chain().focus().redo().run() ?? false)}
           onPickImage={() => imageInputRef.current?.click()}
           onToggleBold={() => runEditorCommand(() => editor?.chain().focus().toggleBold().run() ?? false)}
           onToggleBulletList={() => runEditorCommand(() => (
@@ -1022,7 +1045,12 @@ export const MobileStandaloneTiptapEditor = ({
           />
         )}
 
-        <div className="edgeever-mobile-tiptap-editor">
+        <div
+          className="edgeever-mobile-tiptap-editor"
+          onClickCapture={(event) => {
+            activateHeadingAnchorClick(event, editor && !editor.isDestroyed ? editor.view : null);
+          }}
+        >
           <EditorContent editor={editor} />
         </div>
 

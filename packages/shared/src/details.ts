@@ -1,8 +1,10 @@
 import type { JSONContent, MarkdownParseHelpers, MarkdownRendererHelpers, MarkdownToken } from "@tiptap/core";
 import { Details, DetailsContent, DetailsSummary } from "@tiptap/extension-details";
 import { resolveAttachmentKind, resolveVideoMimeType } from "./attachment-kind";
+import { openBlockSource } from "./markdown-block-start";
 import { FILE_ATTACHMENT_NODE_TYPE } from "./file-attachment";
 import { parseImageWidth } from "./image-display";
+import { alignedImageToHtml, parseImageAlignment, type ImageAlignment } from "./image-alignment";
 import { getResourceIdFromUrl } from "./resource-links";
 
 export const DETAILS_NODE_TYPE = "details" as const;
@@ -91,6 +93,7 @@ const escapeMarkdownLabel = (value: string) =>
 
 /** http(s) URLs that are not already stored EdgeEver resources. */
 const isRemoteHttpUrl = (value: string) => {
+  // oxlint-disable-next-line no-control-regex -- rejects URLs containing control characters or whitespace
   if (!value || /[\u0000-\u0020"'<>`]/.test(value)) return false;
   if (getResourceIdFromUrl(value)) return false;
   try {
@@ -102,6 +105,7 @@ const isRemoteHttpUrl = (value: string) => {
 };
 
 const isDetailsImageSrc = (value: string) => {
+  // oxlint-disable-next-line no-control-regex -- rejects image sources containing control characters or whitespace
   if (!value || /[\u0000-\u0020"'<>`]/.test(value)) return false;
   if (value.startsWith("edgeever-resource://") || value.startsWith("edgeever-staged://")) return true;
   if (value.startsWith("/") && !value.startsWith("//")) return true;
@@ -135,7 +139,7 @@ const remoteVideoFromSrc = (src: string): RemoteVideo | null => {
   } catch {
     segment = "";
   }
-  if (!segment || segment.length > 120 || /[\\/\[\]()<>]/.test(segment)) segment = "";
+  if (!segment || segment.length > 120 || /[\\/[\]()<>]/.test(segment)) segment = "";
   const filename = segment || "video";
   return {
     src: url,
@@ -147,7 +151,7 @@ const remoteVideoFromSrc = (src: string): RemoteVideo | null => {
 
 type PreparedDetailsBody = {
   markdown: string;
-  images: Array<{ src: string; width: number | null }>;
+  images: Array<{ src: string; width: number | null; alignment?: ImageAlignment }>;
   videoUrls: string[];
 };
 
@@ -187,7 +191,8 @@ const prepareDetailsBody = (source: string): PreparedDetailsBody => {
       if (!src) return tag;
       const alt = readHtmlAttr(attrs || "", "alt");
       const title = readHtmlAttr(attrs || "", "title");
-      images.push({ src, width: readPercentWidth(readHtmlAttr(attrs || "", "width")) });
+      const alignment = parseImageAlignment(readHtmlAttr(attrs || "", "data-image-align"));
+      images.push({ src, width: readPercentWidth(readHtmlAttr(attrs || "", "width")), ...(alignment ? { alignment } : {}) });
       return title ? `![${alt}](${src} "${title}")` : `![${alt}](${src})`;
     },
   );
@@ -207,8 +212,11 @@ const applyDetailsMedia = (
       const src = typeof node.attrs?.src === "string" ? node.attrs.src : "";
       if (expected && expected.src === src) {
         imageIndex += 1;
-        if (expected.width != null) {
-          return { ...node, attrs: { ...node.attrs, width: expected.width } };
+        if (expected.width != null || expected.alignment) {
+          return { ...node, attrs: { ...node.attrs,
+            ...(expected.width != null ? { width: expected.width } : {}),
+            ...(expected.alignment ? { alignment: expected.alignment } : {}),
+          } };
         }
       }
       return node;
@@ -238,6 +246,7 @@ const htmlAttribute = (name: string, value: string) => `${name}="${escapeHtml(va
 const renderDetailsImage = (node: JSONContent) => {
   const src = typeof node.attrs?.src === "string" ? node.attrs.src.trim() : "";
   if (!isDetailsImageSrc(src)) return null;
+  if (parseImageAlignment(node.attrs?.alignment)) return alignedImageToHtml(node);
   const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt.trim() : "";
   const title = typeof node.attrs?.title === "string" ? node.attrs.title.trim() : "";
   const width = node.attrs?.width == null || node.attrs.width === ""
@@ -320,7 +329,7 @@ export const wrapDetailsContentHtml = (html: string): string => {
   const document = new DOMParser().parseFromString(html, "text/html");
   const blocks = [...document.querySelectorAll("details")].reverse();
   for (const details of blocks) {
-    for (const video of [...details.querySelectorAll("video")]) {
+    for (const video of Array.from(details.querySelectorAll("video"))) {
       if (video.closest("[data-type='edgeever-file-attachment'], [data-edgeever-video-player]")) continue;
       const parsed = remoteVideoFromSrc(video.getAttribute("src") || "");
       if (!parsed) {
@@ -332,7 +341,7 @@ export const wrapDetailsContentHtml = (html: string): string => {
     if (details.querySelector(':scope > [data-type="detailsContent"]')) continue;
     const wrapper = document.createElement("div");
     wrapper.setAttribute("data-type", "detailsContent");
-    for (const child of [...details.childNodes]) {
+    for (const child of Array.from(details.childNodes)) {
       if (child.nodeName === "SUMMARY") continue;
       wrapper.appendChild(child);
     }
@@ -367,7 +376,7 @@ export const flattenDetailsForLinearHtml = (root: HTMLElement) => {
       heading.appendChild(strong);
       replacement.appendChild(heading);
     }
-    for (const child of [...details.childNodes]) {
+    for (const child of Array.from(details.childNodes)) {
       if (child === summary) continue;
       if (child instanceof HTMLElement && child.getAttribute("data-type") === "detailsContent") {
         while (child.firstChild) {
@@ -517,7 +526,7 @@ export const EdgeEverDetails = Details.extend({
     name: DETAILS_NODE_TYPE,
     level: "block",
     start(source: string) {
-      const match = /<details\b/i.exec(source);
+      const match = /<details\b/i.exec(openBlockSource(source));
       return match ? match.index : -1;
     },
     tokenize(source: string, _tokens, lexer) {

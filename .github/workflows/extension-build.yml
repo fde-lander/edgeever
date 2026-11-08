@@ -4,17 +4,43 @@ on:
   pull_request:
     paths:
       - "apps/extension/**"
+      - "packages/shared/src/ai-generation.ts"
+      - "packages/shared/src/provider-event-stream.ts"
+      - "packages/shared/src/video-outline.ts"
+      - "packages/shared/package.json"
+      - "apps/web/src/components/ui/**"
+      - "apps/web/src/lib/utils.ts"
+      - "tsconfig.json"
+      - "bunfig.toml"
+      - "patches/**"
       - "package.json"
       - "bun.lock"
+      - "scripts/publish-web-clipper.mjs"
+      - "scripts/publish-web-clipper.test.mjs"
+      - "scripts/verify-extension-source.mjs"
       - ".github/workflows/extension-build.yml"
+      - ".github/workflows/extension-store.yml"
   push:
     branches:
       - main
     paths:
       - "apps/extension/**"
+      - "packages/shared/src/ai-generation.ts"
+      - "packages/shared/src/provider-event-stream.ts"
+      - "packages/shared/src/video-outline.ts"
+      - "packages/shared/package.json"
+      - "apps/web/src/components/ui/**"
+      - "apps/web/src/lib/utils.ts"
+      - "tsconfig.json"
+      - "bunfig.toml"
+      - "patches/**"
       - "package.json"
       - "bun.lock"
+      - "scripts/publish-web-clipper.mjs"
+      - "scripts/publish-web-clipper.test.mjs"
+      - "scripts/verify-extension-source.mjs"
       - ".github/workflows/extension-build.yml"
+      - ".github/workflows/extension-store.yml"
   workflow_dispatch:
 
 permissions:
@@ -25,19 +51,33 @@ jobs:
     if: github.repository == 'tianma-if/edgeever'
     name: Build Chromium and Firefox
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
 
       - name: Test extension manifests
         run: bun run test:extension
+
+      - name: Test store submission
+        run: bun test scripts/publish-web-clipper.test.mjs
 
       - name: Build Chromium extension
         run: bun run build:extension
@@ -47,3 +87,6 @@ jobs:
 
       - name: Lint Firefox extension
         run: bun run lint:extension:firefox
+
+      - name: Rebuild Firefox from the review source archive
+        run: bun scripts/verify-extension-source.mjs

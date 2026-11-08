@@ -23,6 +23,7 @@ import {
   ChevronUp,
   FileCode2,
   FileText,
+  Heading,
   Palette,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -35,7 +36,6 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -52,10 +52,7 @@ import { CODE_BLOCK_LANGUAGES, getCodeBlockLanguageValue } from "@/lib/code-bloc
 import { EditorTableMenu } from "@/components/EditorTableMenu";
 import { wrapIndentedParagraphInList } from "@/lib/editor-shortcuts";
 import {
-  EDITOR_THEME_NAMES,
   MARKDOWN_THEME_PREFERENCES,
-  localizeStoredCustomThemeName,
-  useEditorTheme,
   useMarkdownTheme,
 } from "@/components/ThemeProvider";
 
@@ -64,12 +61,14 @@ const EditorToolbarButton = ({
   children,
   disabled = false,
   onClick,
+  shortcutLabel,
   title,
 }: {
   active?: boolean;
   children: ReactNode;
   disabled?: boolean;
   onClick: () => void;
+  shortcutLabel?: string | null;
   title: string;
 }) => (
   <Tooltip>
@@ -91,7 +90,16 @@ const EditorToolbarButton = ({
         {children}
       </button>
     </TooltipTrigger>
-    <TooltipContent side="bottom">{title}</TooltipContent>
+    <TooltipContent side="bottom" className={shortcutLabel ? "flex items-center gap-2" : undefined}>
+      {shortcutLabel ? (
+        <>
+          <span>{title}</span>
+          <kbd className="rounded border border-current/25 bg-current/10 px-1.5 py-0.5 font-mono text-xs leading-none">
+            {shortcutLabel}
+          </kbd>
+        </>
+      ) : title}
+    </TooltipContent>
   </Tooltip>
 );
 
@@ -199,8 +207,6 @@ export const EditorToolbar = ({
 }) => {
   const { t } = useTranslation();
   const { markdownThemePreference, setMarkdownTheme } = useMarkdownTheme();
-  const { editorTheme, setEditorTheme, customEditorThemes } = useEditorTheme();
-  const namedEditorThemes = EDITOR_THEME_NAMES.filter((theme) => theme !== "custom");
   const controlsRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(readEditorToolbarExpandedPreference);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -226,6 +232,8 @@ export const EditorToolbar = ({
     : "plaintext";
   const activeEditorView = onEditorViewChange ? editorView : markdownMode ? "markdown" : "rich";
   const showFormattingTools = activeEditorView === "rich";
+  const nextEditorViewMode = EDITOR_VIEW_MODES[activeEditorView === "rich" ? 1 : 0];
+  const canCycleEditorView = Boolean(onEditorViewChange || onMarkdownModeChange);
 
   useEffect(() => {
     const controls = controlsRef.current;
@@ -333,50 +341,22 @@ export const EditorToolbar = ({
             !expanded && MEMO_EDITOR_TOOLBAR_COLLAPSED_CLASS_NAME
           )}
         >
-          {onEditorViewChange ? (
+          {canCycleEditorView ? (
             <>
-              <div className="flex shrink-0 items-center" role="group" aria-label={t("editorToolbar.viewMode")}>
-                {EDITOR_VIEW_MODES.map((mode) => (
-                  <EditorToolbarButton
-                    key={mode.value}
-                    title={mode.value === "markdown" && markdownModeShortcutLabel
-                      ? `${t(mode.labelKey)} (${markdownModeShortcutLabel})`
-                      : t(mode.labelKey)}
-                    active={activeEditorView === mode.value}
-                    disabled={viewSwitchDisabled}
-                    onClick={() => onEditorViewChange(mode.value)}
-                  >
-                    <mode.icon className="h-4 w-4" />
-                  </EditorToolbarButton>
-                ))}
-              </div>
-              <MemoEditorToolbarDivider className="hidden sm:block" />
-            </>
-          ) : onMarkdownModeChange ? (
-            <>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:pointer-events-none disabled:opacity-40"
-                    type="button"
-                    aria-label={markdownMode ? t("editorToolbar.richText") : t("editorToolbar.markdown")}
-                    aria-pressed={markdownMode}
-                    disabled={readOnly}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={onMarkdownModeChange}
-                  >
-                    {markdownMode ? <FileText className="h-4 w-4" /> : <FileCode2 className="h-4 w-4" />}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="flex items-center gap-2">
-                  <span>{markdownMode ? t("editorToolbar.richText") : t("editorToolbar.markdown")}</span>
-                  {markdownModeShortcutLabel && (
-                    <kbd className="rounded border border-current/25 bg-current/10 px-1.5 py-0.5 font-mono text-xs leading-none">
-                      {markdownModeShortcutLabel}
-                    </kbd>
-                  )}
-                </TooltipContent>
-              </Tooltip>
+              <EditorToolbarButton
+                title={t(nextEditorViewMode.labelKey)}
+                shortcutLabel={markdownModeShortcutLabel}
+                disabled={onEditorViewChange ? viewSwitchDisabled : readOnly}
+                onClick={() => {
+                  if (onEditorViewChange) {
+                    onEditorViewChange(nextEditorViewMode.value);
+                    return;
+                  }
+                  onMarkdownModeChange?.();
+                }}
+              >
+                <nextEditorViewMode.icon className="h-4 w-4" />
+              </EditorToolbarButton>
               <MemoEditorToolbarDivider className="hidden sm:block" />
             </>
           ) : null}
@@ -421,17 +401,34 @@ export const EditorToolbar = ({
               <MemoEditorToolbarDivider className="hidden sm:block" />
             </>
           )}
+          {showFormattingTools && onPickMathFormula && (
+            <EditorToolbarButton
+              title={t("editorToolbar.math")}
+              active={isActive("inlineMath") || isActive("blockMath")}
+              disabled={disabled}
+              onClick={onPickMathFormula}
+            >
+              <Sigma className="h-4 w-4" />
+            </EditorToolbarButton>
+          )}
           <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
-                type="button"
-                aria-label={t("editorToolbar.appearance")}
-                onMouseDown={(event) => event.preventDefault()}
-              >
-                <Palette className="h-4 w-4" />
-              </button>
-            </DropdownMenuTrigger>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                    type="button"
+                    aria-label={markdownMode ? t("editorToolbar.markdownTheme") : t("editorToolbar.blockStyle")}
+                    onMouseDown={(event) => event.preventDefault()}
+                  >
+                    {markdownMode ? <Palette className="h-4 w-4" /> : <Heading className="h-4 w-4" />}
+                  </button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {markdownMode ? t("editorToolbar.markdownTheme") : t("editorToolbar.blockStyle")}
+              </TooltipContent>
+            </Tooltip>
             <DropdownMenuContent align="start" className="max-h-80 w-52 overflow-y-auto border border-slate-200 bg-card py-1 shadow-md">
               {markdownMode ? (
                 <>
@@ -449,23 +446,6 @@ export const EditorToolbar = ({
                 </>
               ) : (
                 <>
-                  <DropdownMenuLabel className="text-xs text-slate-500">{t("editorToolbar.editorTheme")}</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={editorTheme} onValueChange={(value) => setEditorTheme(value)}>
-                    {namedEditorThemes.map((theme) => (
-                      <DropdownMenuRadioItem key={theme} value={theme} className="text-xs leading-5">
-                        {t(`settings.editorThemes.${theme}`)}
-                      </DropdownMenuRadioItem>
-                    ))}
-                    {customEditorThemes.map((theme) => (
-                      <DropdownMenuRadioItem key={theme.id} value={theme.id} className="text-xs leading-5">
-                        {localizeStoredCustomThemeName(theme.name, {
-                          defaultName: t("settings.customEditorTheme.defaultName"),
-                          newName: (index) => t("settings.customEditorTheme.newName", { n: index }),
-                        })}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                  <DropdownMenuSeparator />
                   <DropdownMenuLabel className="text-xs text-slate-500">{t("editorToolbar.blockStyle")}</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={blockValue} onValueChange={(value) => setBlock(value)}>
                     <DropdownMenuRadioItem value="paragraph" className="text-xs leading-5" disabled={disabled}>
@@ -605,16 +585,6 @@ export const EditorToolbar = ({
           >
             <ChartNoAxesCombined className="h-4 w-4" />
           </EditorToolbarButton>
-          {onPickMathFormula && (
-            <EditorToolbarButton
-              title={t("editorToolbar.math")}
-              active={isActive("inlineMath") || isActive("blockMath")}
-              disabled={disabled}
-              onClick={onPickMathFormula}
-            >
-              <Sigma className="h-4 w-4" />
-            </EditorToolbarButton>
-          )}
           <EditorToolbarButton
             title={t("editorToolbar.horizontalRule")}
             disabled={disabled}

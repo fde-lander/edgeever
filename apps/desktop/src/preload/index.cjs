@@ -28,8 +28,23 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
   isAvailable: true,
   canClearLocalData: ipcRenderer.sendSync("desktop:local-data-reset-available-sync"),
   recoveredAfterAbnormalExit: ipcRenderer.sendSync("desktop:recovered-after-abnormal-exit-sync"),
+  backup: (action, input) => ipcRenderer.invoke("desktop:backup", action, input).then((result) => {
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+    return result.value;
+  }),
+  onBackupStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("desktop:backup-status", listener);
+    return () => ipcRenderer.removeListener("desktop:backup-status", listener);
+  },
   sidecarStatus: () => ipcRenderer.invoke("desktop:sidecar-status"),
   systemInfo: () => ipcRenderer.invoke("desktop:system-info"),
+  globalShortcut: () => ipcRenderer.invoke("desktop:global-shortcut"),
+  setGlobalShortcut: (binding) => ipcRenderer.invoke("desktop:set-global-shortcut", binding),
+  setScreenshotShortcut: (binding) => ipcRenderer.invoke("desktop:set-screenshot-shortcut", binding),
+  loginItem: () => ipcRenderer.invoke("desktop:login-item"),
+  setLoginItem: (patch) => ipcRenderer.invoke("desktop:set-login-item", patch),
+  captureGlobalShortcut: (capturing) => ipcRenderer.invoke("desktop:capture-global-shortcut", capturing),
   setAccountScope: (accountId) => ipcRenderer.invoke("desktop:set-account-scope", accountId),
   apiBaseUrl: ipcRenderer.sendSync("desktop:api-base-url-sync"),
   setApiBaseUrl: (value) => ipcRenderer.invoke("desktop:set-api-base-url", value),
@@ -37,8 +52,23 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
   copyText: (value) => ipcRenderer.invoke("desktop:copy-text", value),
   copyHtml: (html, plainText) => ipcRenderer.invoke("desktop:copy-html", { html, plainText }),
   copyImage: (bytes) => ipcRenderer.invoke("desktop:copy-image", bytes),
+  copyFile: (bytes, filename) => ipcRenderer.invoke("desktop:copy-file", bytes, filename),
+  readClipboard: () => {
+    // Check in the isolated preload world; renderer JavaScript cannot forge this
+    // gesture state. Clipboard reads are reserved for an explicit paste action.
+    if (!navigator.userActivation?.isActive) return Promise.reject(new Error("Clipboard read requires user activation"));
+    return ipcRenderer.invoke("desktop:read-clipboard").then((snapshot) => ({
+      html: snapshot.html,
+      text: snapshot.text,
+      images: snapshot.images.map(normalizeIpcBytes),
+    }));
+  },
   setSessionToken: (value) => ipcRenderer.invoke("desktop:set-session-token", value),
   clearSessionToken: () => ipcRenderer.invoke("desktop:clear-session-token"),
+  testPicGoConnection: (input) => ipcRenderer.invoke("desktop:picgo-test", input),
+  uploadPicGoImage: (input) => ipcRenderer.invoke("desktop:picgo-upload", input),
+  testImgBedConnection: (input) => ipcRenderer.invoke("desktop:imgbed-test", input),
+  uploadImgBedImage: (input) => ipcRenderer.invoke("desktop:imgbed-upload", input),
   publicNetworkFetch: (requestId, input) => ipcRenderer.invoke("desktop:public-network-fetch", requestId, input),
   cancelPublicNetworkFetch: async (requestId) => { ipcRenderer.send("desktop:cancel-public-network-fetch", requestId); },
   openAiProviderStream: (requestId, input) => ipcRenderer.invoke("desktop:ai-direct-open", requestId, input),
@@ -47,6 +77,21 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
     const listener = (_event, requestId, chunk) => callback(requestId, chunk);
     ipcRenderer.on("desktop:ai-direct-chunk", listener);
     return () => ipcRenderer.removeListener("desktop:ai-direct-chunk", listener);
+  },
+  listAcpAdapters: () => ipcRenderer.invoke("desktop:acp-list"),
+  chooseAcpAdapterPath: () => ipcRenderer.invoke("desktop:acp-choose-path", "antigravity"),
+  probeAcpAdapter: (input) => ipcRenderer.invoke("desktop:acp-probe", input),
+  installAcpAdapter: (id) => ipcRenderer.invoke("desktop:acp-install", id),
+  authenticateAcpAdapter: (input) => ipcRenderer.invoke("desktop:acp-authenticate", input),
+  cancelAcpAuthentication: (id) => ipcRenderer.invoke("desktop:acp-cancel-auth", id),
+  reopenAcpLoginPage: (id) => ipcRenderer.invoke("desktop:acp-reopen-login", id),
+  prepareAcp: (input) => ipcRenderer.invoke("desktop:acp-prepare", input),
+  promptAcp: (input) => ipcRenderer.invoke("desktop:acp-prompt", input),
+  cancelAcp: (requestId) => ipcRenderer.invoke("desktop:acp-cancel", requestId),
+  onAcpEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("desktop:acp-event", listener);
+    return () => ipcRenderer.removeListener("desktop:acp-event", listener);
   },
   clearLocalData: () => ipcRenderer.invoke("desktop:clear-local-data"),
   recordRendererError: (details) => ipcRenderer.invoke("desktop:record-renderer-error", details),
@@ -62,6 +107,21 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
     return () => ipcRenderer.removeListener("desktop:update-status-changed", listener);
   },
   sidecarRequest: (method, params = {}) => ipcRenderer.invoke("desktop:sidecar-request", method, params),
+  openAttachment: (input) => {
+    if (!navigator.userActivation?.isActive) return Promise.resolve({ ok: false, code: "forbidden" });
+    return ipcRenderer.invoke("desktop:open-attachment", input);
+  },
+  attachmentWritebacks: () => ipcRenderer.invoke("desktop:attachment-writebacks"),
+  retryAttachmentWriteback: (id) => ipcRenderer.invoke("desktop:retry-attachment-writeback", id),
+  revealAttachmentWriteback: (id) => {
+    if (!navigator.userActivation?.isActive) return Promise.resolve();
+    return ipcRenderer.invoke("desktop:reveal-attachment-writeback", id);
+  },
+  onAttachmentResourceSaved: (callback) => {
+    const listener = (_event, resource) => callback(resource);
+    ipcRenderer.on("desktop:attachment-resource-saved", listener);
+    return () => ipcRenderer.removeListener("desktop:attachment-resource-saved", listener);
+  },
   beginStagedResource: (input) => ipcRenderer.invoke("desktop:stage-resource-begin", input),
   appendStagedResource: (id, bytes) => ipcRenderer.invoke("desktop:stage-resource-append", id, bytes),
   completeStagedResource: (id) => ipcRenderer.invoke("desktop:stage-resource-complete", id),
@@ -78,6 +138,39 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
     const listener = (_event, command) => callback(command);
     ipcRenderer.on("desktop:command", listener);
     return () => ipcRenderer.removeListener("desktop:command", listener);
+  },
+  noteWindows: () => ipcRenderer.invoke("desktop:note-windows"),
+  openNoteWindow: (memoId) => ipcRenderer.invoke("desktop:open-note-window", memoId),
+  focusNoteWindow: (memoId) => ipcRenderer.invoke("desktop:focus-note-window", memoId),
+  onNoteWindowsChanged: (callback) => {
+    const listener = (_event, memoIds) => callback(Array.isArray(memoIds) ? memoIds : []);
+    ipcRenderer.on("desktop:note-windows-changed", listener);
+    return () => ipcRenderer.removeListener("desktop:note-windows-changed", listener);
+  },
+  onNoteWindowCloseRequest: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("desktop:note-window-close-request", listener);
+    ipcRenderer.send("desktop:note-window-listening");
+    return () => ipcRenderer.removeListener("desktop:note-window-close-request", listener);
+  },
+  resolveNoteWindowClose: (allowed) => ipcRenderer.send("desktop:note-window-close-result", allowed === true),
+  notifyNoteWindowSaved: () => ipcRenderer.send("desktop:note-window-saved"),
+  notifyNoteWindowReady: () => ipcRenderer.send("desktop:note-window-ready"),
+  notifyNoteWindowLoadFailed: () => ipcRenderer.send("desktop:note-window-load-failed"),
+  sendNoteWindowSync: (memoId, update) => ipcRenderer.send("desktop:note-window-sync", memoId, update),
+  onNoteWindowSync: (callback) => {
+    const listener = (_event, update) => callback(update);
+    ipcRenderer.on("desktop:note-window-sync", listener);
+    return () => ipcRenderer.removeListener("desktop:note-window-sync", listener);
+  },
+  openMemoInMainWindow: (memoId) => ipcRenderer.invoke("desktop:open-memo-in-main-window", memoId),
+  setRichTextHeadingShortcutActive: (active) => {
+    ipcRenderer.sendSync("desktop:rich-text-heading-shortcut", active === true);
+  },
+  onHeadingShortcut: (callback) => {
+    const listener = (_event, level) => callback(level);
+    ipcRenderer.on("desktop:heading-shortcut", listener);
+    return () => ipcRenderer.removeListener("desktop:heading-shortcut", listener);
   },
   onHibernatePrepare: (callback) => {
     const listener = async () => {

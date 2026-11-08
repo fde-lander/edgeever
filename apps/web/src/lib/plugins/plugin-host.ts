@@ -34,10 +34,17 @@ import {
   type ThemeTokenName,
   type ThemeTokens,
 } from "@edgeever/plugin-api";
-import { markdownToDoc } from "@edgeever/shared";
+import { markdownToDoc, type MemoDetail } from "@edgeever/shared";
+import {
+  structuredEditToken, pluginNoteKind, assertPluginMarkdownNote, assertStructuredRevision, pluginDiagram, pluginTable,
+  translateStructuredError, applyDiagramOperations, applyTableOperations, diagramSemanticGraph,
+  serializeTableDocument, tableFallbackMarkdown, structuredApiError,
+  posterCapabilities, pluginPoster, pluginInfographic, applyPosterEdits, applyInfographicOperations, serializePosterDocument, serializeInfographicDocument,
+} from "./structured-note-api";
 import type { EdgeEverRepository } from "@/lib/repository";
 import { WebPluginSecretStore, type PluginSecretStorage } from "@/lib/plugins/plugin-secret-store";
 import { WebPluginPackageStore, type CachedPluginPackage, type PluginPackageStorage } from "@/lib/plugins/plugin-package-store";
+import { isPluginIdRevoked } from "@/lib/plugins/community-registry-store";
 import { downloadGithubExtension, downloadPinnedGithubExtension, extensionManifestsEqual, parseGithubRepositoryUrl, sha256Hex } from "@/lib/plugins/github-plugin-distribution";
 import {
   catalogInstallSource,
@@ -198,7 +205,7 @@ export interface PluginHostSnapshot {
 interface PluginHostOptions {
   repository: EdgeEverRepository;
   scope: string;
-  aiAdapter?: PluginContext['ai'];
+  aiAdapter?: Pick<PluginContext['ai'], 'status' | 'generate'>;
   publicNetworkAdapter?: {
     fetchPublic(input: { url: string; method: 'GET' | 'HEAD'; headers: Record<string, string> }, options?: { signal?: AbortSignal }): Promise<{ status: number; statusText: string; url: string; headers: Record<string, string>; body: ArrayBuffer }>;
   };
@@ -216,6 +223,7 @@ interface ActivePlugin {
 }
 
 const toPluginNoteSummary = (note: Awaited<ReturnType<EdgeEverRepository["listMemos"]>>["memos"][number]): PluginNoteSummary => ({
+  kind: pluginNoteKind(note),
   id: note.id,
   notebookId: note.notebookId,
   title: note.title,
@@ -228,6 +236,7 @@ const toPluginNoteSummary = (note: Awaited<ReturnType<EdgeEverRepository["listMe
 
 const toPluginNote = (note: Awaited<ReturnType<EdgeEverRepository["getMemo"]>>["memo"]): PluginNote => ({
   ...toPluginNoteSummary(note),
+  contentJson: structuredClone(note.contentJson),
   revision: note.revision,
   contentMarkdown: note.contentMarkdown,
   contentText: note.contentText,
@@ -689,6 +698,9 @@ export class EdgeEverPluginHost {
     source: ExtensionInstallSource,
     pluginPackage: CachedPluginPackage | null,
   ) {
+    if (await isPluginIdRevoked(manifest.id)) {
+      throw new Error(`Extension ${manifest.id} was revoked and can no longer be installed or updated.`);
+    }
     const previous = this.extensions.find((item) => item.manifest.id === manifest.id);
     const wasActive = this.activePlugins.has(manifest.id);
     if (pluginPackage) await this.packageStorage.put(pluginPackage);
@@ -1034,28 +1046,40 @@ export class EdgeEverPluginHost {
       try { dispose(); } catch { /* A broken disposer must not strand the plugin. */ }
     }
     try { await active.plugin.deactivate?.(); } catch { /* Cleanup must continue after a broken deactivate hook. */ }
-    for (const key of [...this.commands.keys()]) {
+    for (const key of Array.from(this.commands.keys())) {
       if (key.startsWith(`${pluginId}:`)) this.commands.delete(key);
     }
-    for (const key of [...this.panels.keys()]) {
+    for (const key of Array.from(this.panels.keys())) {
       if (key.startsWith(`${pluginId}:`)) this.panels.delete(key);
     }
-    for (const key of [...this.embeds.keys()]) {
+    for (const key of Array.from(this.embeds.keys())) {
       if (key.startsWith(`${pluginId}:`)) this.embeds.delete(key);
     }
-    for (const [key, disposers] of [...this.mountedPanels]) {
+    for (const [key, disposers] of Array.from(this.mountedPanels)) {
       if (!key.startsWith(`${pluginId}:`)) continue;
-      for (const dispose of [...disposers]) {
+      for (const dispose of Array.from(disposers)) {
         try { dispose(); } catch { /* Panel cleanup must not strand the plugin. */ }
       }
     }
-    for (const [key, embedDisposers] of [...this.mountedEmbeds]) {
+    for (const [key, embedDisposers] of Array.from(this.mountedEmbeds)) {
       if (!key.startsWith(`${pluginId}:`)) continue;
-      for (const dispose of [...embedDisposers]) {
+      for (const dispose of Array.from(embedDisposers)) {
         try { dispose(); } catch { /* Embed cleanup must not strand the plugin. */ }
       }
     }
     this.refreshSnapshot();
+  }
+
+  private readonly noteWrites = new Map<string, Promise<unknown>>();
+  private async withNoteWrite<T>(noteId: string, write: () => Promise<T>): Promise<T> {
+    const previous = this.noteWrites.get(noteId) ?? Promise.resolve();
+    const pending = previous.catch(() => {}).then(write);
+    this.noteWrites.set(noteId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.noteWrites.get(noteId) === pending) this.noteWrites.delete(noteId);
+    }
   }
 
   private createContext(manifest: PluginManifest, disposers: Array<() => void>): PluginContext {
@@ -1063,6 +1087,35 @@ export class EdgeEverPluginHost {
     const secretNamespace = `${this.scope}:${manifest.id}`;
     const lifetime = new AbortController();
     disposers.push(() => lifetime.abort());
+    const assertSaved = (noteId: string) => {
+      const active = this.editorAdapter?.getDocument();
+      if (active?.noteId === noteId && active.hasUnsavedChanges) throw structuredApiError("NOTE_CONFLICT", "Save the active editor's changes before editing from a plugin.");
+    };
+    const assertEditorMarkdown = async () => {
+      const adapter = this.editorAdapter;
+      const document = adapter?.getDocument();
+      if (!document) throw new Error("No note editor is currently active.");
+      assertPluginMarkdownNote({ contentMarkdown: document.contentMarkdown });
+      if (document.noteId) assertPluginMarkdownNote((await this.repository.getMemo(document.noteId)).memo);
+      const latest = this.editorAdapter?.getDocument();
+      if (adapter !== this.editorAdapter || latest?.noteId !== document.noteId || latest?.contentMarkdown !== document.contentMarkdown) {
+        throw structuredApiError("NOTE_CONFLICT", "The active editor changed while the plugin was preparing an edit.");
+      }
+    };
+    const persistStructured = async (current: MemoDetail, contentMarkdown: string, contentJson = markdownToDoc(contentMarkdown)) => {
+      assertSaved(current.id);
+      const latest = (await this.repository.getMemo(current.id)).memo;
+      if (await structuredEditToken(latest) !== await structuredEditToken(current)) throw structuredApiError("NOTE_CONFLICT", "The note changed while the batch was being validated. Read it again.");
+      assertSaved(current.id);
+      if (contentMarkdown === current.contentMarkdown) return current;
+      const updated = (await this.repository.updateMemo(current, {
+        expectedRevision: current.revision, expectedContentHash: current.contentHash,
+        editSessionId: `plugin:${manifest.id}`, title: current.title ?? "", tags: current.tags,
+        contentMarkdown, contentJson,
+      }, { guardLocalSnapshot: true })).memo;
+      await this.onWorkspaceChanged?.();
+      return updated;
+    };
     return {
       pluginId: manifest.id,
       ai: {
@@ -1077,12 +1130,31 @@ export class EdgeEverPluginHost {
           const signal = AbortSignal.any([lifetime.signal, ...(input.signal ? [input.signal] : [])]);
           const result = await this.aiAdapter.generate({ ...input, signal }); signal.throwIfAborted(); return result;
         },
+        transcribeResource: async (noteId, resourceId) => {
+          assertPermission(manifest, 'ai:generate');
+          assertPermission(manifest, 'resources:read');
+          lifetime.signal.throwIfAborted();
+          const { transcribeNoteResource } = await import("@/lib/transcribe-note-resource");
+          const result = await transcribeNoteResource(noteId, resourceId, lifetime.signal);
+          lifetime.signal.throwIfAborted();
+          return result;
+        },
+        transcribeMedia: async (media, options) => {
+          assertPermission(manifest, 'ai:generate');
+          lifetime.signal.throwIfAborted();
+          const signal = AbortSignal.any([lifetime.signal, ...(options?.signal ? [options.signal] : [])]);
+          const { transcribeMediaBlob } = await import("@/lib/transcribe-note-resource");
+          const result = await transcribeMediaBlob(media, signal);
+          signal.throwIfAborted();
+          return result;
+        },
       },
       notes: {
         query: async (input = {}) => {
           assertPermission(manifest, "notes:read");
           const result = await this.repository.listMemos({
             notebookId: input.notebookId,
+            includeTotal: true,
             q: input.text,
             sort: input.sort,
             limit: Math.min(Math.max(input.limit ?? 50, 1), 200),
@@ -1092,12 +1164,14 @@ export class EdgeEverPluginHost {
             .filter((note) => !input.tags?.length || input.tags.every((tag) => note.tags.includes(tag)))
             .map(toPluginNoteSummary);
           const offset = Math.max(input.offset ?? 0, 0);
+          if (result.totalCount === undefined) throw new Error("note_query_total_missing");
           return { notes, totalCount: result.totalCount, nextOffset: result.nextCursor ? offset + result.memos.length : null };
         },
         queryContent: async (input = {}) => {
           assertPermission(manifest, "notes:read");
           const result = await this.repository.listMemos({
             notebookId: input.notebookId,
+            includeTotal: true,
             q: input.text,
             sort: input.sort,
             limit: Math.min(Math.max(input.limit ?? 50, 1), 200),
@@ -1109,13 +1183,14 @@ export class EdgeEverPluginHost {
           const notes = await Promise.all(summaries.map(async (note) =>
             toPluginNote((await this.repository.getMemo(note.id)).memo)));
           const offset = Math.max(input.offset ?? 0, 0);
+          if (result.totalCount === undefined) throw new Error("note_query_total_missing");
           return { notes, totalCount: result.totalCount, nextOffset: result.nextCursor ? offset + result.memos.length : null };
         },
         get: async (noteId) => {
           assertPermission(manifest, "notes:read");
           return toPluginNote((await this.repository.getMemo(noteId)).memo);
         },
-        editMarkdown: async (noteId, input) => {
+        editMarkdown: async (noteId, input) => this.withNoteWrite(noteId, async () => {
           assertPermission(manifest, "notes:read");
           assertPermission(manifest, "notes:write");
           if (
@@ -1131,11 +1206,13 @@ export class EdgeEverPluginHost {
           if (current.revision !== input.expectedRevision || current.contentHash !== input.expectedContentHash) {
             throw createPluginApiError("NOTE_CONFLICT", "The note changed after the plugin read it. Reload the note before editing.");
           }
+          assertPluginMarkdownNote(current);
           const activeDocument = this.editorAdapter?.getDocument();
           if (activeDocument?.noteId === noteId && activeDocument.hasUnsavedChanges) {
             throw createPluginApiError("NOTE_CONFLICT", "The note has unsaved editor changes. Save them before editing from a plugin.");
           }
           const contentMarkdown = applyPluginMarkdownEdits(current.contentMarkdown, input.edits);
+          assertPluginMarkdownNote({ contentMarkdown });
           if (contentMarkdown === current.contentMarkdown) return toPluginNote(current);
           const updated = (await this.repository.updateMemo(current, {
             expectedRevision: input.expectedRevision,
@@ -1145,35 +1222,41 @@ export class EdgeEverPluginHost {
             contentJson: markdownToDoc(contentMarkdown),
             contentMarkdown,
             tags: current.tags,
-          })).memo;
+          }, { guardLocalSnapshot: true })).memo;
           const note = toPluginNote(updated);
           await this.onWorkspaceChanged?.();
           return note;
-        },
+        }),
         create: async (input) => {
           assertPermission(manifest, "notes:write");
+          assertPluginMarkdownNote({ contentMarkdown: input.contentMarkdown });
           const note = toPluginNote((await this.repository.createMemo(input)).memo);
           await this.onWorkspaceChanged?.();
           return note;
         },
-        update: async (noteId, input) => {
+        update: async (noteId, input) => this.withNoteWrite(noteId, async () => {
           assertPermission(manifest, "notes:write");
           assertPermission(manifest, "notes:read");
           const current = (await this.repository.getMemo(noteId)).memo;
+          assertSaved(noteId);
+          if (input.contentMarkdown !== undefined) {
+            assertPluginMarkdownNote(current);
+            assertPluginMarkdownNote({ contentMarkdown: input.contentMarkdown });
+          }
           const contentMarkdown = input.contentMarkdown ?? current.contentMarkdown;
           const updated = (await this.repository.updateMemo(current, {
             expectedRevision: current.revision,
             expectedContentHash: current.contentHash,
             editSessionId: `plugin:${manifest.id}`,
             title: input.title ?? current.title ?? "",
-            contentJson: markdownToDoc(contentMarkdown),
+            contentJson: input.contentMarkdown === undefined ? current.contentJson : markdownToDoc(contentMarkdown),
             contentMarkdown,
             tags: input.tags ?? current.tags,
-          })).memo;
+          }, { guardLocalSnapshot: true })).memo;
           const note = toPluginNote(updated);
           await this.onWorkspaceChanged?.();
           return note;
-        },
+        }),
         delete: async (noteId, options) => {
           assertPermission(manifest, "notes:delete");
           await this.repository.deleteMemo(noteId, Boolean(options?.permanent));
@@ -1211,6 +1294,107 @@ export class EdgeEverPluginHost {
             return note;
           },
         },
+      },
+      diagrams: {
+        get: async (noteId, options) => {
+          assertPermission(manifest, "notes:read");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          return { note: toPluginNote(current), diagram: diagramSemanticGraph(pluginDiagram(current), options?.includeLayout === true), editToken: await structuredEditToken(current) };
+        },
+        edit: async (noteId, input) => this.withNoteWrite(noteId, async () => {
+          assertPermission(manifest, "notes:read"); assertPermission(manifest, "notes:write");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          await assertStructuredRevision(current, input); assertSaved(noteId);
+          try {
+            const mutation = await applyDiagramOperations({ operations: input.operations, reflow: input.reflow }, pluginDiagram(current));
+            const note = input.dryRun === true ? current : await persistStructured(current, mutation.contentMarkdown);
+            return { note: toPluginNote(note), diagram: diagramSemanticGraph(mutation.document, true), editToken: await structuredEditToken(note), dryRun: input.dryRun === true };
+          } catch (error) { return translateStructuredError(error); }
+        }),
+      },
+      tables: {
+        get: async (noteId) => {
+          assertPermission(manifest, "notes:read");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          return { note: toPluginNote(current), table: pluginTable(current), editToken: await structuredEditToken(current) };
+        },
+        edit: async (noteId, input) => this.withNoteWrite(noteId, async () => {
+          assertPermission(manifest, "notes:read"); assertPermission(manifest, "notes:write");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          await assertStructuredRevision(current, input); assertSaved(noteId);
+          if (input.allowDataChanges !== undefined && typeof input.allowDataChanges !== "boolean") throw structuredApiError("INVALID_STRUCTURED_EDIT", "allowDataChanges must be a boolean.");
+          try {
+            // Resolve attachments once per batch through the host repository.
+            let resourcesPromise: ReturnType<EdgeEverRepository["listResources"]> | undefined;
+            const mutation = await applyTableOperations(pluginTable(current), input.operations, async resourceId => {
+              const resources = (await (resourcesPromise ??= this.repository.listResources())).resources;
+              const resource = resources.find(item => item.id === resourceId && item.memoId === noteId && item.kind === "attachment" && !item.memoDeleted);
+              return resource ? { resourceId: resource.id, filename: resource.filename ?? "attachment", mimeType: resource.mimeType ?? "application/octet-stream", byteSize: resource.byteSize } : null;
+            });
+            if (!input.dryRun && mutation.changedCellCount > 0 && input.allowDataChanges !== true) throw structuredApiError("TABLE_DATA_CHANGES_REQUIRED", "Schema changes affect populated cells. Preview with dryRun, then set allowDataChanges=true.");
+            const note = input.dryRun === true ? current : await persistStructured(current, serializeTableDocument(mutation.document), markdownToDoc(tableFallbackMarkdown(mutation.document)));
+            return { note: toPluginNote(note), table: mutation.document, editToken: await structuredEditToken(note), dryRun: input.dryRun === true, changedCellCount: mutation.changedCellCount, removedAttachmentCount: mutation.removedAttachmentCount };
+          } catch (error) { return translateStructuredError(error); }
+        }),
+      },
+      posters: {
+        capabilities: async () => {
+          assertPermission(manifest, "notes:read");
+          const capabilities = posterCapabilities();
+          return { templates: capabilities.templates.map(template => template.id), platforms: capabilities.platforms.map(({ id, width, height }) => ({ id, width, height })), fonts: capabilities.fonts.map(font => font.family), editableFields: capabilities.editableFields, limits: capabilities.limits };
+        },
+        get: async noteId => {
+          assertPermission(manifest, "notes:read");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          return { note: toPluginNote(current), poster: pluginPoster(current), editToken: await structuredEditToken(current) };
+        },
+        edit: async (noteId, input) => this.withNoteWrite(noteId, async () => {
+          assertPermission(manifest, "notes:read");
+          assertPermission(manifest, "notes:write");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          await assertStructuredRevision(current, input);
+          assertSaved(noteId);
+          try {
+            const { expectedContentHash: _hash, expectedEditToken: _token, ...edits } = input;
+            const mutation = applyPosterEdits({ ...edits, memoId: noteId }, pluginPoster(current));
+            const images = mutation.document.elements.filter(element => element.type === "image");
+            if (images.length) {
+              const owned = new Set((await this.repository.listResources()).resources
+                .filter(resource => resource.memoId === noteId && resource.kind === "image" && !resource.memoDeleted).map(resource => resource.id));
+              if (images.some(image => !owned.has(image.resourceId))) throw structuredApiError("INVALID_STRUCTURED_EDIT", "Poster images must be active image resources belonging to this note.");
+            }
+            const note = input.dryRun === true || !mutation.changed ? current : await persistStructured(current, serializePosterDocument(mutation.document));
+            return { note: toPluginNote(note), poster: mutation.document, editToken: await structuredEditToken(note), dryRun: input.dryRun === true, changed: mutation.changed };
+          } catch (error) { return translateStructuredError(error); }
+        }),
+      },
+      infographics: {
+        capabilities: async () => {
+          assertPermission(manifest, "notes:read");
+          const { infographicCapabilities } = await import("./infographic-syntax-adapter");
+          return infographicCapabilities();
+        },
+        get: async noteId => {
+          assertPermission(manifest, "notes:read");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          const infographic = pluginInfographic(current);
+          const { infographicSyntaxAdapter } = await import("./infographic-syntax-adapter");
+          const parsed = infographicSyntaxAdapter.parse(infographic.syntax);
+          return { note: toPluginNote(current), infographic, data: (parsed.options.data ?? {}) as Record<string, import("@edgeever/plugin-api").PluginJsonValue>, template: parsed.options.template ?? "", theme: parsed.options.theme, editToken: await structuredEditToken(current) };
+        },
+        edit: async (noteId, input) => this.withNoteWrite(noteId, async () => {
+          assertPermission(manifest, "notes:read");
+          assertPermission(manifest, "notes:write");
+          const current = (await this.repository.getMemo(noteId)).memo;
+          await assertStructuredRevision(current, input);
+          assertSaved(noteId);
+          try {
+            const { infographicSyntaxAdapter } = await import("./infographic-syntax-adapter");
+            const mutation = applyInfographicOperations(pluginInfographic(current), input.operations, infographicSyntaxAdapter);
+            const note = input.dryRun === true || !mutation.changed ? current : await persistStructured(current, serializeInfographicDocument(mutation.document));
+            return { note: toPluginNote(note), infographic: mutation.document, editToken: await structuredEditToken(note), dryRun: input.dryRun === true, changed: mutation.changed };
+          } catch (error) { return translateStructuredError(error); }
+        }),
       },
       notebooks: {
         list: async () => {
@@ -1389,16 +1573,19 @@ export class EdgeEverPluginHost {
           return this.editorAdapter?.getDocument() ?? null;
         },
         editMarkdown: async (edits) => {
+          await assertEditorMarkdown();
           assertPermission(manifest, "editor:read");
           assertPermission(manifest, "editor:write");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
           const current = this.editorAdapter.getDocument();
           if (!current) throw new Error("No note editor is currently active.");
           const contentMarkdown = applyPluginMarkdownEdits(current.contentMarkdown, edits);
+          assertPluginMarkdownNote({ contentMarkdown });
           if (contentMarkdown !== current.contentMarkdown) this.editorAdapter.replaceDocument(contentMarkdown);
           return { ...current, contentMarkdown, hasUnsavedChanges: contentMarkdown !== current.contentMarkdown || current.hasUnsavedChanges };
         },
         insertEmbed: async (input) => {
+          await assertEditorMarkdown();
           assertPermission(manifest, "editor:write");
           assertPermission(manifest, "ui:embeds");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
@@ -1434,7 +1621,7 @@ export class EdgeEverPluginHost {
             this.refreshSnapshot();
             const dispose = () => {
               this.embeds.delete(key);
-              for (const mountedDispose of [...(this.mountedEmbeds.get(key) ?? [])]) mountedDispose();
+              for (const mountedDispose of Array.from(this.mountedEmbeds.get(key) ?? [])) mountedDispose();
               this.refreshSnapshot();
             };
             disposers.push(dispose);
@@ -1442,13 +1629,17 @@ export class EdgeEverPluginHost {
           },
         },
         replaceSelection: async (contentMarkdown) => {
+          await assertEditorMarkdown();
           assertPermission(manifest, "editor:write");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
+          assertPluginMarkdownNote({ contentMarkdown });
           this.editorAdapter.replaceSelection(contentMarkdown);
         },
         insertAtCursor: async (contentMarkdown) => {
+          await assertEditorMarkdown();
           assertPermission(manifest, "editor:write");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
+          assertPluginMarkdownNote({ contentMarkdown });
           this.editorAdapter.insertAtCursor(contentMarkdown);
         },
       },

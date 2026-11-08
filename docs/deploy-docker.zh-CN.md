@@ -89,6 +89,7 @@ Compose 会创建一个命名卷。所有需要在容器替换后保留的数据
 | `EDGE_EVER_SESSION_TTL_DAYS`           | `400`    | 登录会话有效期                            |
 | `EDGE_EVER_IDLE_TIMEOUT_SECONDS`       | `120`    | Bun 流式响应空闲超时，可设为 10 到 255 秒 |
 | `EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY` | 写入 `/data` | 可选的独立 AI 凭据加密密钥。未设置时，Docker 会把认证 Secret 或自动生成的密钥写入 `/data/edgeever-secrets.json`。 |
+| `EDGE_EVER_COMMUNITY_REGISTRY_URL` | 不设置 | 可选。签名社区插件目录的 HTTPS 地址。不设置时，市场只显示内置官方插件。 |
 
 Secret 可在受支持的变量名后追加 `_FILE`，并指向 Docker secret，例如
 `EDGE_EVER_AUTH_PASSWORD_FILE=/run/secrets/auth_password`。密码/hash 和 S3
@@ -172,6 +173,43 @@ docker build --tag edgeever:local .
 docker run --rm -p 8787:8787 \
   -e EDGE_EVER_AUTH_PASSWORD='请替换为足够长的随机密码' \
   -v ./edgeever-data:/data \
+  edgeever:local
+```
+
+### 系统信息中的元数据
+
+**设置 → 系统信息** 会区分镜像如何构建与实例如何部署。官方镜像会填写构建字段；
+自行构建的镜像如未传入下列构建参数，这些字段显示为未知。
+
+| 字段 | 来源 | 含义 |
+| ---- | ---- | ---- |
+| 实例构建 | `--build-arg EDGE_EVER_BUILD_ID` | 构建镜像所用的提交 |
+| 镜像构建时间 | `--build-arg EDGE_EVER_BUILD_CREATED_AT`（ISO 8601） | 镜像的构建时间，而不是部署或启动时间 |
+| 镜像构建来源 | `--build-arg EDGE_EVER_BUILD_TRIGGER` / `EDGE_EVER_BUILD_METHOD` | 镜像的产出方式，例如官方正式版镜像为 `github_release` · `github_actions` |
+| 容器镜像来源 | 运行时 `EDGE_EVER_CONTAINER_IMAGE` | 镜像拉取自哪个仓库；官方 `compose.yaml` 会设置 |
+| 部署来源 | 运行时 `EDGE_EVER_DEPLOYMENT_TRIGGER` / `EDGE_EVER_DEPLOYMENT_METHOD` | 你如何部署此实例；未设置时为未知 |
+| 实例部署时间 | 仅 Cloudflare | Docker 不提供部署时间 |
+
+触发方式为 `github_release`、`main_push` 或 `manual`。`EDGE_EVER_DEPLOYMENT_METHOD=docker`
+表示容器部署，而 `github_actions`、`cloudflare_workers_builds` 和 `local_cli`
+表示执行构建或部署的机制。EdgeEver 不会自行推断 Docker 或镜像仓库，因为同一服务
+也可直接在 Bun 下运行，镜像也可能被复制到其他仓库。缺失或无效的值显示为未知。
+
+自行构建镜像时：
+
+```sh
+docker build \
+  --build-arg EDGE_EVER_BUILD_ID="$(git rev-parse HEAD)" \
+  --build-arg EDGE_EVER_BUILD_CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --build-arg EDGE_EVER_BUILD_TRIGGER=manual \
+  --build-arg EDGE_EVER_BUILD_METHOD=local_cli \
+  --tag edgeever:local .
+docker run --rm -p 8787:8787 \
+  -e EDGE_EVER_AUTH_PASSWORD='请替换为足够长的随机密码' \
+  -e EDGE_EVER_CONTAINER_IMAGE=edgeever:local \
+  -e EDGE_EVER_DEPLOYMENT_TRIGGER=manual \
+  -e EDGE_EVER_DEPLOYMENT_METHOD=docker \
+  -v edgeever-data:/data \
   edgeever:local
 ```
 

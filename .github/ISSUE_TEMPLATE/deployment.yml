@@ -1,0 +1,67 @@
+name: Deployment and connection
+description: A self-hosted instance cannot be installed, updated, or reached.
+title: "[Deploy] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the Cloudflare or Docker deployment docs in this repository first. Open an issue if it still fails.
+
+        GitHub Issues are public. Do not include passwords, tokens, instance URLs, or note contents. A maintainer will ask in a comment if an address is needed for comparison.
+  - type: dropdown
+    id: deploy-method
+    attributes:
+      label: Deployment method
+      description: How is this instance deployed?
+      multiple: false
+      options:
+        - Cloudflare one-click deploy
+        - Cloudflare manual deploy
+        - Docker
+        - Official demo
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Affected client
+      description: Which client cannot connect? For a server-only problem, choose the client you use to reach the instance.
+      multiple: true
+      options:
+        - Web
+        - macOS
+        - Windows
+        - Linux
+        - Android
+        - iOS
+        - Browser extension
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see, including the exact error text?
+      placeholder: "For example: Desktop sign-in stays on network_unreachable, while the browser can sign in at the same address."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you already tried
+      description: Include which doc step you followed, any command output, and whether you compared it in a browser.
+    validations:
+      required: true
+  - type: textarea
+    id: system-info
+    attributes:
+      label: System information
+      description: If you can open the app, paste the text copied from Settings → System information. If you cannot, include the instance version, database backend, and deployment platform.
+      placeholder: |
+        - Instance build: v1.93.0
+        - Database backend: D1
+        - Deployment platform: Cloudflare
+    validations:
+      required: true

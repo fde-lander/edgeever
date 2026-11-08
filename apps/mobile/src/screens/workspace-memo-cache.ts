@@ -40,6 +40,16 @@ export const createOptimisticMemo = (
   };
 };
 
+// Where WorkspaceScreen puts the notebook scope (view, notebook, scope ids, tag) in
+// the list and search query keys.
+const MEMO_QUERY_SCOPE_INDEXES = { memos: [2, 3, 6, 7], search: [2, 4, 7, 8] } as const;
+
+// Previous results may stand in while a query loads only when they cover the same
+// notebook scope. Otherwise another notebook's notes, or the other sub-notebook
+// setting's notes, would be shown with their count as the current scope.
+export const memoQueriesShareScope = (kind: keyof typeof MEMO_QUERY_SCOPE_INDEXES, previousKey: readonly unknown[], nextKey: readonly unknown[]) =>
+  MEMO_QUERY_SCOPE_INDEXES[kind].every((index) => JSON.stringify(previousKey[index]) === JSON.stringify(nextKey[index]));
+
 export const memoMatchesListQuery = (memo: MemoSummary, queryKey: readonly unknown[]) => {
   const view = queryKey[2];
   const notebookId = queryKey[3];
@@ -92,7 +102,8 @@ export const applyOptimisticMemoToCache = (queryClient: QueryClient, previousMem
     const flattened = data.pages.flatMap((page) => page.memos);
     const withoutMemo = flattened.filter((memo) => memo.id !== nextMemo.id && memo.id !== previousMemo.id);
     const nextMemos = nextMatches ? sortMemoSummaries([nextMemo, ...withoutMemo], query.queryKey[5]) : withoutMemo;
-    const totalCount = Math.max(0, data.pages[0].totalCount + (nextMatches ? 1 : 0) - (previouslyMatched ? 1 : 0));
+    const previousTotal = data.pages[0].totalCount;
+    const totalCount = previousTotal === undefined ? undefined : Math.max(0, previousTotal + (nextMatches ? 1 : 0) - (previouslyMatched ? 1 : 0));
     let cursor = 0;
     const pages = data.pages.map((page, index) => {
       const pageSize = index === data.pages.length - 1 ? Math.min(page.memos.length, Math.max(0, nextMemos.length - cursor)) : page.memos.length;

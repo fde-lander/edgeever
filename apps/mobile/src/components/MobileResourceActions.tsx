@@ -7,7 +7,7 @@ import {
   type MobileAttachmentTarget,
   type MobileResourceTarget,
 } from "../lib/mobile-attachments";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { useMobileLocale, getMobileCatalog } from "../lib/mobile-locale";
 import { useMobileTheme } from "../lib/mobile-theme";
 
 type MobileResourceActionsProps = {
@@ -85,6 +85,126 @@ const copy = {
     save: "保存",
     syncedOnly: "リソースの同期が終わってから、名前の変更と削除ができます。",
   },
+  pl: {
+    attachmentActions: "Działania na załączniku",
+    imageActions: "Działania na obrazie",
+    cancel: "Anuluj",
+    delete: "Usuń",
+    attachmentDeleteConfirm: "Załącznik zostanie trwale usunięty z magazynu i z tej notatki. Tej operacji nie można cofnąć.",
+    attachmentDeleteTitle: "Usuń załącznik",
+    share: "Udostępnij",
+    download: "Pobierz",
+    downloadFailed: "Nie można pobrać",
+    failed: "Działanie na zasobie nie powiodło się. Spróbuj ponownie.",
+    filename: "Nazwa pliku",
+    rename: "Zmień nazwę",
+    attachmentRenameTitle: "Zmień nazwę załącznika",
+    imageDeleteConfirm: "Obraz zostanie trwale usunięty z magazynu i z tej notatki. Tej operacji nie można cofnąć.",
+    imageDeleteTitle: "Usuń obraz",
+    imageRenameTitle: "Zmień nazwę obrazu",
+    save: "Zapisz",
+    syncedOnly: "Zmiana nazwy i usuwanie będą dostępne po zsynchronizowaniu zasobu.",
+  },
+  ru: {
+    attachmentActions: "Действия с вложением",
+    imageActions: "Действия с изображением",
+    cancel: "Отмена",
+    delete: "Удалить",
+    attachmentDeleteConfirm: "Вложение будет безвозвратно удалено из хранилища и этой заметки. Это действие нельзя отменить.",
+    attachmentDeleteTitle: "Удалить вложение",
+    share: "Поделиться",
+    download: "Скачать",
+    downloadFailed: "Не удалось скачать",
+    failed: "Не удалось выполнить действие с ресурсом. Попробуйте снова.",
+    filename: "Имя файла",
+    rename: "Переименовать",
+    attachmentRenameTitle: "Переименовать вложение",
+    imageDeleteConfirm: "Изображение будет безвозвратно удалено из хранилища и этой заметки. Это действие нельзя отменить.",
+    imageDeleteTitle: "Удалить изображение",
+    imageRenameTitle: "Переименовать изображение",
+    save: "Сохранить",
+    syncedOnly: "Переименование и удаление будут доступны после синхронизации ресурса.",
+  },
+  "zh-TW": {
+    attachmentActions: "附件操作",
+    imageActions: "圖片操作",
+    cancel: "取消",
+    delete: "刪除",
+    attachmentDeleteConfirm: "附件會從儲存空間和當前筆記中永久刪除，此操作無法撤銷。",
+    attachmentDeleteTitle: "刪除附件",
+    share: "分享",
+    download: "下載",
+    downloadFailed: "無法下載",
+    failed: "資源操作失敗，請重試。",
+    filename: "檔案名稱",
+    rename: "重新命名",
+    attachmentRenameTitle: "重新命名附件",
+    imageDeleteConfirm: "圖片會從儲存空間和當前筆記中永久刪除，此操作無法撤銷。",
+    imageDeleteTitle: "刪除圖片",
+    imageRenameTitle: "重新命名圖片",
+    save: "儲存",
+    syncedOnly: "資源同步完成後才能重新命名或刪除。",
+  },
+  es: {
+    attachmentActions: "Acciones del archivo adjunto",
+    imageActions: "Acciones de la imagen",
+    cancel: "Cancelar",
+    delete: "Eliminar",
+    attachmentDeleteConfirm: "El archivo adjunto se eliminará permanentemente del almacenamiento y de esta nota. Esta acción no se puede deshacer.",
+    attachmentDeleteTitle: "Eliminar archivo adjunto",
+    share: "Compartir",
+    download: "Descargar",
+    downloadFailed: "No se puede descargar",
+    failed: "Error al realizar la acción con el recurso. Inténtelo de nuevo.",
+    filename: "Nombre de archivo",
+    rename: "Renombrar",
+    attachmentRenameTitle: "Renombrar archivo adjunto",
+    imageDeleteConfirm: "La imagen se eliminará permanentemente del almacenamiento y de esta nota. Esta acción no se puede deshacer.",
+    imageDeleteTitle: "Eliminar imagen",
+    imageRenameTitle: "Renombrar imagen",
+    save: "Guardar",
+    syncedOnly: "Renombrar y eliminar están disponibles después de sincronizar el recurso.",
+  },
+  de: {
+    attachmentActions: "Anhang-Aktionen",
+    imageActions: "Bild-Aktionen",
+    cancel: "Abbrechen",
+    delete: "Löschen",
+    attachmentDeleteConfirm: "Der Anhang wird dauerhaft aus dem Speicher und dieser Notiz entfernt. Dies kann nicht rückgängig gemacht werden.",
+    attachmentDeleteTitle: "Anhang löschen",
+    share: "Teilen",
+    download: "Herunterladen",
+    downloadFailed: "Herunterladen fehlgeschlagen",
+    failed: "Ressourcenaktion fehlgeschlagen. Bitte versuchen Sie es erneut.",
+    filename: "Dateiname",
+    rename: "Umbenennen",
+    attachmentRenameTitle: "Anhang umbenennen",
+    imageDeleteConfirm: "Das Bild wird dauerhaft aus dem Speicher und dieser Notiz entfernt. Dies kann nicht rückgängig gemacht werden.",
+    imageDeleteTitle: "Bild löschen",
+    imageRenameTitle: "Bild umbenennen",
+    save: "Speichern",
+    syncedOnly: "Umbenennen und Löschen sind nach der Synchronisierung der Ressource verfügbar.",
+  },
+  fr: {
+    attachmentActions: "Actions sur la pièce jointe",
+    imageActions: "Actions sur l'image",
+    cancel: "Annuler",
+    delete: "Supprimer",
+    attachmentDeleteConfirm: "La pièce jointe sera définitivement supprimée de l'espace de stockage et de cette note. Cette action est irréversible.",
+    attachmentDeleteTitle: "Supprimer la pièce jointe",
+    share: "Partager",
+    download: "Télécharger",
+    downloadFailed: "Impossible de télécharger",
+    failed: "L'action sur la ressource a échoué. Veuillez réessayer.",
+    filename: "Nom du fichier",
+    rename: "Renommer",
+    attachmentRenameTitle: "Renommer la pièce jointe",
+    imageDeleteConfirm: "L'image sera définitivement supprimée de l'espace de stockage et de cette note. Cette action est irréversible.",
+    imageDeleteTitle: "Supprimer l'image",
+    imageRenameTitle: "Renommer l'image",
+    save: "Enregistrer",
+    syncedOnly: "Le renommage et la suppression ne sont disponibles qu'après la synchronisation de la ressource.",
+  },
 } as const;
 
 export const MobileAttachmentCard = ({
@@ -107,7 +227,7 @@ export const MobileAttachmentCard = ({
   return (
     <View style={[styles.card, dark && styles.cardDark]}>
       <Pressable
-        accessibilityHint={resolvedLocale !== "zh-CN" ? "Opens the system share sheet for this attachment" : "打开系统分享面板分享此附件"}
+        accessibilityHint={getMobileCatalog(resolvedLocale).mobile.resources.shareAttachmentHint}
         accessibilityLabel={target.filename}
         accessibilityRole="button"
         disabled={busy}
@@ -130,7 +250,7 @@ export const MobileAttachmentCard = ({
         </View>
       </Pressable>
       <Pressable
-        accessibilityLabel={resolvedLocale !== "zh-CN" ? "Attachment actions" : "附件操作"}
+        accessibilityLabel={getMobileCatalog(resolvedLocale).mobile.resources.attachmentActions}
         accessibilityRole="button"
         disabled={busy}
         onPress={onActions}

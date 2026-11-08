@@ -1,4 +1,6 @@
 import type { MemoDetail, Notebook, Resource } from "@edgeever/shared";
+import { sanitizeExportPathSegment, uniqueExportName, buildNotebookExportPaths, buildNoteMarkdown, getExportResourceExtension, replaceExportResourceUrl } from "@edgeever/shared/backup-markdown";
+export { sanitizeExportPathSegment, uniqueExportName, buildNotebookExportPaths, buildNoteMarkdown, buildMarkdownFrontMatter, getExportResourceExtension, replaceExportResourceUrl } from "@edgeever/shared/backup-markdown";
 import { strToU8, Zip, ZipDeflate, ZipPassThrough } from "fflate";
 
 export type MarkdownExportProgress = {
@@ -9,20 +11,20 @@ export type MarkdownExportProgress = {
 export type MarkdownExportPage = {
   memos: MemoDetail[];
   resources: Resource[];
-  totalCount: number;
+  totalCount?: number;
   nextOffset: number | null;
+  nextCursor?: string | null;
 };
 
 export type MarkdownExportSource = {
   listNotebooks: () => Promise<{ notebooks: Notebook[] }>;
-  getPage: (offset: number, limit: number) => Promise<MarkdownExportPage>;
+  getPage: (offset: number, limit: number, cursor?: string) => Promise<MarkdownExportPage>;
   getResourceBlob: (resourceUrl: string) => Promise<Blob>;
 };
 
 const EXPORT_PAGE_SIZE = 50;
 const ZIP_MIME_TYPE = "application/zip";
 const MAX_BUFFERED_ZIP_BYTES = 128 * 1024 * 1024;
-const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 export class MarkdownExportMemoryLimitError extends Error {
   constructor() {
@@ -30,116 +32,6 @@ export class MarkdownExportMemoryLimitError extends Error {
     this.name = "MarkdownExportMemoryLimitError";
   }
 }
-
-export const sanitizeExportPathSegment = (value: string, fallback: string) => {
-  const sanitized = value
-    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, "-")
-    .replace(/\s+/g, " ")
-    .replace(/[. ]+$/g, "")
-    .trim()
-    .slice(0, 100);
-  const safeValue = sanitized || fallback;
-  return WINDOWS_RESERVED_NAME.test(safeValue) ? `_${safeValue}` : safeValue;
-};
-
-export const uniqueExportName = (candidate: string, usedNames: Set<string>) => {
-  if (!usedNames.has(candidate.toLocaleLowerCase())) {
-    usedNames.add(candidate.toLocaleLowerCase());
-    return candidate;
-  }
-
-  let suffix = 2;
-  while (usedNames.has(`${candidate} (${suffix})`.toLocaleLowerCase())) {
-    suffix += 1;
-  }
-
-  const unique = `${candidate} (${suffix})`;
-  usedNames.add(unique.toLocaleLowerCase());
-  return unique;
-};
-
-export const buildNotebookExportPaths = (notebooks: Notebook[]) => {
-  const notebookById = new Map(notebooks.map((notebook) => [notebook.id, notebook]));
-  const siblingNames = new Map<string, Set<string>>();
-  const segmentById = new Map<string, string>();
-
-  for (const notebook of notebooks) {
-    const parentKey = notebook.parentId ?? "__root__";
-    const usedNames = siblingNames.get(parentKey) ?? new Set<string>();
-    siblingNames.set(parentKey, usedNames);
-    segmentById.set(
-      notebook.id,
-      uniqueExportName(sanitizeExportPathSegment(notebook.name, "Untitled notebook"), usedNames)
-    );
-  }
-
-  const pathById = new Map<string, string>();
-  const resolvePath = (notebookId: string, visited = new Set<string>()): string => {
-    const cached = pathById.get(notebookId);
-    if (cached) {
-      return cached;
-    }
-
-    const notebook = notebookById.get(notebookId);
-    if (!notebook || visited.has(notebookId)) {
-      return "Unfiled";
-    }
-
-    visited.add(notebookId);
-    const segment = segmentById.get(notebookId) ?? "Untitled notebook";
-    const path = notebook.parentId && notebookById.has(notebook.parentId)
-      ? `${resolvePath(notebook.parentId, visited)}/${segment}`
-      : segment;
-    pathById.set(notebookId, path);
-    return path;
-  };
-
-  for (const notebook of notebooks) {
-    resolvePath(notebook.id);
-  }
-
-  return pathById;
-};
-
-const yamlString = (value: string) => JSON.stringify(value);
-
-export const buildMarkdownFrontMatter = (memo: MemoDetail, notebookPath: string) => [
-  "---",
-  `title: ${yamlString(memo.title?.trim() || "Untitled note")}`,
-  `tags: ${JSON.stringify(memo.tags)}`,
-  `notebook: ${yamlString(notebookPath)}`,
-  `created: ${yamlString(memo.createdAt)}`,
-  `updated: ${yamlString(memo.updatedAt)}`,
-  `pinned: ${memo.isPinned}`,
-  `edgeever_id: ${yamlString(memo.id)}`,
-  "---",
-  "",
-  "",
-].join("\n");
-
-export const getExportResourceExtension = (resource: Resource) => {
-  const filenameExtension = resource.filename?.match(/\.([a-z0-9]{1,12})$/i)?.[1];
-  if (filenameExtension) {
-    return filenameExtension.toLowerCase();
-  }
-
-  const mimeExtension = resource.mimeType?.split("/")[1]?.split(/[;+]/)[0];
-  return mimeExtension ? sanitizeExportPathSegment(mimeExtension, "bin").toLowerCase() : "bin";
-};
-
-const encodeRelativePath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
-
-export const replaceExportResourceUrl = (markdown: string, resourceUrl: string, relativePath: string) => {
-  const encodedPath = encodeRelativePath(relativePath);
-  const absoluteUrl = typeof window === "undefined" ? null : new URL(resourceUrl, window.location.origin).toString();
-  let result = markdown.split(resourceUrl).join(encodedPath);
-
-  if (absoluteUrl) {
-    result = result.split(absoluteUrl).join(encodedPath);
-  }
-
-  return result;
-};
 
 export const createMarkdownExport = async (
   source: MarkdownExportSource,
@@ -180,11 +72,14 @@ export const createMarkdownExport = async (
     void (async () => {
       try {
         let offset = 0;
+        let cursor: string | undefined;
         let completed = 0;
+        let total = 0;
 
         while (true) {
-          const page = await source.getPage(offset, EXPORT_PAGE_SIZE);
-          onProgress?.({ completed, total: page.totalCount });
+          const page = await source.getPage(offset, EXPORT_PAGE_SIZE, cursor);
+          total = page.totalCount ?? Math.max(total, completed + page.memos.length);
+          onProgress?.({ completed, total });
           const resourcesByMemo = new Map<string, Resource[]>();
 
           for (const resource of page.resources) {
@@ -221,15 +116,16 @@ export const createMarkdownExport = async (
 
             const markdownFile = new ZipDeflate(`${notebookPath}/${memoStem}.md`, { level: 6 });
             zip.add(markdownFile);
-            markdownFile.push(strToU8(`${buildMarkdownFrontMatter(memo, notebookPath)}${markdown}`), true);
+            markdownFile.push(strToU8(buildNoteMarkdown(markdown, memo, notebookPath)), true);
             completed += 1;
-            onProgress?.({ completed, total: page.totalCount });
+            onProgress?.({ completed, total });
           }
 
           if (page.nextOffset === null) {
             break;
           }
           offset = page.nextOffset;
+          cursor = page.nextCursor ?? undefined;
         }
 
         zip.end();

@@ -1,25 +1,43 @@
+import { requestPosterRender, readPosterRenderJob, posterRenderJob } from "./poster-render-service";
+import { applyPosterEdits, compilePosterMemo, posterCapabilities } from "./mcp-poster-tools";
+import { resolveObjectStorage } from "./object-storage";
+import { hasPosterDocumentMarker, parsePosterDocument, serializePosterDocument } from "@edgeever/shared";
 import {
   AiPromptTemplateCreateSchema,
   AiPromptTemplateUpdateSchema,
-  ARCHITECTURE_RESOURCE_ICONS,
   TemplateCreateSchema,
   TemplateUpdateSchema,
+  compileInfographicNote,
+  DIAGRAM_DEFAULT_THEME,
   docToText,
+  hasInfographicDocumentMarker,
+  INFOGRAPHIC_SCHEMA_VERSION,
+  infographicFallbackMarkdown,
+  infographicSyntaxTemplate,
   markdownToDoc,
+  addTableRecord,
+  createTableId,
   getTableSummary,
+  hasDiagramDocumentMarker,
+  TABLE_FIELD_LIMIT,
+  TABLE_RECORD_LIMIT,
+  TABLE_SCHEMA_VERSION,
   hasTableDocumentMarker,
   parseDiagramDocument,
+  parseInfographicDocument,
   parseTableDocument,
+  removeTableRecord,
   serializeDiagramDocument,
-  stripDiagramDocumentMarker,
-  stripTableDocumentMarker,
-  type DiagramDocument,
-  type DiagramNodeShape,
+  serializeInfographicDocument,
+  serializeTableDocument,
+  stripInfographicDocumentMarker,
+  tableFallbackMarkdown,
+  updateTableCell,
   type MemoDetail,
   type MemoSummary,
   type MemoUpdateInput,
+  type TableDocument,
 } from "@edgeever/shared";
-import type { DiagramIr, DiagramIrNodeType } from "@edgeever/shared/diagram-layout";
 import { audit, auditStatement } from "./audit";
 import type { AppContext, AuditActor, AuthContext, Bindings } from "./api-context";
 import { AppError } from "./app-error";
@@ -27,6 +45,7 @@ import { isDemoModeEnabled } from "./demo-mode";
 import { createId, isoNow } from "./entity-utils";
 import {
   decodeBase64Data,
+  encodeBase64Data,
   escapeMarkdownImageAlt,
   escapeMarkdownLinkLabel,
   getOptionalString,
@@ -34,6 +53,21 @@ import {
   getRequiredString,
   getRequiredStringArray,
 } from "./mcp-json-rpc";
+import {
+  applyTableSchemaOperations,
+  ensureUniqueTableFieldName,
+  memoWithoutTablePayload,
+  requiredTableRevision,
+  tableCellPatch,
+  tableFieldInput,
+  tableSchemaImpact,
+} from "./mcp-table-tools";
+import {
+  applyDiagramOperations,
+  diagramSemanticGraph,
+  memoWithoutDiagramPayload,
+  parseDiagramMemoIr,
+} from "./mcp-diagram-tools";
 import {
     getMemoRevisionRow as getMemoRevisionRowService,
     listMemoRevisions as listMemoRevisionsService,
@@ -43,6 +77,7 @@ import {
 } from "./memo-revision-service";
 import {
   createNotebookRecord,
+  deleteNotebookTree,
   findNotebooks,
   getNotebook,
   listNotebooks,
@@ -52,6 +87,8 @@ import {
 import {
     createAttachmentResource,
     createImageResource,
+    getResourceRow,
+    mapResource,
     inferImageExtension,
     listResourcesForMcp,
     listResourcesForMemo,
@@ -83,7 +120,7 @@ export type McpToolDependencies = {
   createMemoRecord: (
     database: DatabaseAdapter,
     workspaceId: string,
-    input: { notebookId: string; title?: string; contentMarkdown?: string; tags?: string[]; createdAt?: string; updatedAt?: string },
+    input: { notebookId: string; title?: string; contentJson?: unknown; contentMarkdown?: string; tags?: string[]; createdAt?: string; updatedAt?: string },
     actor: AuditActor,
     actorLabel: string,
   ) => Promise<MemoDetail>;
@@ -124,17 +161,7 @@ export type McpToolDependencies = {
       actorLabel: string;
     },
   ) => Promise<unknown>;
-  listMemosForMcp: (
-    database: DatabaseAdapter,
-    options: {
-      workspaceId: string;
-      notebookId?: string | null;
-      limit: number;
-      offset: number;
-      includeContent: boolean;
-      includeDeleted: boolean;
-    },
-  ) => Promise<unknown>;
+  listMemosForMcp: typeof import("./memo-service").listMemosForMcp;
   mergeMemosRecord: (
     database: DatabaseAdapter,
     workspaceId: string,
@@ -156,22 +183,7 @@ export type McpToolDependencies = {
     memoIds: string[],
     actor: AuditActor,
   ) => Promise<number>;
-  searchMemoSummaries: (
-    database: DatabaseAdapter,
-    options: {
-      workspaceId: string;
-      query?: string | null;
-      notebookId?: string | null;
-      tags?: string[];
-      createdAfter?: string | null;
-      createdBefore?: string | null;
-      updatedAfter?: string | null;
-      updatedBefore?: string | null;
-      isPinned?: boolean | null;
-      hasResources?: boolean | null;
-      limit: number;
-    },
-  ) => Promise<MemoSummary[]>;
+  searchMemoSummaries: typeof import("./memo-service").searchMemoSummaries;
   updateMemoRecord: (
     database: DatabaseAdapter,
     workspaceId: string,
@@ -204,426 +216,28 @@ const assertMcpMutationAllowed = (environment: Bindings) => {
   }
 };
 
-const DIAGRAM_IR_NODE_TYPES = new Set<DiagramIrNodeType>([
-  "topic", "process", "decision", "start", "end", "terminator", "client", "frontend", "service", "database", "storage",
-  "queue", "security", "external", "boundary",
-]);
-const DIAGRAM_EDGE_KINDS = new Set(["dependency", "request", "async", "data"]);
-const DIAGRAM_MEMO_KEYS = new Set(["notebookId", "title", "kind", "theme", "structure", "layout", "tags", "nodes", "edges"]);
-const DIAGRAM_NODE_KEYS = new Set(["id", "label", "type", "parentId", "resourceIcon"]);
-const DIAGRAM_EDGE_KEYS = new Set(["source", "target", "label", "type", "bidirectional"]);
-
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
-
-const assertAllowedKeys = (value: Record<string, unknown>, allowed: Set<string>, path: string) => {
-  const unexpected = Object.keys(value).find((key) => !allowed.has(key));
-  if (unexpected) throw new AppError("invalid_params", `${path}.${unexpected} is not supported`, 400);
+const includeAllMemoFormats = (format: unknown) => {
+  if (format !== undefined && format !== "all") {
+    throw new AppError("invalid_params", 'format must be "all" when provided.', 400);
+  }
+  return format === "all";
 };
 
-const parseDiagramNode = (value: unknown, index: number) => {
-  const path = `nodes.${index}`;
-  if (!isPlainRecord(value)) throw new AppError("invalid_params", `${path} must be an object`, 400);
-  assertAllowedKeys(value, DIAGRAM_NODE_KEYS, path);
-  const id = getRequiredString(value.id, `${path}.id`);
-  if (id.length > 100) throw new AppError("invalid_params", `${path}.id must be at most 100 characters`, 400);
-  if (typeof value.label !== "string" || value.label.length > 500) {
-    throw new AppError("invalid_params", `${path}.label must be a string with at most 500 characters`, 400);
+const projectMcpMemo = (memo: MemoSummary | MemoDetail) => {
+  if (!("contentMarkdown" in memo) || memo.poster
+    || hasDiagramDocumentMarker(memo.contentMarkdown)
+    || hasTableDocumentMarker(memo.contentMarkdown)
+    || hasInfographicDocumentMarker(memo.contentMarkdown)) {
+    return memo;
   }
-  if (value.type !== undefined && (
-    typeof value.type !== "string" || !DIAGRAM_IR_NODE_TYPES.has(value.type as DiagramIrNodeType)
-  )) {
-    throw new AppError("invalid_params", `${path}.type is not supported`, 400);
-  }
-  if (value.parentId !== undefined && (typeof value.parentId !== "string" || !value.parentId.trim() || value.parentId.length > 100)) {
-    throw new AppError("invalid_params", `${path}.parentId must be a non-empty string with at most 100 characters`, 400);
-  }
-  if (value.resourceIcon !== undefined && (
-    typeof value.resourceIcon !== "string"
-    || !ARCHITECTURE_RESOURCE_ICONS.includes(value.resourceIcon as typeof ARCHITECTURE_RESOURCE_ICONS[number])
-  )) {
-    throw new AppError("invalid_params", `${path}.resourceIcon is not supported`, 400);
-  }
-  return { ...value, id } as DiagramIr["nodes"][number];
+  const { contentJson, contentText, ...markdownMemo } = memo;
+  return markdownMemo;
 };
 
-const parseDiagramEdge = (value: unknown, index: number) => {
-  const path = `edges.${index}`;
-  if (!isPlainRecord(value)) throw new AppError("invalid_params", `${path} must be an object`, 400);
-  assertAllowedKeys(value, DIAGRAM_EDGE_KEYS, path);
-  const source = getRequiredString(value.source, `${path}.source`);
-  const target = getRequiredString(value.target, `${path}.target`);
-  if ([source, target].some((item) => item.length > 100)) {
-    throw new AppError("invalid_params", `${path} node IDs must be at most 100 characters`, 400);
-  }
-  if (value.label !== undefined && (typeof value.label !== "string" || value.label.length > 500)) {
-    throw new AppError("invalid_params", `${path}.label must be a string with at most 500 characters`, 400);
-  }
-  if (value.type !== undefined && (typeof value.type !== "string" || !DIAGRAM_EDGE_KINDS.has(value.type))) {
-    throw new AppError("invalid_params", `${path}.type is not supported`, 400);
-  }
-  if (value.bidirectional !== undefined && typeof value.bidirectional !== "boolean") {
-    throw new AppError("invalid_params", `${path}.bidirectional must be a boolean`, 400);
-  }
-  return { ...value, source, target } as NonNullable<DiagramIr["edges"]>[number];
-};
-
-const parseDiagramMemoIr = (args: Record<string, unknown>): DiagramIr => {
-  assertAllowedKeys(args, DIAGRAM_MEMO_KEYS, "arguments");
-  const kind = getRequiredString(args.kind, "kind");
-  if (!(["mind-map", "flowchart", "architecture"] as const).includes(kind as DiagramIr["kind"])) {
-    throw new AppError("invalid_params", "kind must be mind-map, flowchart, or architecture", 400);
-  }
-  if (!Array.isArray(args.nodes) || args.nodes.length < 1 || args.nodes.length > 200) {
-    throw new AppError("invalid_params", "nodes must include between 1 and 200 items", 400);
-  }
-  if (args.edges !== undefined && (!Array.isArray(args.edges) || args.edges.length > 400)) {
-    throw new AppError("invalid_params", "edges must be an array with at most 400 items", 400);
-  }
-  if (args.theme !== undefined && !["plain", "brand", "sun", "wa", "island", "rose", "mint", "cosmos", "tea", "naive", "macaron", "ocean", "ink", "classic", "paper"].includes(String(args.theme))) {
-    throw new AppError("invalid_params", "theme is not a supported diagram color scheme", 400);
-  }
-  if (args.structure !== undefined && !["map", "line", "capsule", "box", "circle", "ellipse", "hexagon", "logic", "tree", "brace", "org", "timeline", "fishbone"].includes(String(args.structure))) {
-    throw new AppError("invalid_params", "structure is not a supported mind-map shape", 400);
-  }
-  if (args.title !== undefined && (typeof args.title !== "string" || args.title.length > 160)) {
-    throw new AppError("invalid_params", "title must be a string with at most 160 characters", 400);
-  }
-  if (args.tags !== undefined && (
-    !Array.isArray(args.tags) || args.tags.length > 100 || args.tags.some((tag) => typeof tag !== "string")
-  )) {
-    throw new AppError("invalid_params", "tags must be an array of at most 100 strings", 400);
-  }
-  if (args.layout !== undefined && (
-    !isPlainRecord(args.layout)
-    || Object.keys(args.layout).some((key) => key !== "direction")
-    || (args.layout.direction !== undefined && !["left-to-right", "top-to-bottom"].includes(String(args.layout.direction)))
-  )) {
-    throw new AppError("invalid_params", "layout may only specify direction as left-to-right or top-to-bottom", 400);
-  }
-
-  const ir: DiagramIr = {
-    kind: kind as DiagramIr["kind"],
-    ...(args.theme === undefined ? {} : { theme: args.theme as DiagramIr["theme"] }),
-    ...(args.structure === undefined ? {} : { structure: args.structure as DiagramIr["structure"] }),
-    ...(args.layout === undefined ? {} : { layout: args.layout as DiagramIr["layout"] }),
-    nodes: args.nodes.map(parseDiagramNode),
-    edges: (args.edges as unknown[] | undefined)?.map(parseDiagramEdge),
-  };
-  const nodeIds = new Set(ir.nodes.map((node) => node.id));
-  if (nodeIds.size !== ir.nodes.length) throw new AppError("invalid_params", "node IDs must be unique", 400);
-  for (const node of ir.nodes) {
-    const allowedTypes = ir.kind === "mind-map"
-      ? new Set([undefined, "topic"])
-      : ir.kind === "flowchart"
-        ? new Set([undefined, "process", "decision", "start", "end", "terminator"])
-        : new Set([undefined, "client", "frontend", "service", "database", "storage", "queue", "security", "external", "boundary"]);
-    if (!allowedTypes.has(node.type)) {
-      throw new AppError("invalid_params", `${node.type} is not a valid node type for ${ir.kind}`, 400);
-    }
-    if (ir.kind === "flowchart" && node.parentId) {
-      throw new AppError("invalid_params", "flowchart nodes cannot use parentId", 400);
-    }
-    if (ir.kind !== "architecture" && node.resourceIcon) {
-      throw new AppError("invalid_params", "resourceIcon is only available for architecture nodes", 400);
-    }
-    if (node.parentId && !nodeIds.has(node.parentId)) {
-      throw new AppError("invalid_params", `${node.id}.parentId must reference an existing node`, 400);
-    }
-    if (ir.kind === "architecture" && node.parentId && ir.nodes.find((candidate) => candidate.id === node.parentId)?.type !== "boundary") {
-      throw new AppError("invalid_params", `${node.id}.parentId must reference an architecture boundary`, 400);
-    }
-  }
-  for (const edge of ir.edges ?? []) {
-    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
-      throw new AppError("invalid_params", "every edge endpoint must reference an existing node", 400);
-    }
-    if (ir.kind === "architecture" && ir.nodes.some((node) => (node.id === edge.source || node.id === edge.target) && node.type === "boundary")) {
-      throw new AppError("invalid_params", "architecture boundaries cannot be edge endpoints", 400);
-    }
-  }
-  const parentByNodeId = new Map(ir.nodes.flatMap((node) => node.parentId ? [[node.id, node.parentId]] : []));
-  for (const node of ir.nodes) {
-    const ancestors = new Set<string>();
-    let currentId: string | undefined = node.id;
-    while (currentId) {
-      if (ancestors.has(currentId)) {
-        throw new AppError("invalid_params", "diagram parent relationships must not contain cycles", 400);
-      }
-      ancestors.add(currentId);
-      currentId = parentByNodeId.get(currentId);
-    }
-  }
-  return ir;
-};
-
-const diagramNodeType = (shape: DiagramNodeShape): DiagramIrNodeType => shape;
-
-const diagramSemanticGraph = (document: DiagramDocument, includeLayout = false) => ({
-  kind: document.kind,
-  ...(document.theme ? { theme: document.theme } : {}),
-  ...(document.structure ? { structure: document.structure } : {}),
-  nodes: document.nodes.map((node) => ({
-    id: node.id,
-    label: node.label,
-    type: diagramNodeType(node.shape),
-    ...(node.parentId ? { parentId: node.parentId } : {}),
-    ...(node.resourceIcon ? { resourceIcon: node.resourceIcon } : {}),
-    ...(includeLayout ? { layout: { x: node.x, y: node.y, width: node.width, height: node.height } } : {}),
-  })),
-  edges: document.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    ...(edge.label ? { label: edge.label } : {}),
-    ...(edge.kind ? { type: edge.kind } : {}),
-    ...(edge.bidirectional !== undefined ? { bidirectional: edge.bidirectional } : {}),
-  })),
-});
-
-const memoWithoutDiagramPayload = (memo: MemoDetail) => {
-  const contentMarkdown = stripDiagramDocumentMarker(memo.contentMarkdown);
+const memoWithoutInfographicPayload = (memo: MemoDetail) => {
+  const contentMarkdown = stripInfographicDocumentMarker(memo.contentMarkdown);
   const contentJson = markdownToDoc(contentMarkdown);
   return { ...memo, contentMarkdown, contentJson, contentText: docToText(contentJson) };
-};
-
-const memoWithoutTablePayload = (memo: MemoDetail) => {
-  const contentMarkdown = stripTableDocumentMarker(memo.contentMarkdown);
-  const contentJson = markdownToDoc(contentMarkdown);
-  return { ...memo, contentMarkdown, contentJson, contentText: docToText(contentJson) };
-};
-
-type MutableDiagramEdge = ReturnType<typeof diagramSemanticGraph>["edges"][number];
-
-const applyDiagramOperations = async (
-  args: Record<string, unknown>,
-  current: DiagramDocument,
-) => {
-  assertAllowedKeys(args, new Set(["memoId", "expectedRevision", "operations", "dryRun", "reflow"]), "arguments");
-  if (!Array.isArray(args.operations) || args.operations.length < 1 || args.operations.length > 100) {
-    throw new AppError("invalid_params", "operations must include between 1 and 100 items", 400);
-  }
-  if (args.reflow !== undefined && args.reflow !== "preserve" && args.reflow !== "all") {
-    throw new AppError("invalid_params", "reflow must be preserve or all", 400);
-  }
-
-  let nodes: DiagramIr["nodes"] = current.nodes.map((node) => ({
-    id: node.id,
-    label: node.label,
-    type: diagramNodeType(node.shape),
-    ...(node.parentId ? { parentId: node.parentId } : {}),
-    ...(node.resourceIcon ? { resourceIcon: node.resourceIcon } : {}),
-  }));
-  let edges: MutableDiagramEdge[] = diagramSemanticGraph(current).edges;
-  const resizedNodeIds = new Set<string>();
-  const repositionedNodeIds = new Set<string>();
-  const affectedBoundaryIds = new Set<string>();
-  const counts = { addedNodes: 0, updatedNodes: 0, removedNodes: 0, addedEdges: 0, updatedEdges: 0, removedEdges: 0 };
-
-  const requireOperation = (value: unknown, index: number) => {
-    if (!isPlainRecord(value) || typeof value.op !== "string") {
-      throw new AppError("invalid_params", `operations.${index} must be an object with an op`, 400);
-    }
-    return value;
-  };
-  const findNodeIndex = (nodeId: string) => {
-    const index = nodes.findIndex((node) => node.id === nodeId);
-    if (index < 0) throw new AppError("invalid_params", `diagram node ${nodeId} does not exist`, 400);
-    return index;
-  };
-  const findEdgeIndex = (edgeId: string) => {
-    const index = edges.findIndex((edge) => edge.id === edgeId);
-    if (index < 0) throw new AppError("invalid_params", `diagram edge ${edgeId} does not exist`, 400);
-    return index;
-  };
-
-  for (let operationIndex = 0; operationIndex < args.operations.length; operationIndex += 1) {
-    const operation = requireOperation(args.operations[operationIndex], operationIndex);
-    const path = `operations.${operationIndex}`;
-    if (operation.op === "add_node") {
-      assertAllowedKeys(operation, new Set(["op", "node"]), path);
-      const node = parseDiagramNode(operation.node, operationIndex);
-      if (nodes.some((candidate) => candidate.id === node.id)) {
-        throw new AppError("invalid_params", `diagram node ${node.id} already exists`, 400);
-      }
-      nodes.push(node);
-      if (node.parentId) affectedBoundaryIds.add(node.parentId);
-      counts.addedNodes += 1;
-      continue;
-    }
-    if (operation.op === "update_node") {
-      assertAllowedKeys(operation, new Set(["op", "nodeId", "changes"]), path);
-      const nodeId = getRequiredString(operation.nodeId, `${path}.nodeId`);
-      if (!isPlainRecord(operation.changes) || Object.keys(operation.changes).length === 0) {
-        throw new AppError("invalid_params", `${path}.changes must be a non-empty object`, 400);
-      }
-      assertAllowedKeys(operation.changes, new Set(["label", "type", "parentId", "resourceIcon"]), `${path}.changes`);
-      const index = findNodeIndex(nodeId);
-      const previous = nodes[index];
-      const candidate: Record<string, unknown> = { ...previous, ...operation.changes, id: nodeId };
-      if (operation.changes.parentId === null || operation.changes.parentId === "") delete candidate.parentId;
-      if (operation.changes.resourceIcon === null || operation.changes.resourceIcon === "") delete candidate.resourceIcon;
-      const next = parseDiagramNode(candidate, operationIndex);
-      nodes[index] = next;
-      if (operation.changes.label !== undefined || operation.changes.type !== undefined) resizedNodeIds.add(nodeId);
-      if (operation.changes.parentId !== undefined && previous.parentId !== next.parentId) {
-        repositionedNodeIds.add(nodeId);
-        if (previous.parentId) affectedBoundaryIds.add(previous.parentId);
-        if (next.parentId) affectedBoundaryIds.add(next.parentId);
-      }
-      counts.updatedNodes += 1;
-      continue;
-    }
-    if (operation.op === "remove_node") {
-      assertAllowedKeys(operation, new Set(["op", "nodeId", "cascade"]), path);
-      const nodeId = getRequiredString(operation.nodeId, `${path}.nodeId`);
-      findNodeIndex(nodeId);
-      const removalIds = new Set([nodeId]);
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const node of nodes) {
-          if (node.parentId && removalIds.has(node.parentId) && !removalIds.has(node.id)) {
-            if (operation.cascade !== true) {
-              throw new AppError("invalid_params", `${nodeId} contains child nodes; set cascade to true to remove them`, 400);
-            }
-            removalIds.add(node.id);
-            changed = true;
-          }
-        }
-      }
-      for (const node of nodes) if (removalIds.has(node.id) && node.parentId) affectedBoundaryIds.add(node.parentId);
-      const priorEdgeCount = edges.length;
-      nodes = nodes.filter((node) => !removalIds.has(node.id));
-      edges = edges.filter((edge) => !removalIds.has(edge.source) && !removalIds.has(edge.target));
-      counts.removedNodes += removalIds.size;
-      counts.removedEdges += priorEdgeCount - edges.length;
-      continue;
-    }
-    if (operation.op === "add_edge") {
-      assertAllowedKeys(operation, new Set(["op", "edge"]), path);
-      if (!isPlainRecord(operation.edge)) throw new AppError("invalid_params", `${path}.edge must be an object`, 400);
-      assertAllowedKeys(operation.edge, new Set([...DIAGRAM_EDGE_KEYS, "id"]), `${path}.edge`);
-      const { id: requestedId, ...edgeInput } = operation.edge;
-      const parsed = parseDiagramEdge(edgeInput, operationIndex);
-      const id = requestedId === undefined ? createId("edge") : getRequiredString(requestedId, `${path}.edge.id`);
-      if (id.length > 100 || edges.some((edge) => edge.id === id)) {
-        throw new AppError("invalid_params", `diagram edge ID ${id} is invalid or already exists`, 400);
-      }
-      edges.push({ id, ...parsed });
-      counts.addedEdges += 1;
-      continue;
-    }
-    if (operation.op === "update_edge") {
-      assertAllowedKeys(operation, new Set(["op", "edgeId", "changes"]), path);
-      const edgeId = getRequiredString(operation.edgeId, `${path}.edgeId`);
-      if (!isPlainRecord(operation.changes) || Object.keys(operation.changes).length === 0) {
-        throw new AppError("invalid_params", `${path}.changes must be a non-empty object`, 400);
-      }
-      assertAllowedKeys(operation.changes, DIAGRAM_EDGE_KEYS, `${path}.changes`);
-      const index = findEdgeIndex(edgeId);
-      const candidate: Record<string, unknown> = { ...edges[index], ...operation.changes };
-      delete candidate.id;
-      if (operation.changes.label === null || operation.changes.label === "") delete candidate.label;
-      if (operation.changes.type === null || operation.changes.type === "") delete candidate.type;
-      if (operation.changes.bidirectional === null) delete candidate.bidirectional;
-      edges[index] = { id: edgeId, ...parseDiagramEdge(candidate, operationIndex) };
-      counts.updatedEdges += 1;
-      continue;
-    }
-    if (operation.op === "remove_edge") {
-      assertAllowedKeys(operation, new Set(["op", "edgeId"]), path);
-      const edgeId = getRequiredString(operation.edgeId, `${path}.edgeId`);
-      edges.splice(findEdgeIndex(edgeId), 1);
-      counts.removedEdges += 1;
-      continue;
-    }
-    throw new AppError("invalid_params", `${path}.op is not supported`, 400);
-  }
-
-  if (nodes.length < 1) throw new AppError("invalid_params", "a diagram must contain at least one node", 400);
-  if (current.kind === "mind-map") {
-    const priorEdgeCount = edges.length;
-    edges = edges.filter((edge) => !repositionedNodeIds.has(edge.target)
-      || nodes.find((node) => node.id === edge.target)?.parentId === edge.source);
-    counts.removedEdges += priorEdgeCount - edges.length;
-    for (const node of nodes) {
-      if (!node.parentId || edges.some((edge) => edge.source === node.parentId && edge.target === node.id)) continue;
-      edges.push({ id: createId("edge"), source: node.parentId, target: node.id });
-      counts.addedEdges += 1;
-    }
-  }
-  const validatedIr = parseDiagramMemoIr({
-    kind: current.kind,
-    ...(current.theme ? { theme: current.theme } : {}),
-    ...(current.structure ? { structure: current.structure } : {}),
-    nodes,
-    edges: edges.map(({ id: _id, ...edge }) => edge),
-  });
-  const { compileDiagramIr } = await import("@edgeever/shared/diagram-layout");
-  const next = compileDiagramIr(validatedIr);
-  next.edges = edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    ...(edge.label ? { label: edge.label } : {}),
-    ...(edge.type ? { kind: edge.type } : {}),
-    ...(edge.bidirectional !== undefined ? { bidirectional: edge.bidirectional } : {}),
-  }));
-
-  if (args.reflow !== "all") {
-    const currentById = new Map(current.nodes.map((node) => [node.id, node]));
-    for (const node of next.nodes) {
-      const previous = currentById.get(node.id);
-      if (!previous) continue;
-      const boundaryNeedsLayout = node.shape === "boundary" && affectedBoundaryIds.has(node.id);
-      if (repositionedNodeIds.has(node.id) || boundaryNeedsLayout) continue;
-      node.x = previous.x;
-      node.y = previous.y;
-      if (!resizedNodeIds.has(node.id)) {
-        node.width = previous.width;
-        node.height = previous.height;
-      }
-    }
-    if (current.kind === "architecture" && affectedBoundaryIds.size > 0) {
-      const nodeById = new Map(next.nodes.map((node) => [node.id, node]));
-      for (const boundaryId of [...affectedBoundaryIds]) {
-        let parentId = nodeById.get(boundaryId)?.parentId;
-        while (parentId) {
-          affectedBoundaryIds.add(parentId);
-          parentId = nodeById.get(parentId)?.parentId;
-        }
-      }
-      const depth = (nodeId: string) => {
-        let result = 0;
-        let node = nodeById.get(nodeId);
-        while (node?.parentId) {
-          result += 1;
-          node = nodeById.get(node.parentId);
-        }
-        return result;
-      };
-      for (const boundaryId of [...affectedBoundaryIds].sort((left, right) => depth(right) - depth(left))) {
-        const boundary = nodeById.get(boundaryId);
-        const children = next.nodes.filter((node) => node.parentId === boundaryId);
-        if (!boundary || boundary.shape !== "boundary" || children.length === 0) continue;
-        const left = Math.min(...children.map((node) => node.x)) - 36;
-        const top = Math.min(...children.map((node) => node.y)) - 56;
-        const right = Math.max(...children.map((node) => node.x + node.width)) + 36;
-        const bottom = Math.max(...children.map((node) => node.y + node.height)) + 36;
-        boundary.x = left;
-        boundary.y = top;
-        boundary.width = Math.max(260, right - left);
-        boundary.height = Math.max(180, bottom - top);
-      }
-    }
-  }
-
-  const contentMarkdown = serializeDiagramDocument(next);
-  if (!parseDiagramDocument(contentMarkdown)) {
-    throw new AppError("invalid_params", "The diagram operations produced an invalid document", 400);
-  }
-  return { document: next, contentMarkdown, changes: counts };
 };
 
 export const callMcpTool = async (
@@ -667,6 +281,7 @@ export const callMcpTool = async (
           updatedAfter: getOptionalString(args.updatedAfter),
           updatedBefore: getOptionalString(args.updatedBefore),
           isPinned: typeof args.isPinned === "boolean" ? args.isPinned : null,
+          poster: typeof args.poster === "boolean" ? args.poster : null,
           hasResources: typeof args.hasResources === "boolean" ? args.hasResources : null,
           limit: clampNumber(Number(args.limit ?? 20), 1, 50),
         }),
@@ -674,17 +289,24 @@ export const callMcpTool = async (
     }
     case "list_memos": {
       assertScope(auth, "read:memos");
-      return await listMemosForMcp(c.env.storage.db, {
+      const includeAllFormats = includeAllMemoFormats(args.format);
+      const includeContent = args.includeContent === true;
+      const page = await listMemosForMcp(c.env.storage.db, {
         workspaceId: auth.workspaceId,
         notebookId: getOptionalString(args.notebookId),
         limit: clampNumber(Number(args.limit ?? 50), 1, 100),
         offset: clampNumber(Number(args.offset ?? 0), 0, 100_000),
-        includeContent: args.includeContent === true,
+        includeContent,
         includeDeleted: args.includeDeleted === true,
+        poster: typeof args.poster === "boolean" ? args.poster : null,
       });
+      return includeContent && !includeAllFormats
+        ? { ...page, memos: page.memos.map(projectMcpMemo) }
+        : page;
     }
     case "get_memo": {
       assertScope(auth, "read:memos");
+      const includeAllFormats = includeAllMemoFormats(args.format);
       const memoId = getRequiredString(args.memoId, "memoId");
       const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId, args.includeDeleted === true);
 
@@ -696,7 +318,140 @@ export const callMcpTool = async (
       if (diagram) return { memo: memoWithoutDiagramPayload(memo), diagram: diagramSemanticGraph(diagram) };
       const table = parseTableDocument(memo.contentMarkdown);
       if (table) return { memo: memoWithoutTablePayload(memo), structuredTable: getTableSummary(memo.contentMarkdown).tablePreview };
-      return { memo };
+      const infographic = parseInfographicDocument(memo.contentMarkdown);
+      if (infographic) {
+        return {
+          memo: memoWithoutInfographicPayload(memo),
+          infographic: { template: infographicSyntaxTemplate(infographic.syntax) },
+        };
+      }
+      return { memo: includeAllFormats ? memo : projectMcpMemo(memo) };
+    }
+    case "get_table_records": {
+      assertScope(auth, "read:memos");
+      const memoId = getRequiredString(args.memoId, "memoId");
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      const document = parseTableDocument(memo.contentMarkdown);
+      if (!document) throw new AppError("not_table", "Memo is not a structured table", 400);
+      const recordId = getOptionalString(args.recordId);
+      const offset = clampNumber(Number(args.offset ?? 0), 0, document.records.length);
+      const limit = clampNumber(Number(args.limit ?? 50), 1, 100);
+      const record = recordId ? document.records.find((item) => item.id === recordId) : undefined;
+      if (recordId && !record) throw new AppError("not_found", "Table record not found", 404);
+      return {
+        memoId,
+        revision: memo.revision,
+        fields: document.fields,
+        records: record ? [record] : document.records.slice(offset, offset + limit),
+        totalRecords: document.records.length,
+        ...(recordId ? {} : { offset, limit }),
+      };
+    }
+    case "create_table_memo": {
+      assertScope(auth, "write:memos");
+      const notebookId = getRequiredString(args.notebookId, "notebookId");
+      const title = getRequiredString(args.title, "title");
+      if (title.length > 160) throw new AppError("invalid_params", "title must have at most 160 characters", 400);
+      if (!Array.isArray(args.fields) || args.fields.length < 1 || args.fields.length > TABLE_FIELD_LIMIT) {
+        throw new AppError("invalid_params", `fields must include 1–${TABLE_FIELD_LIMIT} fields`, 400);
+      }
+      const document: TableDocument = { schemaVersion: TABLE_SCHEMA_VERSION, fields: [], records: [], view: { filters: [], sort: null } };
+      for (const value of args.fields) {
+        const field = tableFieldInput(value);
+        ensureUniqueTableFieldName(document, field.name);
+        document.fields.push(field);
+      }
+      const memo = await createMemoRecord(c.env.storage.db, auth.workspaceId, {
+        notebookId,
+        title,
+        contentMarkdown: serializeTableDocument(document),
+        contentJson: markdownToDoc(tableFallbackMarkdown(document)),
+        tags: getOptionalStringArray(args.tags),
+      }, getAuditActor(c), getActorLabel(c));
+      return { memo: memoWithoutTablePayload(memo), fields: document.fields, revision: memo.revision };
+    }
+    case "update_table_schema": {
+      assertScope(auth, "write:memos");
+      const memoId = getRequiredString(args.memoId, "memoId");
+      const expectedRevision = requiredTableRevision(args.expectedRevision);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      const document = parseTableDocument(memo.contentMarkdown);
+      if (!document) throw new AppError("not_table", "Memo is not a structured table", 400);
+      if (memo.revision !== expectedRevision) {
+        throw new AppError("revision_conflict", "Table changed since it was read. Read it again before writing.", 409);
+      }
+      const next = applyTableSchemaOperations(document, args.operations);
+      const impact = tableSchemaImpact(document, next);
+      if (args.dryRun === true) {
+        const oldIds = new Set(document.fields.map((field) => field.id));
+        return {
+          dryRun: true,
+          memoId,
+          revision: memo.revision,
+          fields: next.fields.map((field) => ({ ...field, id: oldIds.has(field.id) ? field.id : null })),
+          ...impact,
+        };
+      }
+      if (impact.changedCellCount > 0 && args.allowDataChanges !== true) {
+        throw new AppError("table_data_changes_required", `${impact.changedCellCount} existing cell values would change. Preview with dryRun, then pass allowDataChanges=true.`, 409);
+      }
+      const result = await updateMemoRecord(c.env.storage.db, auth.workspaceId, memoId, {
+        expectedRevision,
+        contentMarkdown: serializeTableDocument(next),
+        contentJson: markdownToDoc(tableFallbackMarkdown(next)),
+        tags: memo.tags,
+      }, getAuditActor(c), getActorLabel(c));
+      if (!("memo" in result)) throw new AppError(result.error, result.message, result.status ?? 409);
+      return { memoId, revision: result.memo.revision, fields: next.fields, ...impact };
+    }
+    case "add_table_record":
+    case "update_table_record":
+    case "delete_table_record": {
+      assertScope(auth, "write:memos");
+      const memoId = getRequiredString(args.memoId, "memoId");
+      const expectedRevision = requiredTableRevision(args.expectedRevision);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      const document = parseTableDocument(memo.contentMarkdown);
+      if (!document) throw new AppError("not_table", "Memo is not a structured table", 400);
+      if (memo.revision !== expectedRevision) {
+        throw new AppError("revision_conflict", "Table changed since it was read. Read it again before writing.", 409);
+      }
+      let next = document;
+      let recordId: string;
+      if (name === "add_table_record") {
+        if (document.records.length >= TABLE_RECORD_LIMIT) throw new AppError("table_record_limit", "Table record limit reached", 409);
+        const cells = await tableCellPatch(c.env.storage.db, memoId, document, args.cells, true);
+        recordId = createTableId("rec");
+        next = addTableRecord(document, recordId);
+        for (const [fieldId, value] of Object.entries(cells)) next = updateTableCell(next, recordId, fieldId, value);
+      } else {
+        recordId = getRequiredString(args.recordId, "recordId");
+        if (!document.records.some((record) => record.id === recordId)) {
+          throw new AppError("not_found", "Table record not found", 404);
+        }
+        if (name === "update_table_record") {
+          const cells = await tableCellPatch(c.env.storage.db, memoId, document, args.cells, false);
+          for (const [fieldId, value] of Object.entries(cells)) next = updateTableCell(next, recordId, fieldId, value);
+        } else {
+          next = removeTableRecord(document, recordId);
+        }
+      }
+      const result = await updateMemoRecord(c.env.storage.db, auth.workspaceId, memoId, {
+        expectedRevision,
+        contentMarkdown: serializeTableDocument(next),
+        contentJson: markdownToDoc(tableFallbackMarkdown(next)),
+        tags: memo.tags,
+      }, getAuditActor(c), getActorLabel(c));
+      if (!("memo" in result)) throw new AppError(result.error, result.message, result.status ?? 409);
+      return {
+        memoId,
+        revision: result.memo.revision,
+        recordId,
+        ...(name === "delete_table_record" ? { deleted: true } : { record: next.records.find((item) => item.id === recordId) }),
+      };
     }
     case "create_memo": {
       assertScope(auth, "write:memos");
@@ -714,12 +469,37 @@ export const callMcpTool = async (
 
       return { memo };
     }
+    case "create_infographic_memo": {
+      assertScope(auth, "write:memos");
+      const notebookId = getRequiredString(args.notebookId, "notebookId");
+      const template = getRequiredString(args.template, "template");
+      const compiled = compileInfographicNote(template, args.data);
+      if (!compiled.ok) throw new AppError("invalid_params", compiled.message, 400);
+      const document = { schemaVersion: INFOGRAPHIC_SCHEMA_VERSION, syntax: compiled.syntax };
+      const memo = await createMemoRecord(c.env.storage.db, auth.workspaceId, {
+        notebookId,
+        title: getOptionalString(args.title) ?? compiled.title,
+        contentMarkdown: serializeInfographicDocument(document),
+        contentJson: markdownToDoc(infographicFallbackMarkdown(document)),
+        tags: getOptionalStringArray(args.tags),
+      }, getAuditActor(c), getActorLabel(c));
+      return {
+        memo: memoWithoutInfographicPayload(memo),
+        infographic: true,
+        template,
+        revision: memo.revision,
+      };
+    }
     case "create_diagram_memo": {
       assertScope(auth, "write:memos");
       const notebookId = getRequiredString(args.notebookId, "notebookId");
       const ir = parseDiagramMemoIr(args);
       const { compileDiagramIr } = await import("@edgeever/shared/diagram-layout");
-      const document = compileDiagramIr(ir);
+      // Generated mind maps and flowcharts start with the editor's default
+      // theme even when an agent supplies an arbitrary color scheme.
+      const document = compileDiagramIr(ir.kind === "mind-map" || ir.kind === "flowchart"
+        ? { ...ir, theme: DIAGRAM_DEFAULT_THEME }
+        : ir);
       const contentMarkdown = serializeDiagramDocument(document);
       if (!parseDiagramDocument(contentMarkdown)) {
         throw new AppError("invalid_params", "The diagram graph could not be compiled", 400);
@@ -736,6 +516,94 @@ export const callMcpTool = async (
         diagramKind: document.kind,
         diagram: diagramSemanticGraph(document),
       };
+    }
+    case "create_poster_memo": {
+      assertScope(auth, "write:memos");
+      const { args: input, document } = compilePosterMemo(args);
+      const memo = await createMemoRecord(c.env.storage.db, auth.workspaceId, {
+        notebookId: input.notebookId, title: input.title,
+        contentMarkdown: serializePosterDocument(document), tags: input.tags,
+      }, getAuditActor(c), getActorLabel(c));
+      return { memo: { id: memo.id, title: memo.title, notebookId: memo.notebookId, revision: memo.revision }, poster: true, template: input.template, format: input.format };
+    }
+    case "request_poster_render": {
+      assertScope(auth, "write:memos");
+      assertScope(auth, "write:resources");
+      return requestPosterRender(c.env.storage.db, auth.workspaceId, getRequiredString(args.memoId, "memoId"), args.expectedRevision as number, getOptionalString(args.templateId) ?? undefined);
+    }
+    case "get_poster_render_job": {
+      assertScope(auth, "read:memos");
+      const row = await readPosterRenderJob(c.env.storage.db, auth.workspaceId, getRequiredString(args.jobId, "jobId"));
+      if (!row) throw new AppError("not_found", "Render task not found", 404);
+      return posterRenderJob(row);
+    }
+    case "get_poster_capabilities": {
+      assertScope(auth, "read:memos");
+      return posterCapabilities();
+    }
+    case "get_poster_preview":
+    case "export_poster": {
+      assertScope(auth, "read:memos");
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, getRequiredString(args.memoId, "memoId"));
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      const poster = parsePosterDocument(memo.contentMarkdown);
+      if (!poster) throw new AppError("not_poster", "Memo is not an editable poster", 400);
+      if (name === "export_poster" && args.format === "source") {
+        return { memoId: memo.id, revision: memo.revision, filename: `${(memo.title || "poster").replace(/[\\/:*?"<>|]/g, "_")}.json`, mimeType: "application/json", content: JSON.stringify(poster, null, 2) };
+      }
+      if (name === "export_poster" && args.format !== "saved_preview") throw new AppError("invalid_params", "Choose source or saved_preview", 400);
+      assertScope(auth, "read:resources");
+      const row = poster.previewResourceId ? await getResourceRow(c.env.storage.db, auth.workspaceId, poster.previewResourceId) : null;
+      if (!row || row.memo_id !== memo.id || row.kind !== "image") {
+        const unavailable = { available: false, memoId: memo.id, revision: memo.revision, reason: "browser_render_required", message: "No current rendered preview. Call request_poster_render with this revision and wait for an online desktop/Web workspace, or open and save the poster editor. Never present source or an old image as a current preview." };
+        if (name === "export_poster") throw new AppError("preview_unavailable", unavailable.message, 409);
+        return unavailable;
+      }
+      if (!["image/png", "image/jpeg", "image/webp"].includes(row.mime_type ?? "")) throw new AppError("preview_unavailable", "Preview is not a supported rendered image", 409);
+      const maxPreviewBytes = 4 * 1024 * 1024;
+      if (row.byte_size > maxPreviewBytes) throw new AppError("preview_too_large", "Preview exceeds 4 MiB. Export through the browser editor.", 413);
+      const storage = await resolveObjectStorage(c.env, row.storage_config_id);
+      const object = await storage.store.get(row.object_key);
+      if (!object) throw new AppError("preview_unavailable", "The preview image file is missing", 409);
+      if (object.size > maxPreviewBytes) {
+        await object.body.cancel();
+        throw new AppError("preview_too_large", "Preview exceeds 4 MiB. Export through the browser editor.", 413);
+      }
+      const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
+      if (!bytes.length || bytes.length > maxPreviewBytes) throw new AppError("preview_unavailable", "Invalid preview image size", 409);
+      return { available: true, memoId: memo.id, revision: memo.revision, resource: mapResource(row), renderer: "browser", image: { data: encodeBase64Data(bytes), mimeType: row.mime_type! } };
+    }
+    case "get_poster": {
+      assertScope(auth, "read:memos");
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, getRequiredString(args.memoId, "memoId"));
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      const poster = parsePosterDocument(memo.contentMarkdown);
+      if (!poster) throw new AppError("not_poster", "Memo is not an editable poster", 400);
+      return { memo: { id: memo.id, title: memo.title, notebookId: memo.notebookId, revision: memo.revision }, poster };
+    }
+    case "update_poster": {
+      assertScope(auth, "write:memos");
+      const memoId = getRequiredString(args.memoId, "memoId");
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
+      if (!memo) throw new AppError("not_found", "Memo not found", 404);
+      if (memo.revision !== args.expectedRevision) throw new AppError("revision_conflict", "Poster changed. Read it again before editing.", 409);
+      const current = parsePosterDocument(memo.contentMarkdown);
+      if (!current) throw new AppError("not_poster", "Memo is not an editable poster", 400);
+      const mutation = applyPosterEdits(args, current);
+      const images = mutation.document.elements.filter(element => element.type === "image");
+      if (images.length) {
+        const owned = new Set((await listResourcesForMemo(c.env.storage.db, auth.workspaceId, memo.id))
+          .filter(resource => resource.kind === "image").map(resource => resource.id));
+        if (images.some(image => !owned.has(image.resourceId))) {
+          throw new AppError("invalid_params", "Poster images must be active image resources belonging to this memo", 400);
+        }
+      }
+      if (args.dryRun === true || !mutation.changed) return { dryRun: args.dryRun === true, memo, poster: mutation.document, changed: mutation.changed };
+      const result = await updateMemoRecord(c.env.storage.db, auth.workspaceId, memoId, {
+        expectedRevision: args.expectedRevision, contentMarkdown: serializePosterDocument(mutation.document),
+      }, getAuditActor(c), getActorLabel(c));
+      if (result.error !== undefined) throw new AppError(result.error, result.message, result.status ?? 400);
+      return { memo: result.memo, poster: mutation.document, changed: true };
     }
     case "get_diagram": {
       assertScope(auth, "read:memos");
@@ -811,6 +679,16 @@ export const callMcpTool = async (
           throw new AppError(
             "table_update_required",
             "Structured table content cannot be replaced through update_memo.",
+            400,
+          );
+        }
+        if (existing && hasPosterDocumentMarker(existing.contentMarkdown)) {
+          throw new AppError("poster_update_required", "Poster content cannot be replaced through update_memo. Use get_poster then update_poster.", 400);
+        }
+        if (existing && hasInfographicDocumentMarker(existing.contentMarkdown)) {
+          throw new AppError(
+            "infographic_update_required",
+            "Infographic content cannot be replaced through update_memo.",
             400,
           );
         }
@@ -1071,6 +949,18 @@ export const callMcpTool = async (
       );
 
       return { notebook };
+    }
+    case "delete_notebook": {
+      assertScope(auth, "write:notebooks");
+      if (Object.keys(args).some((key) => key !== "notebookId" && key !== "dryRun")) {
+        throw new AppError("invalid_params", "Only notebookId and dryRun are supported; recursive note deletion is not available", 400);
+      }
+      if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") {
+        throw new AppError("invalid_params", "dryRun must be a boolean", 400);
+      }
+      return deleteNotebookTree(c.env.storage.db, auth.workspaceId,
+        getRequiredString(args.notebookId, "notebookId"), getAuditActor(c),
+        { dryRun: args.dryRun === true, guardConcurrentChanges: true });
     }
     case "create_notebook": {
       assertScope(auth, "write:notebooks");

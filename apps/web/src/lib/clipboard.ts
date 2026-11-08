@@ -75,18 +75,35 @@ const toPngBlob = (blob: Blob): Promise<Blob | null> => {
   return new Promise((resolve) => {
     const image = document.createElement("img");
     const url = URL.createObjectURL(blob);
+    const finish = (png: Blob | null) => {
+      URL.revokeObjectURL(url);
+      image.onload = image.onerror = null;
+      image.src = "";
+      resolve(png);
+    };
     image.onload = () => {
       const canvas = document.createElement("canvas");
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      canvas.getContext("2d")?.drawImage(image, 0, 0);
-      URL.revokeObjectURL(url);
-      canvas.toBlob((png) => resolve(png), "image/png");
+      const releaseCanvas = () => { canvas.width = canvas.height = 0; };
+      try {
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          releaseCanvas();
+          finish(null);
+          return;
+        }
+        context.drawImage(image, 0, 0);
+        canvas.toBlob((png) => {
+          releaseCanvas();
+          finish(png);
+        }, "image/png");
+      } catch {
+        releaseCanvas();
+        finish(null);
+      }
     };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(null);
-    };
+    image.onerror = () => finish(null);
     image.src = url;
   });
 };
@@ -132,6 +149,58 @@ export const copyImageUrlToClipboard = async (url: string): Promise<boolean> => 
   }
 };
 
+export const copyResourceToClipboard = async ({
+  load,
+  filename,
+  asImage,
+}: {
+  load: () => Promise<Response>;
+  filename: string;
+  asImage: boolean;
+}): Promise<boolean> => {
+  const desktop = typeof window !== "undefined" ? window.edgeeverDesktop : undefined;
+  if (desktop?.copyImage || desktop?.copyFile) {
+    try {
+      const response = await load();
+      if (!response.ok) return false;
+      const blob = await response.blob();
+      if (asImage) return await copyImageBlobToClipboard(blob);
+      if (!desktop.copyFile) return false;
+      return await desktop.copyFile(new Uint8Array(await blob.arrayBuffer()), filename || "attachment");
+    } catch {
+      return false;
+    }
+  }
+
+  if (!asImage || typeof window === "undefined" || !navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    return false;
+  }
+
+  try {
+    // Safari keeps the click gesture only when write() runs now and the
+    // ClipboardItem payload is still a Promise. Fetch and PNG conversion stay inside it.
+    const pngPromise = load()
+      .then((response) => {
+        if (!response.ok) throw new Error("Resource fetch failed");
+        return response.blob();
+      })
+      .then((blob) => toPngBlob(blob))
+      .then((png) => {
+        if (!png) throw new Error("PNG conversion failed");
+        return png;
+      });
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "image/png": pngPromise,
+      }),
+    ]);
+    return true;
+  } catch (error) {
+    console.warn("Failed to copy resource to clipboard:", error);
+    return false;
+  }
+};
+
 export const copyImageBlobToClipboard = async (blob: Blob): Promise<boolean> => {
   const copyImage = typeof window !== "undefined" ? window.edgeeverDesktop?.copyImage : undefined;
   if (copyImage) {
@@ -167,5 +236,63 @@ export const copyImageBlobToClipboard = async (blob: Blob): Promise<boolean> => 
     console.warn("Failed to write image blob to clipboard:", error);
     return false;
   }
+};
+
+const desktopClipboardBridges = new WeakSet<object>();
+
+const clipboardWriteFailed = () => new DOMException("Clipboard write failed", "NotAllowedError");
+
+const clipboardItemText = async (item: ClipboardItem, type: string) => (await item.getType(type)).text();
+
+const imageClipboardType = (types: ReadonlyArray<string>) => (
+  ["image/png", "image/jpeg", "image/webp", "image/gif"].find((type) => types.includes(type))
+);
+
+// Electron denies every renderer permission request, including clipboard-write.
+// Streamdown's code, diagram, and table controls call navigator.clipboard and
+// ignore the rejection, so those buttons do nothing in the desktop app.
+const writeDesktopClipboardText = async (data: string) => {
+  if (!await copyTextToClipboard(data)) throw clipboardWriteFailed();
+};
+
+const writeDesktopClipboardItems = async (items: ClipboardItems) => {
+  if (!items.length) throw clipboardWriteFailed();
+  for (const item of items) {
+    const types = item.types;
+    if (types.includes("text/html")) {
+      const plain = types.includes("text/plain") ? await clipboardItemText(item, "text/plain") : "";
+      await copyHtmlToClipboard(await clipboardItemText(item, "text/html"), plain);
+      continue;
+    }
+    const imageType = imageClipboardType(types);
+    if (imageType) {
+      if (!await copyImageBlobToClipboard(await item.getType(imageType))) throw clipboardWriteFailed();
+      continue;
+    }
+    if (types.includes("text/plain")) {
+      if (!await copyTextToClipboard(await clipboardItemText(item, "text/plain"))) throw clipboardWriteFailed();
+      continue;
+    }
+    throw clipboardWriteFailed();
+  }
+};
+
+const assignClipboardMethod = (clipboard: Clipboard, name: "write" | "writeText", value: Clipboard["write"] | Clipboard["writeText"]) => {
+  try {
+    if (name === "write") clipboard.write = value as Clipboard["write"];
+    else clipboard.writeText = value as Clipboard["writeText"];
+  } catch {
+    Object.defineProperty(clipboard, name, { configurable: true, enumerable: true, writable: true, value });
+  }
+};
+
+export const installDesktopClipboardBridge = () => {
+  if (typeof window === "undefined" || window.edgeeverDesktop?.isAvailable !== true) return false;
+  const clipboard = navigator.clipboard;
+  if (!clipboard || desktopClipboardBridges.has(clipboard)) return false;
+  assignClipboardMethod(clipboard, "writeText", writeDesktopClipboardText);
+  assignClipboardMethod(clipboard, "write", writeDesktopClipboardItems);
+  desktopClipboardBridges.add(clipboard);
+  return true;
 };
 

@@ -1,3 +1,4 @@
+import { memoLocalSnapshot } from "./local-memo-guard";
 import type {
   DesktopMemoCreateParams,
   DesktopMemoListParams,
@@ -6,7 +7,8 @@ import type {
   DesktopRpcParams,
   DesktopRpcResponses,
 } from "@edgeever/shared";
-import { docToMarkdown, docToText, type MemoDetail } from "@edgeever/shared";
+import { docToMarkdown, docToText, markdownToDoc, type MemoDetail } from "@edgeever/shared";
+import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
 import type { EdgeEverRepository } from "@/lib/repository";
 import { api, getConfiguredDesktopApiBaseUrl } from "@/lib/api";
 import { createStagedResourceListItem, mapMarkdownResourceUrls, mapTiptapResourceUrls, toApiResourceUrl, toDesktopResourceUrl } from "@/lib/desktop-resources";
@@ -159,13 +161,9 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
       return local;
     }
     if (typeof navigator !== "undefined" && !navigator.onLine) return local;
-    try {
-      const remote = await api.listTemplates();
-      await Promise.all(remote.templates.map((template) => request("template.cache", { template })));
-      return remote;
-    } catch (error) {
-      throw error;
-    }
+    const remote = await api.listTemplates();
+    await Promise.all(remote.templates.map((template) => request("template.cache", { template })));
+    return remote;
   },
   createTemplate: (input) => request("template.create", input).then((result) => {
     window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
@@ -179,10 +177,11 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
     window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
     return result;
   }),
-  useTemplate: async (templateId, notebookId) => {
+  useTemplate: async (templateId, notebookId, locale) => {
     const templates = await createDesktopRepository().listTemplates();
-    const template = templates.templates.find((candidate) => candidate.id === templateId);
-    if (!template) throw new Error(`Template not found: ${templateId}`);
+    const stored = templates.templates.find((candidate) => candidate.id === templateId);
+    if (!stored) throw new Error(`Template not found: ${templateId}`);
+    const template = locale ? localizeDefaultMemoTemplate(stored, locale) : stored;
     return createDesktopRepository().createMemo({ notebookId, title: template.title ?? "", contentMarkdown: template.contentMarkdown, tags: template.tags });
   },
   uploadMemoResource: async (memoId, file) => {
@@ -272,6 +271,33 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
     return { memo: await repairDisplayedMemo(result.memo) };
   },
 
+  duplicateMemo: async (memoId, input = {}) => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) throw new Error("memo_duplicate_offline");
+    // The server copies the note, so its local edits are synchronized first.
+    const { syncDesktopData } = await import("@/lib/desktop-sync");
+    await syncDesktopData();
+    // The sidecar lists at most 200 outbox items, so a change of this note
+    // further down the queue cannot be seen. Duplicate only when the whole
+    // outstanding queue was listed and none of it belongs to this note.
+    const [status, outbox] = await Promise.all([
+      request("sync.status", {}),
+      request("sync.outbox.list", { limit: 200, includeConflicts: true }),
+    ]);
+    const outstanding = status.pending + status.error + status.conflict;
+    if (
+      status.syncing > 0
+      || outbox.items.length < outstanding
+      || outbox.items.some((item) => item.entityId === memoId)
+    ) {
+      throw new Error("memo_duplicate_pending_changes");
+    }
+    const result = await api.duplicateMemo(memoId, input);
+    await request("sync.apply", {
+      changes: [{ entityType: "memo", operation: "upsert", entityId: result.memo.id, memo: result.memo, notebook: null }],
+    });
+    return { memo: await repairDisplayedMemo((await request("memo.get", { memoId: result.memo.id, includeDeleted: false })).memo) };
+  },
+
   listMemos: (params) => {
     const rpcParams: DesktopMemoListParams = {
       ...params,
@@ -286,10 +312,14 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
   },
 
   createMemo: (input) => {
+    // The sidecar fallback wraps raw lines as paragraphs; parse Markdown here
+    // with the same schema used by the editor before persisting a new note.
+    const contentJson = input.contentJson ?? markdownToDoc(input.contentMarkdown ?? "");
     const rpcParams: DesktopMemoCreateParams = {
       ...input,
+      contentJson,
       contentMarkdown: mapMarkdownResourceUrls(input.contentMarkdown, toApiResourceUrl),
-      contentText: input.contentJson ? docToText(input.contentJson) : undefined,
+      contentText: docToText(contentJson),
     };
     return request("memo.create", rpcParams).then((result) => {
       window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
@@ -297,7 +327,7 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
     });
   },
 
-  updateMemo: async (memo: MemoDetail, input) => {
+  updateMemo: async (memo: MemoDetail, input, options) => {
     const needsStagedRepair = contentReferencesStagedResourceUrl(input.contentJson)
       || contentReferencesStagedResourceUrl(input.contentMarkdown);
     const aliasedInput = needsStagedRepair
@@ -332,7 +362,26 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
       contentText: docToText(portableContentJson),
       tags: input.tags,
     };
-    const result = await request("memo.update", rpcParams);
+    let result;
+    if (options?.guardLocalSnapshot) {
+      const snapshot = memoLocalSnapshot(memo);
+      try {
+        result = await request("memo.updateGuarded", {
+          ...rpcParams,
+          expectedLocalSnapshot: { ...snapshot,
+            contentJson: mapTiptapResourceUrls(snapshot.contentJson, toApiResourceUrl),
+            contentMarkdown: mapMarkdownResourceUrls(snapshot.contentMarkdown, toApiResourceUrl) ?? snapshot.contentMarkdown,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("NOTE_CONFLICT:")) throw Object.assign(new Error(message), { code: "NOTE_CONFLICT" });
+        if (message.includes("Unknown sidecar method: memo.updateGuarded")) throw Object.assign(new Error("Upgrade the desktop host before using guarded plugin note edits."), { code: "HOST_UPGRADE_REQUIRED" });
+        throw error;
+      }
+    } else {
+      result = await request("memo.update", rpcParams);
+    }
     notifySyncQueueDeferred();
     return { memo: await repairDisplayedMemo(result.memo), queued: true as const };
   },

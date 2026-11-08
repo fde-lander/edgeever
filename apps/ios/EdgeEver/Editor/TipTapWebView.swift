@@ -24,6 +24,7 @@ struct TipTapWebView: UIViewRepresentable {
     var onDoubleTap: (() -> Void)? = nil
     var onPickImage: (() -> Void)? = nil
     var onSearchResult: ((_ count: Int, _ index: Int) -> Void)? = nil
+    var onReaderScroll: ((_ collapsed: Bool) -> Void)? = nil
     var onImageExportEvent: (([String: Any]) -> Void)? = nil
     var onBodyReady: (() -> Void)? = nil
 
@@ -58,6 +59,7 @@ struct TipTapWebView: UIViewRepresentable {
                 onDoubleTap: onDoubleTap,
                 onPickImage: onPickImage,
                 onSearchResult: onSearchResult,
+                onReaderScroll: onReaderScroll,
                 onImageExportEvent: onImageExportEvent,
                 onBodyReady: onBodyReady
             )
@@ -152,14 +154,16 @@ enum TipTapResourceLoader {
         return """
         (function(){
           try {
-            if (!window.EdgeEverEditor) return;
+            if (!window.EdgeEverEditor || typeof window.EdgeEverEditor.\(fn) !== 'function') return false;
             var bin = atob('\(b64)');
             var bytes = new Uint8Array(bin.length);
             for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             var text = new TextDecoder('utf-8').decode(bytes);
             window.EdgeEverEditor.\(fn)(text);
+            return true;
           } catch (e) {
             try { window.webkit.messageHandlers.edgeever.postMessage({type:'error', message: String(e)}); } catch (_) {}
+            return false;
           }
         })();
         """

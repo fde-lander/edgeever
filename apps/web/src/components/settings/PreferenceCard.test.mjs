@@ -2,22 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 describe("editor body font preference", () => {
-  test("is chosen from settings and offers the bundled faces", () => {
+  test("is chosen from settings and loads optional faces through the shared loader", () => {
     const preferenceCard = readFileSync(new URL("./PreferenceCard.tsx", import.meta.url), "utf8");
     const editorFonts = readFileSync(new URL("../../styles/editor-body-fonts.css", import.meta.url), "utf8");
     const fontFaces = readFileSync(new URL("../../lib/editor-body-font-faces.ts", import.meta.url), "utf8");
 
     expect(preferenceCard).toContain('t("settings.editorBodyFontTitle")');
-    expect(preferenceCard).toContain('value="wenkai"');
-    expect(preferenceCard).toContain('value="source-han-serif"');
+    expect(preferenceCard).toContain("NOTE_BODY_FONT_MENU_GROUPS");
+    expect(preferenceCard).not.toContain("editorBodyFontGroups");
+    expect(preferenceCard).toContain('["wenkai", "zhuque"]');
+    expect(preferenceCard).toContain('value={id} textValue={t(FONT_CATALOG[id].labelKey)}');
+    expect(preferenceCard).toContain('["source-han-serif", "sourceHanSerif"]');
     expect(preferenceCard).toContain('value="custom"');
-    expect(fontFaces).toContain('fontFace("EdgeEver Kai"');
-    expect(fontFaces).toContain('fontFace("EdgeEver Fangsong"');
-    expect(fontFaces).toContain('fontFace("EdgeEver Zhi Song"');
-    expect(fontFaces).toContain('fontFace("EdgeEver Song"');
-    expect(fontFaces).toContain("kai.woff2?url");
-    expect(fontFaces).toContain("fangsong.woff2?url");
-    expect(fontFaces).toContain("zhi-song.woff2?url");
+    expect(fontFaces).toContain("configureBundledFontAssets(noteImageAssetUrls)");
+    expect(fontFaces).not.toContain("loadOfflineFonts(");
+    expect(fontFaces).not.toContain("assets/fonts/editor-body/");
     expect(preferenceCard).toContain('t("settings.uiFontTitle")');
     expect(preferenceCard).toContain("applyUiFontPreference");
     expect(preferenceCard).toContain("getFontChoicePreviewStack");
@@ -29,21 +28,25 @@ describe("editor body font preference", () => {
     expect(editorFonts).toContain("html[data-ui-font]");
     expect(editorFonts).toContain("html[data-ui-font]:not([data-editor-body-font]) .edgeever-editor[data-editor-theme=\"default\"] .ProseMirror");
     expect(editorFonts).toContain("html[data-ui-font] .edgeever-public-share");
-    expect(editorFonts).not.toContain(".edgeever-code-source");
     for (const fileName of ["kai.woff2", "kai-screen.woff2", "fangsong.woff2", "song.woff2", "zhi-song.woff2", "hei.woff2", "source-serif-4-regular.woff2", "OFL-lxgw-wenkai.txt", "OFL-zhuque-fangsong.txt", "OFL-source-han-serif.txt", "OFL-source-serif-4.txt", "IPA-lxgw-neo-zhi-song.txt"]) {
       expect(existsSync(new URL(`../../assets/fonts/editor-body/${fileName}`, import.meta.url))).toBe(true);
     }
   });
-});
 
-describe("editor content alignment preference", () => {
-  test("is configured from settings instead of the per-note toolbar", () => {
-    const preferenceCard = readFileSync(new URL("./PreferenceCard.tsx", import.meta.url), "utf8");
-    const editorPane = readFileSync(new URL("../EditorPane.tsx", import.meta.url), "utf8");
+  test("scopes code source fonts to the explicit code font preference", () => {
+    const editorFonts = readFileSync(new URL("../../styles/editor-body-fonts.css", import.meta.url), "utf8");
+    const rules = [...editorFonts.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+    const codeSourceRules = rules.filter(([, selectors]) => selectors.includes(".edgeever-code-source"));
 
-    expect(preferenceCard).toContain('t("settings.editorContentAlignmentTitle")');
-    expect(preferenceCard).toContain('onEditorContentAlignmentChange(value as EditorContentAlignment)');
-    expect(editorPane).not.toContain("onToggleEditorContentAlignment");
+    expect(codeSourceRules.length).toBeGreaterThan(0);
+    for (const [, selectors, declarations] of codeSourceRules) {
+      // Split between selectors, retaining commas inside :is(...).
+      for (const selector of selectors.trim().split(/,\s*(?=html)/)) {
+        expect(selector).toStartWith("html[data-editor-code-font] ");
+      }
+      expect(declarations).toMatch(/font-family:\s*var\(--editor-code-font-family\)/);
+      expect(declarations).not.toContain("--editor-body-font-family");
+    }
   });
 });
 
@@ -59,16 +62,41 @@ describe("appearance preference", () => {
   });
 });
 
-describe("paper editor themes", () => {
-  test("keeps theme switching in the editor toolbar instead of settings", () => {
+describe("reading typography settings", () => {
+  test("offers size, line height, palette, and CSS without an editor theme menu", () => {
     const preferenceCard = readFileSync(new URL("./PreferenceCard.tsx", import.meta.url), "utf8");
     const editorToolbar = readFileSync(new URL("../EditorToolbar.tsx", import.meta.url), "utf8");
 
+    expect(preferenceCard).toContain('t("settings.editorBodyFontSizeTitle")');
+    expect(preferenceCard).not.toContain('t("settings.editorBodyFontSizeDescription")');
+    expect(preferenceCard).toContain('t("settings.editorBodyLineHeightTitle")');
+    expect(preferenceCard).not.toContain('t("settings.editorBodyLineHeightDescription")');
+    expect(preferenceCard).toContain('t("settings.editorBodyPaletteTitle")');
+    expect(preferenceCard).toContain("NoteProsePaletteSwatch");
+    expect(preferenceCard).toContain("NOTE_PROSE_PALETTES[paletteId].accent");
+    expect(preferenceCard).toContain('t("settings.editorBodyHeadingStyleTitle")');
+    expect(preferenceCard).toContain('t("settings.editorBodyQuoteStyleTitle")');
+    expect(preferenceCard).toContain('t("settings.editorBodyEmphasisStyleTitle")');
+    expect(preferenceCard).toContain('t("settings.editorBodyMagazineCoverTitle")');
+    expect(preferenceCard).toContain('t("settings.editorBodyMagazineCoverDescription")');
+    expect(preferenceCard).toContain('t("settings.editorBodyCssTitle")');
+    expect(preferenceCard.slice(preferenceCard.indexOf("editorBodyCssTitle") - 500, preferenceCard.indexOf("editorBodyCssTitle"))).toContain("lg:flex");
+    expect(preferenceCard).toContain('t("settings.editorBodyCssDescription")');
+    expect(preferenceCard).toContain('t("settings.editorBodyCssReset")');
+    expect(preferenceCard).toContain("DEFAULT_NOTE_PROSE_CSS");
+    expect(preferenceCard.match(/t\("settings\.accountSyncDescription"\)/g)).toHaveLength(1);
+    expect(preferenceCard).toContain("NoteProseCssEditor");
+    expect(preferenceCard).toContain("NoteProseCssPreview");
+    expect(preferenceCard).toContain("noteProseCssDropsDeclarations");
+    expect(preferenceCard).toContain("overflow-hidden");
+    expect(readFileSync(new URL("./NoteProseCssEditor.tsx", import.meta.url), "utf8")).toContain("@codemirror/lang-css");
+    expect(preferenceCard).toContain('t("common.save")');
     expect(preferenceCard).not.toContain('t("settings.publishLayoutTitle")');
     expect(preferenceCard).not.toContain('t("settings.editorThemeTitle")');
     expect(preferenceCard).not.toContain('t("settings.markdownThemeTitle")');
-    expect(preferenceCard).toContain('t("settings.customEditorTheme.settingsTitle")');
-    expect(editorToolbar).toContain('t(`settings.editorThemes.${theme}`)');
+    expect(editorToolbar).not.toContain('t("editorToolbar.editorTheme")');
+    expect(editorToolbar).not.toContain("useEditorTheme");
+    expect(editorToolbar).toContain('t("editorToolbar.blockStyle")');
     expect(editorToolbar).toContain("markdownThemePreference");
   });
 });
@@ -80,7 +108,10 @@ describe("settings information architecture", () => {
     const shortcuts = readFileSync(new URL("./ShortcutSettingsItem.tsx", import.meta.url), "utf8");
 
     expect(preferenceCard).toContain('t("settings.groups.interface")');
+    expect(preferenceCard).toContain('t("settings.groups.readingAppearance")');
     expect(preferenceCard).toContain('t("settings.groups.reading")');
+    expect(preferenceCard).toContain('t("settings.groups.readingElements")');
+    expect(preferenceCard.indexOf("editorBodyCssTitle")).toBeLessThan(preferenceCard.indexOf("editorBodyFontTitle"));
     expect(preferenceCard).toContain('t("settings.groups.editing")');
     expect(preferenceCard).not.toContain("ShortcutSettingsItem");
     expect(settingsPane).toContain('t("settings.tabs.shortcuts")');

@@ -2,15 +2,15 @@
 
 本文件用于约束和指导参与本项目的 AI 代理与协作者。
 
-## 文档与分支约束
+## 文档约束
 
 - **技术栈与背景**：优先参考 `README.md`。
 - **移动端平台边界**：Android 客户端位于 `apps/mobile`，使用 Expo / React Native 实现；iOS 客户端位于 `apps/ios`，使用 Swift / SwiftUI 原生实现。
-- **双语同步**：修改中文文档时必须同步更新对应的英文文档。修改根目录 README 时必须同步 `README.md`、`README.zh-CN.md`、`README.zh-TW.md`、`README.ja.md`。
-- **分支规范**：严禁创建新分支，所有修改与提交必须直接在 `main` 分支上完成。
+- **双语同步**：修改中文文档时必须同步更新对应的英文文档。修改根目录 README 时必须同步 `README.md`、`README.zh-CN.md`、`README.zh-TW.md`、`README.es.md`、`README.de.md`、`README.fr.md`、`README.ja.md`、`README.pl-PL.md`、`README.ru.md`。
 
 ## 变更风险评估
 
+- **面向所有用户修复**：用户要求解决问题时，必须把修复写进仓库的产品代码，让后续版本里的所有用户生效；不得只处理维护者本机的配置、进程或临时状态。
 - **先评估后实现**：动手前说明功能价值、影响范围、最坏后果、回滚方案和未验证项；低价值但可能扰动成熟链路的需求，默认拒绝或提供低风险替代方案。
 - **核心链路从严**：安装器、自动升级、数据存储、认证及迁移的机制或配置变化一律按高风险变更处理，必须验证真实的旧版本到新版本链路，不能只验证新版本自身。
 - **禁止无依据保证**：未完成对应平台及跨版本验证时，必须明确标注风险，严禁声称“不影响现有用户”或“不影响自动升级”。
@@ -19,10 +19,20 @@
 
 - **USB 真机优先**：Android 功能调测必须使用通过 USB 连接的真实设备和 `adb`，不得启动或使用 QEMU、AVD 等 Android 模拟器；未连接可用真机时，明确标注真机验证未完成，不得以模拟器结果替代。
 
+## GitHub 沟通语言
+
+- 回复 Issue、PR 或提交 PR Review（含行内审查意见）时，使用对方正文或当前讨论的主要语言：英文用英文回复，中文用中文回复。
+- 对方明确指定沟通语言时，遵循其要求；中英混合或无法判断时，默认使用英文。
+- 不得因与仓库维护者的本地对话使用中文，就在英文 Issue 或 PR 中使用中文回复。
+- **基于 Issue 的提交**：当前功能若基于某个 Issue 开发，提交并推送时必须关联这个 Issue。
+- **PR 合并时的 CI 失败归属**：经核实已存在于 `main`、且非当前 PR 引入的 CI 失败，由仓库维护者负责修复，不得要求 PR 作者承担无关修复，也不得仅因此阻塞 PR 合并；合并前仍须完成与当前改动相关的必要验证。当前 PR 引入的失败由 PR 作者修复。
+- **合并后同步本地**：代理把 PR 合并进 `main` 后，若本地就在 `main` 且工作区干净，必须 `git fetch` 并快进到 `origin/main`，再结束本次任务。工作区不干净或不能快进时停下来说明，禁止 reset、rebase 或覆盖本地改动。同步代码不包括执行数据库迁移。
+  - **含迁移的本地 DEV 同步**：`git fetch` 后、快进前，用 `git diff --name-only --diff-filter=A HEAD..origin/main -- migrations/` 检查是否有新增 SQL 迁移。如果有且本仓库的本地 DEV 正在运行，先停止 Web 和 API，再快进本地 `main`。同步后使用 `bun run dev` 重启，由启动流程先应用本地 D1 迁移。确认 `/api/health` 报告预期迁移版本，并通过 Web 端口验证 `/api/v1/auth/session` 正常。启动或迁移失败时，明确报告本地 DEV 尚未恢复。
+
 ## GitHub Actions 与 Release 约束及流程
 
 1. **Fork 工作流边界**：配置 GitHub Actions 时必须考虑大量用户会 Fork 仓库进行自部署；仅官方仓库需要的 Job 必须使用 `github.repository == 'tianma-if/edgeever'` 门禁，严禁在下游 Fork 中分配 Runner 或执行。
-2. **版本号与基线**：`vX.Y.Z`（非 Draft/Prerelease）。发布须显式 `--bump patch|minor|major`（脚本不自动选级）；按 SemVer 选择，**禁止因发版节奏把用户可感知的新能力或新平台压成 patch**。递增根目录 `package.json`；含移动端修改时同步 `apps/mobile/app.json` 的 `expo.version` 并递增 `android.versionCode`。上一个正式 Release 为审计基线。
+2. **版本号与基线**：正式 Release 使用 `v2.Y.Z`（非 Draft/Prerelease），**主版本号固定为 `2`**。发布须显式选择 `--bump patch` 或 `--bump minor`（脚本不自动选级），禁止使用 `--bump major` 或发布其他主版本。按 SemVer 选择次版本或补丁版本，**禁止因发版节奏把用户可感知的新能力或新平台压成 patch**。递增根目录 `package.json`；含移动端修改时同步 `apps/mobile/app.json` 的 `expo.version` 并递增 `android.versionCode`。上一个正式 Release 为审计基线。
 3. **跨平台 Release 资产**：每个正式 Release 页面必须同时包含 macOS arm64 DMG、macOS x64 DMG、Windows x64 Preview 安装包、Linux x64 AppImage Preview 和 Android arm64 APK。Windows Preview 未使用 Authenticode 签名时必须同时提供经仓库外 Ed25519 私钥签名的更新清单；Linux Preview 必须包含 `latest-linux.yml` 更新元数据和独立 SHA-256 清单；两者均须在发布前通过独立下载与摘要审计。若本次未修改对应原生运行时代码、依赖、配置或构建工具，直接复用上一个正式 Release 中已验证的原始资产，保留原文件名与校验和，禁止仅为匹配新版本号而重命名。官方仓库正式 Release 中的 Android APK 必须使用固定的 Google Play 应用签名证书；本地上传证书签名的 APK 只能作为 Draft 临时资产，未经 Play 签名替换和发布前门禁核验不得公开。
 4. **验证命令**：必须通过 `bun run typecheck`、`bun run typecheck:mobile` 和 `bun run build:web`。
 5. **测试职责边界**：正式 Release 必须先在官方仓库及与下游一致的 Ubuntu 环境通过完整非 E2E 测试，严禁将上游自身的测试失败转嫁给下游 Fork 发现。只读部署 Fork 仅同步产品快照且不运行测试；只有显式保留定制改动的 Fork 才验证合并结果，失败时必须保持 `main` 与生产环境不变。
@@ -47,11 +57,17 @@
 Related Issue: #<issue-number>
 ```
 
+12. **外部贡献者署名**：维护者本人无需署名；外部贡献逐条注明账号与 PR，或集中致谢。正文名单不重复列名，保留 GitHub 原生 Contributors 头像区。参数用法见 `docs/release.zh-CN.md` / `docs/release.md`。
+
 ## 环境、部署与组件约束
 
+- **AI 模型 API 优先客户端直连**：所有平台、所有功能的 AI 模型 API 请求优先由客户端直接调用模型服务；Web 端遇到浏览器网络或 CORS 限制时，允许通过 EdgeEver 后端兜底。桌面端及原生移动端保持直连；已有 HTTP 响应或开始接收流式结果后，不得因错误自动切换到后端重复调用。
 - **Cloudflare 部署**：严格按 `docs/agent-deploy-cloudflare.md` 执行。
+- **Cloudflare 默认部署入口**：保留 Fork + Workers Builds 及现有上游同步机制；未经明确要求，不改用会改变 Fork 同步方式的 Deploy to Cloudflare 模板入口。
 - **跨运行时架构**：项目未来将正式支持 Docker 自托管；实现新功能时必须保持业务逻辑与 Cloudflare 解耦，并为其他运行时预留扩展边界。Cloudflare 与 Docker 必须共用同一套业务代码，仅允许保留薄且稳定、不包含业务判断的运行入口和基础设施驱动适配器。
 - **数据库 Migration**：数据库或种子变化时，在 `migrations/` 下新增递增编号 SQL，禁止修改已执行的旧 Migration。
+- **数据库读取预算**：备份、分页、同步和轮询必须评估整次操作的累计读取量，禁止逐页或逐次轮询重复全量扫描、计数。使用本地代表性数据验证读取量随页数与数据量的增长，并补充回归测试；不得用生产库全量扫描或压测来验证。额度耗尽必须明确诊断，不得只提示稍后重试。
+- **发布与实例恢复**：Release 资产通过不代表线上实例可用。发现部署、迁移或额度失败时，必须核查本次涉及实例的实际服务端版本和健康状态，明确报告未部署或未恢复；不得把客户端升级或额度重置等同于服务端修复已生效。
 - **本地启动**：默认 `bun run dev`（纯本地环境）。用户要求“启动/重启 Web 端”时，默认含 Web 与 API，必须使用 `bun run dev`；只有用户明确要求“纯前端”或明确指定 `dev:web` 时，才使用 `bun run dev:web`。指定远程实例用 `EDGE_EVER_INSTANCE=<实例名> bun run dev:remote`。
 - **Demo 示例同步**：修改示例笔记后，在 `main` 分支干净状态下执行 `bun run demo:sync` 重置公开 Demo。
 - **禁止重复造轮子**：严禁重复实现已有成熟方案；优先采用维护活跃、广泛验证的开源组件与依赖，并优先复用 `shadcn/ui`；复杂或重复模块封装为独立组件。
@@ -60,5 +76,5 @@ Related Issue: #<issue-number>
 
 ## 品牌视觉规范 / Brand Identity
 
-- **品牌色**：主绿色 `#16A06E`，Logo 图形色 `#07130B`。
+- **品牌色**：复用现有的 UI 黑灰配色，Logo 图形色 `#07130B`。
 - 修改 Logo 后执行 `bun run prepare:brand:icons` 同步各平台资源。

@@ -1,29 +1,20 @@
 {
-  "version": "1.90.0",
+  "version": "2.23.0",
   "changes": {
     "en-US": [
-      "Mind maps and flowcharts default to the Plain theme, with medium-gray emphasis. Diagrams without a saved theme use that look, and every diagram canvas uses the note editor surface.",
-      "The infographic editor opens without getting stuck, and updating its registry no longer breaks rendering.",
-      "The note header shows a GitHub link in place of the search button.",
-      "Copying a note as rich text shows a near-black success toast. The menu is now labeled Copy as Rich Text.",
-      "The mobile system info screen is more compact, and its text stays readable.",
-      "The settings tab for tokens is labeled API / MCP."
+      "MCP now returns only Markdown for prose note bodies by default in get_memo and full-content list_memos. If your integration uses contentJson or contentText, pass format=\"all\" to keep the previous fields.",
+      "MCP keyword search includes a snippet of up to 200 characters around a body match when available.",
+      "The initial HTML for publicly shared notes leaves the note language unspecified and labels the built-in English text correctly. Thanks to @dkoryto in #816."
     ],
     "zh-CN": [
-      "思维导图和流程图默认使用素简主题，强调色改为中灰。未保存主题的图也按素简显示，所有图的画布都使用笔记编辑器的底色。",
-      "信息图编辑器可以正常打开，更新注册表也不会再导致渲染失败。",
-      "笔记顶栏用 GitHub 链接替换了搜索按钮。",
-      "把笔记复制到公众号或博客后，会看到近黑的成功提示。菜单名称改为「复制到公众号 / 博客」。",
-      "手机上的系统信息页更紧凑，文字保持可读。",
-      "设置里的令牌页签改名为 API / MCP。"
+      "MCP 的 get_memo 和返回完整正文的 list_memos 现在默认只提供 Markdown 正文。依赖 contentJson 或 contentText 的集成可传入 format=\"all\"，继续获取原有字段。",
+      "MCP 关键词搜索命中笔记正文时，会附带最多 200 字的匹配片段。",
+      "公开分享页的初始 HTML 现在将笔记标题和正文的语言标记为未知，并正确标注页面自带的英文文案。感谢 @dkoryto 的 #816。"
     ],
     "ja": [
-      "マインドマップとフローチャートの初期テーマを「素」にし、強調色をミディアムグレーにしました。テーマを保存していない図もこの見た目になり、図のキャンバスはノート編集画面の背景色を使います。",
-      "インフォグラフィック編集画面が途中で止まらなくなり、レジストリを更新しても描画に失敗しなくなりました。",
-      "ノート上部の検索ボタンを GitHub リンクに置き換えました。",
-      "書式付きでコピーすると、ほぼ黒の成功表示が出ます。メニュー名は「書式付きコピー」になりました。",
-      "モバイルのシステム情報画面をよりコンパクトにし、文字サイズは読みやすさを保ちました。",
-      "設定のトークンタブの名前を API / MCP に変更しました。"
+      "MCP の get_memo と本文を含む list_memos は、標準のノート本文を既定で Markdown のみ返します。contentJson や contentText が必要な場合は format=\"all\" を指定してください。",
+      "MCP のキーワード検索では、本文に一致箇所がある場合に最大 200 文字の抜粋を返します。",
+      "公開共有ページの初期 HTML で、ノートの言語は未指定とし、組み込みの英語テキストには正しい言語を設定します。"
     ]
   }
 }

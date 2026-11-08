@@ -20,7 +20,7 @@ import {
 } from "../lib/mobile-editor-controller";
 import { clearMobileMemoDraft, writeMobileMemoDraft, type MobileMemoDraft } from "../lib/mobile-drafts";
 import { prepareUploadAsset } from "../lib/mobile-image-upload";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { localizeMissingNotebookName, useMobileLocale, getMobileCatalog, formatMobileCopy, type MobileLocale } from "../lib/mobile-locale";
 import { useSession } from "../lib/session";
 import { recordEditorStartup } from "../lib/startup-performance";
 import { safeDomCall } from "../lib/safe-dom-call";
@@ -28,6 +28,11 @@ import { showEdgeEverKeyboard } from "../../modules/edgeever-keyboard";
 import { parseTags } from "../screens/workspace-utils";
 import type { MobileMemoUpdatePayload } from "../screens/workspace-memo-cache";
 import { resolveEditorCloseAction } from "./mobile-editor-close";
+import {
+  getMobileEditorSaveChrome,
+  MOBILE_EDITOR_AUTOSAVE_DELAY_MS,
+  shouldScheduleMobileEditorAutosave,
+} from "./mobile-editor-save-chrome";
 import { useMobileEditorResourceActions } from "./useMobileEditorResourceActions";
 import { useMobileEditorUploadAsset } from "./useMobileEditorUploadAsset";
 import { useMobileSelectionAi } from "./useMobileSelectionAi";
@@ -36,6 +41,7 @@ import {
   type ProtectedResourceLoadFailure,
 } from "../lib/mobile-protected-resources";
 import type { MobileResourceTarget } from "../lib/mobile-attachments";
+import { uploadMobileResource } from "../lib/mobile-resource-upload";
 
 export type MobileMemoUpdateMutation = UseMutationResult<
   MemoDetail,
@@ -58,19 +64,15 @@ const createLocalImagePreviewDataUrl = async (asset: { mimeType?: string | null;
 };
 
 const alertProtectedImageLoadFailure = (
-  locale: "zh-CN" | "en-US" | "ja",
+  locale: MobileLocale,
   failure: ProtectedResourceLoadFailure
 ) => {
   const statusLabel = failure.status != null
     ? String(failure.status)
-    : locale === "en-US"
-      ? "network error"
-      : "网络错误";
+    : getMobileCatalog(locale).mobile.common.networkError;
   Alert.alert(
-    locale !== "zh-CN" ? "Image failed to load" : "图片加载失败",
-    locale === "en-US"
-      ? `Could not load a note image (${statusLabel}). Check the network and try again.`
-      : `笔记中的图片未能加载（${statusLabel}）。请检查网络后重试。`
+    getMobileCatalog(locale).mobile.common.imageLoadFailed,
+    formatMobileCopy(getMobileCatalog(locale).mobile.common.noteImageLoadFailed, { status: statusLabel })
   );
 };
 
@@ -139,23 +141,24 @@ export const useMobileRichEditor = ({
   const [draftRestored, setDraftRestored] = useState(Boolean(restoredDraft));
   const [ready, setReady] = useState(alreadyReady);
   const [dirty, setDirty] = useState(Boolean(restoredDraft));
+  const [autosaveGeneration, setAutosaveGeneration] = useState(0);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resourceTarget, setResourceTarget] = useState<MobileResourceTarget | null>(null);
   const { pickUploadAssets, uploadSourcePicker } = useMobileEditorUploadAsset();
-  const notebookLabel = notebooks.find((notebook) => notebook.id === notebookId)?.name ?? "未分类";
-  const saveLabel = error
-    ? "保存失败"
-    : saving
-      ? "保存中"
-      : uploading
-        ? "上传中"
-        : dirty
-          ? (draftRestored ? "本地草稿" : "未保存")
-          : ready
-            ? "已保存"
-            : "加载中";
+  const notebookLabel = notebooks.find((notebook) => notebook.id === notebookId)?.name ?? localizeMissingNotebookName(resolvedLocale);
+  const saveChrome = getMobileEditorSaveChrome({
+    dirty,
+    draftRestored,
+    error: Boolean(error),
+    ready,
+    saving,
+    uploading,
+  });
+  const scheduleAutosave = () => {
+    setAutosaveGeneration((current) => current + 1);
+  };
   const titleRef = useRef(title);
   const tagsTextRef = useRef(tagsText);
   const notebookIdRef = useRef(notebookId);
@@ -242,6 +245,7 @@ export const useMobileRichEditor = ({
     contentMarkdownRef.current = docToMarkdown(contentJson);
     dirtyRef.current = true;
     setDirty(true);
+    scheduleAutosave();
     setError(null);
     flushResolverRef.current?.();
     flushResolverRef.current = null;
@@ -286,8 +290,12 @@ export const useMobileRichEditor = ({
         dirtyRef.current = false;
         setDirty(false);
       } else {
+        // Edits landed while this save was in flight. Bump the generation so
+        // the next autosave waits out another quiet period instead of firing
+        // on the stale timer that already elapsed.
         dirtyRef.current = true;
         setDirty(true);
+        scheduleAutosave();
       }
       setDraftRestored(false);
       return savedMemo;
@@ -392,7 +400,7 @@ export const useMobileRichEditor = ({
           safeDomCall(() => editorRef.current?.beginImageUpload(uploadId, previewDataUrl));
         }
         const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
-        const { resource } = await client.uploadMemoResource(currentMemo.id, new ExpoFile(uploadAsset.uri));
+        const { resource } = await uploadMobileResource(client, currentMemo.id, uploadAsset);
         applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
         if (resource.kind === "image") sources.push(resource.url);
         uploadId = null;
@@ -451,18 +459,26 @@ export const useMobileRichEditor = ({
   }, [active, dirty, memo, notebookId, tagsText, title]);
 
   useEffect(() => {
-    if (!active || !memoBaseRef.current || !dirty || !ready || savingRef.current || uploadingRef.current || closingRef.current) {
+    if (!memoBaseRef.current || !shouldScheduleMobileEditorAutosave({
+      active,
+      closing: closingRef.current,
+      dirty,
+      ready,
+      saving: savingRef.current,
+      uploading: uploadingRef.current,
+    })) {
       return;
     }
     const timeout = setTimeout(() => {
       void flushEditor().then(save);
-    }, 1200);
+    }, MOBILE_EDITOR_AUTOSAVE_DELAY_MS);
     return () => clearTimeout(timeout);
-  }, [active, dirty, memo, notebookId, ready, tagsText, title]);
+  }, [active, autosaveGeneration, dirty, memo, notebookId, ready, tagsText, title]);
 
   const markDirty = () => {
     dirtyRef.current = true;
     setDirty(true);
+    scheduleAutosave();
   };
 
   return {
@@ -486,7 +502,8 @@ export const useMobileRichEditor = ({
     requestClose,
     requestSelectionAi,
     resourceTarget,
-    saveLabel,
+    saveEmphasized: saveChrome.emphasized,
+    saveLabel: saveChrome.label,
     saveResourceAs,
     saving,
     selectResource,

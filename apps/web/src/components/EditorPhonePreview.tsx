@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { useEditorTheme, useMermaidTheme } from "@/components/ThemeProvider";
+import type { ResolvedNoteProse } from "@edgeever/shared";
+import { useMermaidTheme } from "@/components/ThemeProvider";
 import { embedMermaidForPreview } from "@/lib/phone-preview-mermaid";
 import { Switch } from "@/components/ui/switch";
 import { preparePublishArticle } from "@/lib/wechat-copy";
+import { useNoteProseStylePreference } from "@/lib/note-prose-style-preference";
 import {
   readEditorPhonePreviewFollowPreference,
   writeEditorPhonePreviewFollowPreference,
@@ -23,6 +25,7 @@ export const PhonePreviewGlyph = ({ className }: { className?: string }) => (
 type EditorPhonePreviewProps = {
   editor: Editor | null;
   title?: string;
+  noteProse: ResolvedNoteProse;
   scrollContainer?: HTMLDivElement | null;
   className?: string;
 };
@@ -61,10 +64,11 @@ const alignElement = (scroller: HTMLElement, target: HTMLElement, viewportTop: n
   scroller.scrollTop += delta;
 };
 
-export const EditorPhonePreview = ({ editor, title, scrollContainer, className }: EditorPhonePreviewProps) => {
+export const EditorPhonePreview = ({ editor, title, noteProse, scrollContainer, className }: EditorPhonePreviewProps) => {
   const { t } = useTranslation();
-  const { editorTheme } = useEditorTheme();
   const { mermaidTheme } = useMermaidTheme();
+  const noteProseStyle = useNoteProseStylePreference();
+  const proseKey = `${noteProse.palette}:${noteProse.fontSize}:${noteProse.lineHeight}:${noteProse.customCss}:${noteProseStyle.headingStyle}:${noteProseStyle.quoteStyle}:${noteProseStyle.emphasisStyle}:${noteProseStyle.showMagazineCover}:${noteProseStyle.paragraphSpacing}:${noteProseStyle.textAlign}:${noteProseStyle.letterSpacing}`;
   const previewSyncGeneration = useRef(0);
   const [markup, setMarkup] = useState({ html: "", style: "" });
   const [follow, setFollow] = useState(readEditorPhonePreviewFollowPreference);
@@ -80,7 +84,7 @@ export const EditorPhonePreview = ({ editor, title, scrollContainer, className }
     const sync = () => {
       if (editor.isDestroyed) return;
       const generation = ++previewSyncGeneration.current;
-      const root = preparePublishArticle(editor.getHTML(), editor.view.dom, editorTheme);
+      const root = preparePublishArticle(editor.getHTML(), editor.view.dom);
       setMarkup({
         html: root.innerHTML,
         style: root.getAttribute("style") ?? "",
@@ -101,7 +105,7 @@ export const EditorPhonePreview = ({ editor, title, scrollContainer, className }
       editor.off("update", sync);
       editor.off("create", sync);
     };
-  }, [editor, editorTheme, mermaidTheme]);
+  }, [editor, mermaidTheme, noteProse, noteProseStyle, title]);
 
   useEffect(() => {
     previewRef.current?.setAttribute("style", markup.style);
@@ -207,10 +211,12 @@ export const EditorPhonePreview = ({ editor, title, scrollContainer, className }
             <span className="edgeever-phone-device__lens" />
           </div>
           <div className="edgeever-phone-preview" ref={previewRef}>
-            {title?.trim() ? <p className="edgeever-phone-shell-title">{title.trim()}</p> : null}
+            {title?.trim() && !noteProseStyle.showMagazineCover ? (
+              <p className="edgeever-phone-shell-title">{title.trim()}</p>
+            ) : null}
             {markup.html ? (
               <div
-                key={editorTheme}
+                key={proseKey}
                 className="edgeever-phone-article"
                 dangerouslySetInnerHTML={{ __html: markup.html }}
               />

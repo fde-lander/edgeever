@@ -1,20 +1,28 @@
 import { Previewer } from "pagedjs";
 import hljs from "highlight.js/lib/common";
-import { renderMermaidSVG, THEMES } from "beautiful-mermaid";
 import { MERMAID_THEME_PALETTES } from "@/components/ThemeProvider";
+import { renderThemedMermaidSvg } from "@/lib/mermaid-renderer";
 import {
   NOTE_PRINT_MESSAGE,
   NOTE_PRINT_READY_MESSAGE,
   type NotePrintPayload,
 } from "@/lib/note-print";
+import type { MermaidThemeName } from "@/components/ThemeProvider";
 import { getMessageTargetOrigin } from "@/lib/app-page-path";
 import { withEnvironmentTitlePrefix } from "@/lib/environment-title";
+import { notePrintAppearanceCss } from "@/lib/note-print-appearance";
+import { installEditorBodyFontFaces } from "@/lib/editor-body-font-faces";
+import { downloadNotePrintPdf } from "@/lib/note-print-pdf";
 import katexStyles from "katex/dist/katex.min.css?inline";
+import githubHighlightStyles from "highlight.js/styles/github.css?inline";
 import printStyles from "@/styles/note-print.css?inline";
 import "@fontsource-variable/noto-sans-sc/wght.css";
 import "@/styles/note-print-screen.css";
 
-const PRINT_FONT_FAMILY = '"Noto Sans SC Variable", sans-serif';
+const PRINT_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans SC Variable", sans-serif';
+let printTitle = "EdgeEver";
+let printPreparingLabel = "";
+let printReadyLabel = "";
 const toolbar = document.getElementById("print-toolbar");
 const status = document.getElementById("print-status");
 const hint = document.getElementById("print-hint");
@@ -29,8 +37,9 @@ const setText = (element: HTMLElement | null, value: string) => {
   }
 };
 
-const renderMermaidBlocks = async (root: HTMLElement) => {
+const renderMermaidBlocks = async (root: HTMLElement, theme: MermaidThemeName, font: string) => {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>("pre > code.language-mermaid"));
+  const palette = MERMAID_THEME_PALETTES[theme] ?? MERMAID_THEME_PALETTES["zinc-light"];
   await Promise.all(blocks.map(async (code) => {
     const source = code.textContent?.trim();
     const container = code.closest("pre");
@@ -39,11 +48,9 @@ const renderMermaidBlocks = async (root: HTMLElement) => {
     }
 
     try {
-      const svg = renderMermaidSVG(source, {
-        ...THEMES["zinc-light"],
-        ...MERMAID_THEME_PALETTES["zinc-light"],
-        transparent: true,
-        font: PRINT_FONT_FAMILY,
+      const svg = await renderThemedMermaidSvg(source, {
+        palette,
+        font,
         padding: 24,
       });
       const figure = document.createElement("figure");
@@ -76,17 +83,19 @@ const waitForImages = async (root: HTMLElement) => {
   }));
 };
 
-const waitForPrintFonts = async (text: string) => {
-  await Promise.all([
-    document.fonts.load(`400 16px ${PRINT_FONT_FAMILY}`, text),
-    document.fonts.load(`700 16px ${PRINT_FONT_FAMILY}`, text),
-  ]);
+const waitForPrintFonts = async (text: string, fontId: NotePrintPayload["appearance"]["fontId"]) => {
+  installEditorBodyFontFaces();
+  if (fontId) {
+    const { loadBodyFont } = await import("@edgeever/shared/font-loader");
+    await loadBodyFont(fontId, text);
+  }
   await document.fonts.ready;
 };
 
 const buildSource = (payload: NotePrintPayload) => {
   const article = document.createElement("article");
-  article.className = "edgeever-print-document";
+  article.className = "edgeever-print-document edgeever-editor";
+  article.dataset.notePalette = payload.appearance.palette;
   article.lang = payload.language;
 
   const title = document.createElement("h1");
@@ -103,13 +112,16 @@ const buildSource = (payload: NotePrintPayload) => {
   }
 
   const content = document.createElement("div");
-  content.className = "edgeever-print-content";
+  content.className = "edgeever-print-content ProseMirror";
   content.innerHTML = payload.html;
   article.appendChild(content);
   return article;
 };
 
 const renderPreview = async (payload: NotePrintPayload) => {
+  printTitle = payload.title;
+  printPreparingLabel = payload.labels.preparing;
+  printReadyLabel = payload.labels.ready;
   document.documentElement.lang = payload.language;
   document.title = withEnvironmentTitlePrefix(`${payload.title} · EdgeEver`, {
     development: import.meta.env.DEV,
@@ -121,10 +133,11 @@ const renderPreview = async (payload: NotePrintPayload) => {
   setText(printButton, payload.labels.print);
 
   const source = buildSource(payload);
-  await renderMermaidBlocks(source);
+  const printFont = payload.appearance.fontFamily ?? PRINT_FONT_FAMILY;
+  await renderMermaidBlocks(source, payload.appearance.mermaidTheme, printFont);
   highlightCodeBlocks(source);
   await Promise.all([
-    waitForPrintFonts(source.textContent ?? ""),
+    waitForPrintFonts(source.textContent ?? "", payload.appearance.fontId),
     waitForImages(source),
   ]);
 
@@ -135,7 +148,7 @@ const renderPreview = async (payload: NotePrintPayload) => {
   const previewer = new Previewer();
   await previewer.preview(
     source,
-    [{ [window.location.href]: `${katexStyles}\n${printStyles}` }],
+    [{ [window.location.href]: `${katexStyles}\n${githubHighlightStyles}\n${printStyles}\n${notePrintAppearanceCss(payload.appearance)}` }],
     preview
   );
   await document.fonts.ready;
@@ -149,7 +162,20 @@ const renderPreview = async (payload: NotePrintPayload) => {
 };
 
 closeButton?.addEventListener("click", () => window.close());
-printButton?.addEventListener("click", () => window.print());
+printButton?.addEventListener("click", () => {
+  if (!preview || !printButton || printButton.disabled) return;
+  printButton.disabled = true;
+  setText(status, printPreparingLabel);
+  void downloadNotePrintPdf(preview, printTitle, "EdgeEver").then(() => {
+    setText(status, printReadyLabel);
+    printButton.disabled = false;
+  }).catch((error) => {
+    console.error("Failed to save note PDF", error);
+    setText(status, printReadyLabel);
+    printButton.disabled = false;
+    window.print();
+  });
+});
 
 window.addEventListener("message", (event: MessageEvent<NotePrintPayload>) => {
   if (

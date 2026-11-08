@@ -1,3 +1,4 @@
+import { FONT_IDS, FONT_CATALOG } from "@edgeever/shared/font-catalog";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   EDITOR_BODY_FONT_CUSTOM_STORAGE_KEY,
@@ -25,6 +26,19 @@ describe("editor body font preference", () => {
   afterEach(() => {
     delete globalThis.window;
     delete globalThis.document;
+  });
+
+  test("all catalog fonts survive saving and restoring while legacy choices remain readable", () => {
+    const values = installLocalStorage();
+    for (const id of FONT_IDS) {
+      writeEditorBodyFontPreference({ choice: id, customFamily: "" });
+      expect(readEditorBodyFontPreference().choice).toBe(id);
+      expect(resolveEditorBodyFontStack({ choice: id, customFamily: "" })).toContain(FONT_CATALOG[id].family);
+    }
+    for (const id of ["system", "wenkai", "wenkai-screen", "zhuque", "source-han-serif", "neo-zhi-song", "source-han-sans", "source-serif", "custom"]) {
+      values.set(EDITOR_BODY_FONT_STORAGE_KEY, id);
+      expect(readEditorBodyFontPreference().choice).toBe(id);
+    }
   });
 
   test("defaults to the system face and ignores unknown choices", () => {
@@ -104,6 +118,28 @@ describe("editor body font preference", () => {
     applyEditorBodyFontPreference({ choice: "system", customFamily: "" });
     expect(dataset.editorBodyFont).toBeUndefined();
     expect(style.has("--editor-body-font-family")).toBe(false);
+  });
+
+  test("only known monospace fonts follow the body choice into code, and switching restores the fallback", () => {
+    const style = new Map();
+    const dataset = {};
+    globalThis.document = {
+      documentElement: { dataset, style: {
+        setProperty: (key, value) => style.set(key, value),
+        removeProperty: key => style.delete(key),
+      } },
+    };
+    for (const id of ["maple-mono-cn", "jetbrains"]) {
+      applyEditorBodyFontPreference({ choice: id, customFamily: "" });
+      expect(dataset.editorCodeFont).toBe(id);
+      expect(style.get("--editor-code-font-family")).toContain(FONT_CATALOG[id].family);
+      expect(style.get("--editor-code-font-family")).toEndWith("monospace");
+      for (const next of ["wenkai", "source-han-serif", "heavy", "custom", "system"]) {
+        applyEditorBodyFontPreference({ choice: next, customFamily: "Arial" });
+        expect(dataset.editorCodeFont).toBeUndefined();
+        expect(style.has("--editor-code-font-family")).toBe(false);
+      }
+    }
   });
 
   test("returns font preview stacks for bundled choices", () => {

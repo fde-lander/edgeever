@@ -1,0 +1,110 @@
+/* Named hues tint links, bold, checked task boxes, and table surfaces. Body, inline code, quotes, rules, and code blocks stay native/neutral. */
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) {
+  /* Override the light accent supplied by inline account prose variables. */
+  --note-palette-accent: var(--note-palette-dark-accent) !important;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror a:not(.edgeever-attachment-link) {
+  color: var(--note-palette-link);
+  text-decoration-color: color-mix(in srgb, var(--note-palette-link) 45%, transparent);
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror a:not(.edgeever-attachment-link):hover {
+  color: var(--note-palette-link);
+  text-decoration-color: var(--note-palette-link);
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror strong,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror b {
+  color: var(--note-palette-accent);
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror pre code,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror .edgeever-code-block code {
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror ul[data-type="taskList"] li[data-checked] > label input {
+  accent-color: var(--note-palette-accent);
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror th,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content th {
+  background: var(--note-palette-accent);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror th strong,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror th b,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content th strong,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content th b {
+  color: #ffffff;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror td strong,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror td b,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content td strong,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content td b {
+  color: #111827;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror tbody tr:nth-child(even) td,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content tbody tr:nth-child(even) td {
+  background: #f9fafb;
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror tbody tr:hover td,
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content tbody tr:hover td {
+  background: color-mix(in srgb, var(--note-palette-surface) 85%, rgb(var(--slate-200-rgb) / 0.5));
+}
+
+.edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror .selectedCell::after {
+  background: color-mix(in srgb, var(--note-palette-accent) 14%, transparent);
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror a:not(.edgeever-attachment-link) {
+  color: var(--note-palette-accent);
+  text-decoration-color: color-mix(in srgb, var(--note-palette-accent) 45%, transparent);
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror a:not(.edgeever-attachment-link):hover {
+  color: var(--note-palette-accent);
+  text-decoration-color: var(--note-palette-accent);
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror pre code,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror .edgeever-code-block code {
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror th,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content th {
+  background: color-mix(in srgb, var(--note-palette-accent) 68%, #1e293b);
+  color: #ffffff;
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror td strong,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror td b,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content td strong,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content td b {
+  color: #f3f4f6;
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror tbody tr:nth-child(even) td,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror tbody tr:hover td,
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .markdown-content tbody tr:hover td {
+  background: color-mix(in srgb, var(--note-palette-accent) 9%, transparent);
+}
+
+:root.dark .edgeever-editor[data-note-palette]:not([data-note-palette="native"]) .ProseMirror .selectedCell::after {
+  background: color-mix(in srgb, var(--note-palette-accent) 20%, transparent);
+}

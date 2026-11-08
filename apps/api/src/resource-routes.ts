@@ -1,6 +1,6 @@
-import { isPdfAttachment, resolvePlayableMediaMimeType, ResourceUpdateSchema, type MemoDetail, type Resource } from "@edgeever/shared";
+import { resolveResourceUploadMimeType, ResourceUpdateSchema, type MemoDetail, type Resource } from "@edgeever/shared";
 import { zValidator } from "@hono/zod-validator";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { auditStatement } from "./audit";
 import type { AppContext, AppEnv, AuditActor } from "./api-context";
 import { AppError } from "./app-error";
@@ -10,8 +10,7 @@ import { apiError, badRequest, notFound } from "./http-errors";
 import { resolveObjectStorage } from "./object-storage";
 import {
   SUPPORTED_IMAGE_MIME_TYPES,
-  contentDispositionAttachment,
-  contentDispositionInline,
+  setResourceContentHeaders,
   mapResource,
   mapResourceListItem,
   mapResourceStorageSummary,
@@ -70,6 +69,7 @@ type ResourceRouteDependencies = {
     resourceId: string;
     expectedContentHash: string;
     filename: string;
+    preserveFilename?: boolean;
     mimeType: string;
     bytes: Uint8Array;
     actor: AuditActor;
@@ -166,7 +166,7 @@ export const registerResourceRoutes = (
     const input = {
       memoId,
       filename: file.name,
-      mimeType: file.type || "application/octet-stream",
+      mimeType: resolveResourceUploadMimeType(file.name, file.type),
       bytes: new Uint8Array(await file.arrayBuffer()),
       actor: getAuditActor(context),
     };
@@ -294,13 +294,6 @@ export const registerResourceRoutes = (
 
     const headers = new Headers();
     object.writeHttpMetadata(headers);
-    const playableMimeType = resolvePlayableMediaMimeType(resource.mime_type, resource.filename);
-    headers.set(
-      "Content-Type",
-      isPdfAttachment(resource.mime_type, resource.filename)
-        ? "application/pdf"
-        : playableMimeType ?? resource.mime_type ?? headers.get("Content-Type") ?? "application/octet-stream",
-    );
     headers.set("Cache-Control", headers.get("Cache-Control") ?? "private, max-age=3600");
     headers.set("Accept-Ranges", "bytes");
     if (byteRange.kind === "range") {
@@ -313,17 +306,19 @@ export const registerResourceRoutes = (
     } else {
       headers.set("Content-Length", String(resource.byte_size));
     }
-    headers.set(
-      "Content-Disposition",
-      resource.kind === "image" || isPdfAttachment(resource.mime_type, resource.filename) || playableMimeType
-        ? contentDispositionInline(resource.filename)
-        : contentDispositionAttachment(resource.filename),
-    );
-    headers.set("X-Content-Type-Options", "nosniff");
+    setResourceContentHeaders(headers, resource);
     return new Response(object.body, { headers, status: byteRange.kind === "range" ? 206 : 200 });
   });
 
-  app.put("/api/v1/resources/:id/blob", async (context) => {
+  app.get("/api/v1/resources/writeback-capabilities", context => {
+    const denied = requireScopes(context, "write:resources");
+    if (denied) return denied;
+    context.header("Cache-Control", "no-store");
+    return context.json({ preserveFilename: true });
+  });
+
+  const replaceBlob = (preserveFilename = false) => async (context: Context<AppEnv, "/api/v1/resources/:id/blob" | "/api/v1/resources/:id/blob/writeback">) => {
+    if (preserveFilename) context.header("X-EdgeEver-Writeback", "preserve-filename");
     const denied = requireScopes(context, "write:resources");
     if (denied) return denied;
 
@@ -352,6 +347,7 @@ export const registerResourceRoutes = (
         resourceId: context.req.param("id"),
         expectedContentHash,
         filename: typeof declaredFilename === "string" && declaredFilename.trim() ? declaredFilename : file.name,
+        preserveFilename: preserveFilename || form.get("preserveFilename") === "true",
         mimeType: typeof declaredMimeType === "string" && declaredMimeType.trim()
           ? declaredMimeType
           : file.type || "application/octet-stream",
@@ -362,7 +358,9 @@ export const registerResourceRoutes = (
     } catch (error) {
       return appErrorResponse(context, error);
     }
-  });
+  };
+  app.put("/api/v1/resources/:id/blob", replaceBlob());
+  app.put("/api/v1/resources/:id/blob/writeback", replaceBlob(true));
 
   app.patch(
     "/api/v1/resources/:id",

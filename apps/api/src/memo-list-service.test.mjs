@@ -38,6 +38,19 @@ const createDatabase = ({ rows = [], totalCount = rows.length } = {}) => {
 };
 
 describe("memo list service", () => {
+  for (const query of [undefined, "hello", "hello world", "%"]) test(`skips exact counts for opted-in ${query ?? "unfiltered"} result pages, while retaining lookahead cursors`, async () => {
+    const database = createDatabase({ rows: [memoRow("memo_1"), memoRow("memo_2"), memoRow("memo_3")] });
+    const result = await listMemos(database, { workspaceId: "ws_1", query, limit: 2, includeTotal: false });
+    expect(result.memos.map((memo) => memo.id)).toEqual(["memo_1", "memo_2"]);
+    expect(result.totalCount).toBeUndefined();
+    expect(result.nextCursor).toBeString();
+    expect(database.calls).toHaveLength(1);
+    expect(database.calls[0].sql).not.toMatch(/COUNT\s*\(/i);
+    const end = await listMemos(createDatabase({ rows: [memoRow("memo_3")] }), { workspaceId: "ws_1", query, limit: 2, includeTotal: false, cursor: result.nextCursor });
+    expect(end.memos.map((memo) => memo.id)).toEqual(["memo_3"]);
+    expect(end.nextCursor).toBeNull();
+  });
+
   test("identifies diagram notes without exposing their source as the note type", () => {
     const content_markdown = serializeDiagramDocument(createDefaultDiagramDocument("architecture"));
 
@@ -89,6 +102,51 @@ describe("memo list service", () => {
       expect(call.sql).toContain("m.tags_json <> '[]'");
       expect(call.parameters.slice(0, 4)).toEqual(["ws_1", "ws_1", "nb_parent", "ws_1"]);
     }
+  });
+
+  test("paginates title Z-A by reverse title and keeps the update-time tie break", async () => {
+    const titleExpression = "LOWER(COALESCE(NULLIF(m.title, ''), '无标题笔记'))";
+    const firstDatabase = createDatabase({
+      rows: [memoRow("memo_1", { title: "Zulu" }), memoRow("memo_2", { title: "Alpha" })],
+      totalCount: 2,
+    });
+    const first = await listMemos(firstDatabase, {
+      workspaceId: "ws_1",
+      sort: "title-desc",
+      limit: 1,
+    });
+    const orderQuery = firstDatabase.calls.find((call) => call.sql.includes("ORDER BY"));
+
+    expect(orderQuery.sql).toContain(`m.is_pinned DESC, ${titleExpression} DESC, m.updated_at DESC, m.id DESC`);
+    expect(orderQuery.sql).not.toContain(`${titleExpression} ASC`);
+
+    const secondDatabase = createDatabase({ rows: [] });
+    await listMemos(secondDatabase, {
+      workspaceId: "ws_1",
+      sort: "title-desc",
+      limit: 1,
+      cursor: first.nextCursor,
+    });
+    const pageQuery = secondDatabase.calls.find((call) => call.sql.includes("SELECT m.id"));
+
+    expect(pageQuery.sql).toContain(`${titleExpression} < ?`);
+    expect(pageQuery.sql).not.toContain(`${titleExpression} > ?`);
+    expect(pageQuery.sql).toContain("m.updated_at < ?");
+    expect(pageQuery.parameters).toContain("zulu");
+    expect(pageQuery.parameters).toContain("2026-08-01T01:00:00.000Z");
+  });
+
+  test("keeps trash ordered by deletion time when the title sort is reversed", async () => {
+    const database = createDatabase();
+    await listMemos(database, {
+      workspaceId: "ws_1",
+      includeTrash: true,
+      sort: "title-desc",
+    });
+    const pageQuery = database.calls.find((call) => call.sql.includes("ORDER BY"));
+
+    expect(pageQuery.sql).toContain("ORDER BY m.deleted_at DESC, m.id DESC");
+    expect(pageQuery.sql).not.toContain("NULLIF(m.title, '')");
   });
 
   test("filters by one exact tag in page and count queries", async () => {

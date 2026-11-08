@@ -243,7 +243,15 @@ jobs:
         if: steps.upstream.outputs.align_mode == 'merge'
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              break
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
           bun run db:migrate:local
           bun run test
           bun run typecheck

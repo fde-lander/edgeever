@@ -173,6 +173,25 @@ describe("resource route contracts", () => {
     expect(await response.json()).toMatchObject({ resource: { id: "res_1", sha256: "next-checksum" } });
   });
 
+  test("only authorized writers can discover safe writeback support", async () => {
+    expect((await createApp().request("/api/v1/resources/writeback-capabilities", {}, createEnvironment())).status).toBe(403);
+    const response = await createApp({ ...agentAuth, scopes: ["write:resources"] })
+      .request("/api/v1/resources/writeback-capabilities", {}, createEnvironment());
+    expect(response.status).toBe(200); expect(await response.json()).toEqual({ preserveFilename: true });
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("the dedicated writeback route always preserves filenames even if the optional field is disabled", async () => {
+    let replacement;
+    const form = new FormData(); form.append("file", new File(["edit"], "local-copy.xlsx"));
+    form.append("expectedContentHash", "checksum"); form.append("preserveFilename", "false");
+    const response = await createApp({ ...agentAuth, scopes: ["write:resources"] }, async () => resourceRow, {
+      replaceResourceContent: async (_context, input) => { replacement = input; return resourceRow; },
+    }).request("/api/v1/resources/res_1/blob/writeback", { method: "PUT", body: form }, createEnvironment());
+    expect(response.status).toBe(200); expect(replacement.preserveFilename).toBe(true);
+    expect(response.headers.get("X-EdgeEver-Writeback")).toBe("preserve-filename");
+  });
+
   test("initializes a bounded multipart upload after memo authorization", async () => {
     let input;
     const response = await createApp(
@@ -434,4 +453,24 @@ describe("resource route contracts", () => {
     expect(deletes).toBe(1);
     expect(batches).toBe(0);
   });
+});
+
+
+test("SVG image and legacy attachment responses are sandboxed without changing original bytes", async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+  for (const kind of ["image", "attachment"]) {
+    const environment = createEnvironment();
+    environment.storage.resources = {
+      get: async () => ({ body: new Blob([svg]).stream(), writeHttpMetadata: () => {} }),
+    };
+    const response = await createApp(agentAuth, async () => ({
+      ...resourceRow, kind, mime_type: "image/svg+xml", filename: "diagram.svg",
+      byte_size: new TextEncoder().encode(svg).length, storage_config_id: null,
+    })).request("/api/v1/resources/res_1/blob", {}, environment);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/svg+xml");
+    expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox");
+    expect(response.headers.get("content-disposition")).toStartWith(kind === "image" ? "inline;" : "attachment;");
+    expect(await response.text()).toBe(svg);
+  }
 });

@@ -23,7 +23,7 @@ import {
   copyTextToClipboard,
   createDefaultTokenName,
   DEFAULT_TOKEN_ACCESS_LEVEL,
-  getEdgeEverBaseUrl,
+  getMcpRemoteServerUrl,
   getStoredTokenAccessLevel,
   getTokenScopesForAccessLevel,
   getTokenScopeLabel,
@@ -33,13 +33,13 @@ import { TokenHidingEditor } from "./TokenHidingEditor";
 
 const McpExampleDialog = () => {
   const { t } = useTranslation();
-  const baseUrl = getEdgeEverBaseUrl();
+  const serverUrl = getMcpRemoteServerUrl();
   const [copied, setCopied] = useState(false);
   const remoteExample = JSON.stringify(
     {
       mcpServers: {
         edgeever: {
-          url: `${baseUrl}/mcp`,
+          url: serverUrl,
           headers: {
             Authorization: t("mcp.bearerPlaceholder"),
           },

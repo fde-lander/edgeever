@@ -1,9 +1,14 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import type { MemoTemplate } from "@edgeever/shared";
+import { listMemoTemplateGallery } from "@edgeever/shared/memo-template-gallery";
+import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
 import type { createEdgeEverClient } from "@edgeever/client";
 import { Modal, Pressable, ScrollView, View } from "react-native";
 import { ActivityIndicator, FileText, LayoutTemplate, X } from "./icons";
 import { Text } from "./LocalizedText";
 import {
+  galleryEntryToMobileSelectableTemplate,
   mobileTemplateToCreateSeed,
   toMobileSelectableTemplate,
   type MobileCreateMemoSeed,
@@ -35,26 +40,35 @@ export const MobileTemplatePickerModal = ({
   presentation?: "modal" | "overlay";
   visible: boolean;
 }) => {
-  const { translate } = useMobileLocale();
+  const { resolvedLocale, translate } = useMobileLocale();
 
   const savedTemplatesQuery = useQuery({
     queryKey: ["mobile", "templates"],
     enabled: visible && Boolean(client),
     queryFn: async () => {
       if (!client) {
-        return [] as MobileSelectableTemplate[];
+        return [] as MemoTemplate[];
       }
       if (typeof client.listTemplates !== "function") {
         throw new Error("Client is missing listTemplates; reload the app to pick up the latest bundle.");
       }
       const response = await client.listTemplates();
-      return response.templates.map(toMobileSelectableTemplate);
+      return response.templates;
     },
     staleTime: 15_000,
     retry: 1,
   });
 
-  const savedTemplates = savedTemplatesQuery.data ?? [];
+  const savedTemplates = useMemo(
+    () => (savedTemplatesQuery.data ?? []).map((template) => (
+      toMobileSelectableTemplate(localizeDefaultMemoTemplate(template, resolvedLocale))
+    )),
+    [resolvedLocale, savedTemplatesQuery.data],
+  );
+  const galleryTemplates = useMemo(
+    () => listMemoTemplateGallery(resolvedLocale).map(galleryEntryToMobileSelectableTemplate),
+    [resolvedLocale],
+  );
   const isLoadingSaved = savedTemplatesQuery.isLoading || savedTemplatesQuery.isFetching;
   const savedLoadErrorMessage = savedTemplatesQuery.error instanceof Error
     ? savedTemplatesQuery.error.message
@@ -127,6 +141,10 @@ export const MobileTemplatePickerModal = ({
             </Text>
           ) : null}
           {savedTemplates.map((template) => (
+            <TemplateRow key={template.id} onPress={() => handleSelect(template)} template={template} />
+          ))}
+          <Text style={styles.actionSheetSectionTitle}>{translate("模板库")}</Text>
+          {galleryTemplates.map((template) => (
             <TemplateRow key={template.id} onPress={() => handleSelect(template)} template={template} />
           ))}
         </ScrollView>

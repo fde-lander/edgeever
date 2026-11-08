@@ -1,3 +1,4 @@
+import { automaticPosterThumbnails } from "./poster-thumbnails.ts";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolveDeploymentBuildMetadata } from "@edgeever/shared/deployment-metadata";
@@ -7,6 +8,7 @@ import { fileURLToPath, URL } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { localDevelopmentAuth } from "./local-dev-auth";
+import { publicShareMarkdownDev } from "./share-markdown-dev";
 import { resolveAppVersion, resolveReleaseTimestamp } from "./build-metadata";
 
 const readPackageVersion = () => {
@@ -124,6 +126,11 @@ self.addEventListener("activate", (event) => {
 
 export default defineConfig({
   root: "apps/web",
+  // Poster creation loads Fabric through a lazy module. Prepare it at startup
+  // so the first poster does not trigger dependency optimization mid-session.
+  optimizeDeps: {
+    include: ["fabric"],
+  },
   // Packaged Electron apps load index.html via file://, so root-absolute
   // asset URLs resolve to the filesystem root and leave a blank window.
   base: isDesktopBuild ? "./" : "/",
@@ -139,8 +146,10 @@ export default defineConfig({
     __EDGEEVER_DESKTOP_BUILD__: JSON.stringify(isDesktopBuild),
   },
   plugins: [
+    automaticPosterThumbnails(),
     tailwindcss(),
     localDevelopmentAuth(),
+    publicShareMarkdownDev(),
     developmentServiceWorkerReset,
     react(),
     VitePWA({
@@ -150,7 +159,7 @@ export default defineConfig({
       manifest: {
         name: "EdgeEver",
         short_name: "EdgeEver",
-        description: "EdgeEver：基于 Cloudflare 全家桶自托管的开源印象笔记。",
+        description: "EdgeEver：基于 Cloudflare 与 Docker 自托管的现代化开源笔记与 AI 个人知识库。",
         start_url: "/",
         scope: "/",
         display: "standalone",
@@ -190,6 +199,8 @@ export default defineConfig({
           {
             urlPattern: ({ request, url }) =>
               request.mode === "navigate" &&
+              // Share HTML includes the note. Leave it out of the shared navigation cache.
+              !/^\/(?:share|s)\//.test(url.pathname) &&
               !["/mobile-edit.html", "/note-print.html", "/tiptap-ime-test.html"].includes(url.pathname),
             handler: "NetworkFirst",
             options: {
@@ -215,7 +226,7 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: ({ url }) => /\/assets\/i18n-ja-/.test(url.pathname),
+            urlPattern: ({ url }) => /\/assets\/i18n-(?:en-US|ja|pl|ru|zh-TW|es|de|fr)-/.test(url.pathname),
             handler: "CacheFirst",
             options: {
               cacheName: "edgeever-optional-locales",
@@ -257,6 +268,8 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      // Its browser export requires document; the default table also works in Workers.
+      "decode-named-character-reference": fileURLToPath(import.meta.resolve("decode-named-character-reference")),
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
@@ -284,7 +297,7 @@ export default defineConfig({
       ? false
       : {
           resolveDependencies: (_filename, dependencies) => dependencies.filter((dependency) =>
-            !/(?:vendor-code-highlight|vendor-(?:mermaid|D3|tiptap|prosemirror|floating|codemirror|x6|infographic|zod)|vendor~(?:wasm|emacs-lisp)-|vendor-radix(?!-slot)|ui-primitives|ui-button-tooltip|i18n-ja-)/.test(dependency),
+            !/(?:vendor-code-highlight|vendor-(?:mermaid|D3|tiptap|prosemirror|floating|codemirror|x6|infographic|zod|streamdown)|vendor~(?:wasm|emacs-lisp)-|vendor-radix(?!-slot)|ui-primitives|ui-button-tooltip|i18n-(?:en-US|ja|pl|ru|zh-TW|es|de|fr)-)/.test(dependency),
           ),
         },
     rolldownOptions: {
@@ -302,8 +315,21 @@ export default defineConfig({
           : {}),
       },
       output: {
+        // Preserve initialization order when manual vendor groups form cycles.
+        strictExecutionOrder: true,
         codeSplitting: {
+          // Groups own only matching modules. Recursive ownership lets optional
+          // editors capture shared utilities (clsx, tslib, React hooks), making
+          // a basic button or locale load the whole editor at startup.
+          includeDependenciesRecursively: false,
           groups: [
+            {
+              // Font coverage tables are static data used by image sharing.
+              // Keep them out of the editor component's JavaScript chunk.
+              name: "note-image-font-manifest",
+              test: /[\\/]note-image-font-manifest\.ts$/,
+              priority: 51,
+            },
             {
               name: "vendor-code-highlight",
               test: /node_modules[\\/](?:lowlight|highlight\.js)[\\/]/,
@@ -317,8 +343,43 @@ export default defineConfig({
               // inherit the highlighter as a startup dependency.
             },
             {
+              name: "i18n-en-US",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?en-US\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-zh-TW",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?zh-TW\.ts$/,
+              priority: 41,
+            },
+            {
               name: "i18n-ja",
               test: /[\\/]i18n[\\/](?:resources[\\/])?ja\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-pl",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?pl\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-ru",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?ru\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-es",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?es\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-de",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?de\.ts$/,
+              priority: 41,
+            },
+            {
+              name: "i18n-fr",
+              test: /[\\/]i18n[\\/](?:resources[\\/])?fr\.ts$/,
               priority: 41,
             },
             {
@@ -400,10 +461,11 @@ export default defineConfig({
               name: "vendor-floating",
               test: /node_modules[\\/](@floating-ui|tippy\.js)[\\/]/,
               priority: 28,
+              entriesAware: true,
             },
             {
               name: "vendor-query",
-              test: /node_modules[\\/]@tanstack[\\/]react-query[\\/]/,
+              test: /node_modules[\\/]@tanstack[\\/](?:react-query|query-core)[\\/]/,
               priority: 25,
             },
             {
@@ -425,6 +487,7 @@ export default defineConfig({
               name: "vendor-icons",
               test: /node_modules[\\/]lucide-react[\\/]/,
               priority: 18,
+              entriesAware: true,
             },
             {
               name: "vendor-radix-slot",
@@ -437,6 +500,7 @@ export default defineConfig({
               name: "vendor-radix",
               test: /node_modules[\\/](@radix-ui|cmdk|vaul)[\\/]/,
               priority: 15,
+              entriesAware: true,
             },
             {
               name: "vendor-ui-utils",
@@ -477,9 +541,11 @@ export default defineConfig({
               priority: 12,
             },
             {
+              // Shell tooltips must not pull every lazy screen's UI into startup.
               name: "ui-primitives",
               test: /src[\\/]components[\\/]ui[\\/]/,
               priority: 10,
+              entriesAware: true,
             },
             {
               name: "vendor",

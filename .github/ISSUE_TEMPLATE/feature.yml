@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest a new capability or a change to an existing one.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe what you cannot do today and how you want it to work. GitHub Issues are public. Do not include passwords, tokens, instance URLs, or note contents.
+
+        System information shows whether the current version already supports this. Copy it from Settings → System information and paste it here.
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which client
+      description: Which client should have this?
+      multiple: true
+      options:
+        - Web
+        - macOS
+        - Windows
+        - Linux
+        - Android
+        - iOS
+        - Browser extension
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Requested capability
+      description: What should become possible?
+      placeholder: "For example: On mobile, switch a note from Markdown back to rich text and keep editing."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How you handle this today
+      description: How do you handle this today, and where does it break down?
+    validations:
+      required: true
+  - type: textarea
+    id: system-info
+    attributes:
+      label: System information
+      description: Paste the text copied from Settings → System information. In-app feedback fills this in automatically.
+      placeholder: |
+        - Client version: v1.93.0
+        - System: Android
+    validations:
+      required: true

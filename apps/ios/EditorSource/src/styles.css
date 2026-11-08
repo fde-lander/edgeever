@@ -1,6 +1,5 @@
 :root {
   color-scheme: light dark;
-  --accent: #16a06e;
   --text: #0f172a;
   --muted: #64748b;
   --border: #f1f5f9;
@@ -140,6 +139,16 @@ html[data-theme="dark"] body {
   color: var(--toolbar-active-fg);
 }
 
+#toolbar button:disabled {
+  opacity: 0.38;
+}
+
+#toolbar button:disabled:active {
+  border-color: transparent;
+  background: transparent;
+  color: var(--toolbar-fg);
+}
+
 /* Scrollable editor body — only this region pans, toolbar stays put. */
 #editor {
   flex: 1 1 auto;
@@ -164,11 +173,16 @@ html[data-theme="dark"] body {
   min-width: 0;
   min-height: 100%;
   padding: 12px 16px 48px;
-  line-height: 1.55;
+  line-height: 1.5;
   word-break: break-word;
   overflow-wrap: break-word;
   font-feature-settings: "chws" 1;
   caret-color: #0f766e;
+}
+
+.edgeever-prose > p,
+.ProseMirror > p {
+  margin: 0 0 10px;
 }
 
 .edgeever-prose p.is-editor-empty:first-child::before,
@@ -467,14 +481,14 @@ html[data-theme="dark"] .edgeever-image-size-button.is-active {
 
 .edgeever-prose code,
 .ProseMirror code {
-  border: 1px solid #d4ebdc;
+  border: 1px solid #e1e5ea;
   border-radius: 4px;
-  background: #f2f9f5;
-  color: #0d5f3a;
+  background: #f3f5f7;
+  color: #3d4450;
   padding: 2px 5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.88em;
-  font-weight: 550;
+  font-weight: 400;
 }
 
 .edgeever-prose pre code,
@@ -497,33 +511,33 @@ html[data-theme="dark"] .edgeever-image-size-button.is-active {
   font-size: 0.9em;
 }
 
-/* External hyperlinks — match Web/Android default styling. */
+/* External hyperlinks — match the Web default reading colors. */
 .edgeever-prose a,
 .ProseMirror a {
-  color: #00751f;
+  color: #404040;
   font-weight: 500;
   text-decoration: underline;
-  text-decoration-color: rgba(0, 117, 31, 0.45);
+  text-decoration-color: rgba(64, 64, 64, 0.45);
   text-underline-offset: 2px;
   cursor: pointer;
 }
 
 .edgeever-prose a:active,
 .ProseMirror a:active {
-  color: #00a82d;
-  text-decoration-color: #00a82d;
+  color: #0a0a0a;
+  text-decoration-color: #0a0a0a;
 }
 
 html[data-theme="dark"] .edgeever-prose a,
 html[data-theme="dark"] .ProseMirror a {
-  color: #86efac;
-  text-decoration-color: rgba(134, 239, 172, 0.45);
+  color: #cad4ce;
+  text-decoration-color: rgba(202, 212, 206, 0.45);
 }
 
 html[data-theme="dark"] .edgeever-prose a:active,
 html[data-theme="dark"] .ProseMirror a:active {
-  color: #4ade80;
-  text-decoration-color: #4ade80;
+  color: #eef3f0;
+  text-decoration-color: #eef3f0;
 }
 
 .edgeever-prose a.edgeever-attachment-link,
@@ -601,6 +615,36 @@ html[data-theme="dark"] .ProseMirror a:active {
 .ProseMirror a.edgeever-attachment-kind-code::before { background: #faf5ff; color: #8b5cf6; content: "</>"; }
 .edgeever-prose a.edgeever-attachment-kind-text::before,
 .ProseMirror a.edgeever-attachment-kind-text::before { background: #f1f5f9; color: #64748b; content: "TXT"; }
+.edgeever-prose a.edgeever-attachment-kind-apk::before,
+.ProseMirror a.edgeever-attachment-kind-apk::before { background: #ecfdf5; color: #059669; content: "APK"; }
+.edgeever-prose a.edgeever-attachment-kind-exe::before,
+.ProseMirror a.edgeever-attachment-kind-exe::before { background: #f0f9ff; color: #0284c7; content: "EXE"; }
+.edgeever-prose a.edgeever-attachment-kind-dmg::before,
+.ProseMirror a.edgeever-attachment-kind-dmg::before { background: #f5f3ff; color: #7c3aed; content: "DMG"; }
+.edgeever-prose a.edgeever-attachment-kind-linux::before,
+.ProseMirror a.edgeever-attachment-kind-linux::before { background: #fff7ed; color: #ea580c; content: "LINUX"; }
+.edgeever-prose a.edgeever-attachment-kind-executable::before,
+.ProseMirror a.edgeever-attachment-kind-executable::before { background: #ccfbf1; color: #0d9488; content: "BIN"; }
+.edgeever-prose a.edgeever-attachment-kind-book::before,
+.ProseMirror a.edgeever-attachment-kind-book::before { background: #fef3c7; color: #b45309; content: "BOOK"; }
+.edgeever-prose a.edgeever-attachment-kind-font::before,
+.ProseMirror a.edgeever-attachment-kind-font::before { background: #e0e7ff; color: #4f46e5; content: "FONT"; }
+.edgeever-prose a.edgeever-attachment-kind-diskimage::before,
+.ProseMirror a.edgeever-attachment-kind-diskimage::before { background: #cffafe; color: #0891b2; content: "ISO"; }
+.edgeever-prose a.edgeever-attachment-kind-database::before,
+.ProseMirror a.edgeever-attachment-kind-database::before { background: #fae8ff; color: #c026d3; content: "DB"; }
+.edgeever-prose a.edgeever-attachment-kind-design::before,
+.ProseMirror a.edgeever-attachment-kind-design::before { background: #fdf2f8; color: #db2777; content: "DESIGN"; }
+.edgeever-prose a.edgeever-attachment-kind-model3d::before,
+.ProseMirror a.edgeever-attachment-kind-model3d::before { background: #eff6ff; color: #2563eb; content: "3D"; }
+.edgeever-prose a.edgeever-attachment-kind-script::before,
+.ProseMirror a.edgeever-attachment-kind-script::before { background: #ecfdf5; color: #059669; content: "SHELL"; }
+.edgeever-prose a.edgeever-attachment-kind-log::before,
+.ProseMirror a.edgeever-attachment-kind-log::before { background: #f4f4f5; color: #71717a; content: "LOG"; }
+.edgeever-prose a.edgeever-attachment-kind-certificate::before,
+.ProseMirror a.edgeever-attachment-kind-certificate::before { background: #fefce8; color: #ca8a04; content: "KEY"; }
+.edgeever-prose a.edgeever-attachment-kind-diagram::before,
+.ProseMirror a.edgeever-attachment-kind-diagram::before { background: #f0fdfa; color: #0d9488; content: "DIAG"; }
 
 html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-link,
 html[data-theme="dark"] .ProseMirror a.edgeever-attachment-link,
@@ -633,6 +677,36 @@ html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-code::before,
 html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-code::before { background: #581c87; color: #d8b4fe; }
 html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-text::before,
 html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-text::before { background: #334155; color: #cbd5e1; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-apk::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-apk::before { background: #064e3b; color: #6ee7b7; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-exe::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-exe::before { background: #0c4a6e; color: #7dd3fc; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-dmg::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-dmg::before { background: #4c1d95; color: #c4b5fd; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-linux::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-linux::before { background: #7c2d12; color: #fdba74; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-executable::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-executable::before { background: #134e4a; color: #5eead4; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-book::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-book::before { background: #78350f; color: #fcd34d; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-font::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-font::before { background: #312e81; color: #a5b4fc; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-diskimage::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-diskimage::before { background: #164e63; color: #67e8f9; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-database::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-database::before { background: #701a75; color: #f0abfc; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-design::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-design::before { background: #831843; color: #f472b6; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-model3d::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-model3d::before { background: #1e3a8a; color: #93c5fd; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-script::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-script::before { background: #064e3b; color: #6ee7b7; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-log::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-log::before { background: #27272a; color: #a1a1aa; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-certificate::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-certificate::before { background: #713f12; color: #fde047; }
+html[data-theme="dark"] .edgeever-prose a.edgeever-attachment-kind-diagram::before,
+html[data-theme="dark"] .ProseMirror a.edgeever-attachment-kind-diagram::before { background: #134e4a; color: #5eead4; }
 
 .edgeever-prose .edgeever-unsupported-content,
 .ProseMirror .edgeever-unsupported-content {
@@ -672,7 +746,7 @@ html[data-theme="dark"] .ProseMirror .edgeever-unsupported-mark { border-bottom-
   margin: 1.5rem 0;
   height: 0;
   border: 0;
-  border-top: 2px solid #66ca80;
+  border-top: 2px solid #cbd5e1;
   background: transparent;
 }
 
@@ -682,30 +756,31 @@ html[data-theme="dark"] .ProseMirror hr {
 
 html[data-theme="dark"] .ProseMirror hr.edgeever-merge-divider,
 html[data-theme="dark"] .ProseMirror hr[data-edgeever-merge-divider] {
-  border-top-color: #4ade80;
+  border-top-color: #475569;
 }
 
 .edgeever-prose blockquote,
 .ProseMirror blockquote {
   margin: 0.5em 0;
   padding: 6px 12px;
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid #cbd5e1;
   border-radius: 1px 4px 4px 1px;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-  color: #334155;
+  background: #f3f5f7;
+  color: #3d4450;
 }
 
 html[data-theme="dark"] .edgeever-prose blockquote,
 html[data-theme="dark"] .ProseMirror blockquote {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-  color: #cbd5e1;
+  border-left-color: #475569;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f8fafc;
 }
 
 html[data-theme="dark"] .edgeever-prose code,
 html[data-theme="dark"] .ProseMirror code {
-  border-color: rgba(22, 160, 110, 0.28);
-  background: rgba(22, 160, 110, 0.12);
-  color: #6ee7b7;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8fafc;
 }
 
 html[data-theme="dark"] .edgeever-prose pre code,
@@ -854,15 +929,17 @@ html[data-theme="dark"] .ProseMirror pre code {
 
 .edgeever-mermaid {
   overflow-x: auto;
-  margin: 12px 0;
-  padding: 8px;
+  margin: 10px 0;
+  padding: 4px;
   border-radius: 8px;
   background: var(--code-bg);
 }
 
 .edgeever-mermaid svg {
-  max-width: 100%;
-  height: auto;
+  display: block;
+  max-width: none;
+  max-height: none;
+  margin: 0 auto;
 }
 
 #editor.edgeever-diagram-reader-host {

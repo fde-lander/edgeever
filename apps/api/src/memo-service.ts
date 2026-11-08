@@ -1,3 +1,4 @@
+import { hasPosterDocumentMarker, parsePosterDocument } from "@edgeever/shared";
 import {
   createExcerpt,
   DEFAULT_MEMO_TITLE,
@@ -9,6 +10,8 @@ import {
   resolveMemoContentDoc,
   resolveMergedMemoTitle,
   isSuspiciousMemoOverwrite,
+  SUSPICIOUS_MEMO_OVERWRITE_ERROR,
+  SUSPICIOUS_MEMO_OVERWRITE_MESSAGE,
   isMemoEditBindingValid,
   listTableAttachmentResourceIds,
   normalizeTags,
@@ -22,14 +25,13 @@ import {
 import { auditStatement } from "./audit";
 import type { AppContext, AuditActor, AuthContext, Bindings } from "./api-context";
 import { AppError } from "./app-error";
-import { createId, isoNow, parseJsonArray } from "./entity-utils";
-import { workspaceInboxId } from "./notebook-service";
+import { clampNumber, createId, isoNow, parseJsonArray } from "./entity-utils";
+import { notebookExists, workspaceInboxId } from "./notebook-service";
 import { sha256 } from "./hash-utils";
 import { getRequiredString } from "./mcp-json-rpc";
 import { assertNotebookWritable, assertNotebooksWritable } from "./hiding-guards";
 import {
   escapeLike,
-  listMemos,
   mapMemoSummary,
   toFtsQuery,
   type MemoSummaryRow,
@@ -42,7 +44,6 @@ import {
   createMemoRevisionStatement as createMemoRevisionStatementService,
   shouldSnapshotMemoRevision as shouldSnapshotMemoRevisionService,
 } from "./memo-revision-service";
-import { getNotebook } from "./notebook-service";
 import { deleteStoredObjects } from "./object-storage";
 import { getAuditActor, getWorkspaceId } from "./request-auth";
 import type { DatabaseAdapter, PreparedStatementAdapter } from "./storage-contract";
@@ -54,8 +55,6 @@ export type MemoMutationCommit = {
   after: (memoId: string) => PreparedStatementAdapter[];
 };
 
-const clampNumber = (value: number, min: number, max: number) =>
-  Number.isNaN(value) ? min : Math.min(Math.max(value, min), max);
 
 export type MemoDetailRow = MemoSummaryRow & {
   content_json: string;
@@ -158,6 +157,26 @@ export const normalizeSearchTimeBound = (value: string | null | undefined, bound
   return expanded;
 };
 
+export type MemoSearchSummary = MemoSummary & { snippet?: string };
+
+const memoSearchSnippet = (text: string, query: string) => {
+  const escapePattern = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const phraseMatch = new RegExp(escapePattern(query), "iu").exec(text);
+  const terms = (query.match(/[\p{L}\p{N}_]+/gu) ?? []).slice(0, 8);
+  const match = phraseMatch ?? (terms.length
+    ? new RegExp(terms.map(escapePattern).join("|"), "iu").exec(text)
+    : null);
+  if (!match) return undefined;
+
+  // Keep surrogate pairs intact and reserve space for truncation markers.
+  let start = Math.max(0, match.index - 80);
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(text[start])) start--;
+  const prefix = start > 0 ? "…" : "";
+  const passage = Array.from(text.slice(start, start + 400)).slice(0, 198).join("");
+  const suffix = start + passage.length < text.length ? "…" : "";
+  return prefix + passage + suffix;
+};
+
 export const searchMemoSummaries = async (
   db: DatabaseAdapter,
   options: {
@@ -171,9 +190,10 @@ export const searchMemoSummaries = async (
     updatedBefore?: string | null;
     isPinned?: boolean | null;
     hasResources?: boolean | null;
+    poster?: boolean | null;
     limit: number;
   }
-): Promise<MemoSummary[]> => {
+): Promise<MemoSearchSummary[]> => {
   const q = options.query?.trim();
   const notebookId = options.notebookId?.trim() || null;
   const tags = normalizeTags(options.tags ?? []);
@@ -228,6 +248,11 @@ export const searchMemoSummaries = async (
     );
   }
 
+  if (typeof options.poster === "boolean") {
+    filters.push("(instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) = ?");
+    binds.push(options.poster ? 1 : 0);
+  }
+
   if (q) {
     const ftsQuery = toFtsQuery(q);
     const likeQuery = `%${escapeLike(q)}%`;
@@ -256,7 +281,7 @@ export const searchMemoSummaries = async (
            )
            SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
                   m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-                  c.content_text
+                  c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
            FROM search_matches s
            INNER JOIN memos m ON m.id = s.memo_id
            INNER JOIN memo_contents c ON c.memo_id = m.id
@@ -267,7 +292,11 @@ export const searchMemoSummaries = async (
         .bind(ftsQuery, likeQuery, likeQuery, likeQuery, ...binds, limit)
         .all<MemoSummaryRow>();
 
-      return rows.results.map(mapMemoSummary);
+      return rows.results.map(row => {
+        const memo = mapMemoSummary(row);
+        const snippet = memoSearchSnippet(row.content_text ?? "", q);
+        return snippet ? { ...memo, snippet } : memo;
+      });
     }
   }
 
@@ -275,7 +304,7 @@ export const searchMemoSummaries = async (
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-              c.content_text
+              c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE ${filters.join(" AND ")}
@@ -290,12 +319,15 @@ export const searchMemoSummaries = async (
 
 export const listMemosForMcp = async (
   db: DatabaseAdapter,
-  options: { workspaceId: string; notebookId?: string | null; limit: number; offset: number; includeContent: boolean; includeDeleted: boolean }
+  options: { workspaceId: string; notebookId?: string | null; limit: number; offset: number; includeContent: boolean; includeDeleted: boolean; poster?: boolean | null }
 ) => {
   const notebookId = options.notebookId?.trim() || null;
   const limit = clampNumber(options.limit, 1, 100);
   const offset = clampNumber(options.offset, 0, 100_000);
   const pageSize = limit + 1;
+  const posterFilter = typeof options.poster === "boolean"
+    ? `(instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) = ${options.poster ? 1 : 0}`
+    : "1 = 1";
   const deletedFilter = options.includeDeleted ? "1 = 1" : "m.is_deleted = 0";
 
   if (options.includeContent) {
@@ -307,7 +339,7 @@ export const listMemosForMcp = async (
                 m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
          FROM memos m
          INNER JOIN memo_contents c ON c.memo_id = m.id
-         WHERE m.workspace_id = ? AND ${deletedFilter}
+         WHERE m.workspace_id = ? AND ${deletedFilter} AND ${posterFilter}
            AND (? IS NULL OR m.notebook_id = ?)
          ORDER BY m.updated_at DESC, m.id ASC
          LIMIT ? OFFSET ?`
@@ -329,10 +361,10 @@ export const listMemosForMcp = async (
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-              c.content_text
+              c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.workspace_id = ? AND ${deletedFilter}
+       WHERE m.workspace_id = ? AND ${deletedFilter} AND ${posterFilter}
          AND (? IS NULL OR m.notebook_id = ?)
        ORDER BY m.updated_at DESC, m.id ASC
        LIMIT ? OFFSET ?`
@@ -790,7 +822,7 @@ export const moveMemosRecord = async (
   actor: AuditActor,
   actorLabel: string,
 ) => {
-  if (!(await getNotebook(db, workspaceId, notebookId))) {
+  if (!(await notebookExists(db, workspaceId, notebookId))) {
     throw new AppError("not_found", "Target notebook not found", 404);
   }
   return moveMemosToNotebook(db, workspaceId, memoIds, notebookId, actor, actorLabel);
@@ -860,7 +892,7 @@ export const mergeMemosRecord = async (
     throw new AppError("missing_memos", "One or more memos cannot be merged.", 400);
   }
 
-  if (input.notebookId && !(await getNotebook(db, workspaceId, input.notebookId))) {
+  if (input.notebookId && !(await notebookExists(db, workspaceId, input.notebookId))) {
     throw new AppError("not_found", "Target notebook not found", 404);
   }
 
@@ -957,7 +989,16 @@ export const createMemoRecord = async (
   actor: { actorType: "user" | "agent"; actorId: string | null },
   actorLabel: string
 ): Promise<MemoDetail> => {
-  // Hiding write guard: reject agent writes to hidden notebooks
+  // Reject a missing notebook before the batch. The memo insert is a SELECT
+  // from notebooks, so a bad id used to write orphan content and then fail
+  // the read-back as a generic 500.
+  if (!(await notebookExists(db, workspaceId, input.notebookId))) {
+    throw new AppError("not_found", "Notebook not found", 404);
+  }
+
+  // Hiding write guard: reject agent writes to hidden notebooks.
+  // Runs AFTER the existence check so user and agent paths agree on the
+  // order: a bad id is 404 for everyone, a hidden id is 403 only for agents.
   assertNotebookWritable(db, input.notebookId);
 
   const tags = normalizeTags(input.tags);
@@ -1097,8 +1138,7 @@ export const importMemosRecord = async (
   if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > 25) {
     throw new AppError("invalid_import_items", "items must contain between 1 and 25 memos", 400);
   }
-  const notebook = await getNotebook(db, workspaceId, input.notebookId);
-  if (!notebook) {
+  if (!(await notebookExists(db, workspaceId, input.notebookId))) {
     throw new AppError("not_found", "Import destination notebook not found in the authenticated user's workspace.", 404);
   }
 
@@ -1130,7 +1170,7 @@ export const importMemosRecord = async (
       }
 
       const memo = await createMemoRecord(db, workspaceId, {
-        notebookId: notebook.id,
+        notebookId: input.notebookId,
         title: item.title,
         contentMarkdown: item.contentMarkdown,
         tags: item.tags,
@@ -1148,7 +1188,7 @@ export const importMemosRecord = async (
         auditStatement(db, input.actor.actorType, input.actor.actorId, "memo.import", "memo", memo.id, {
           source,
           externalId,
-          notebookId: notebook.id,
+          notebookId: input.notebookId,
         }),
       ]);
       results.push({ index, externalId, status: "created", memo });
@@ -1182,7 +1222,7 @@ export const importMemosRecord = async (
   return {
     dryRun: input.dryRun,
     source,
-    notebookId: notebook.id,
+    notebookId: input.notebookId,
     total: results.length,
     created: count("created"),
     skipped: count("skipped"),
@@ -1355,13 +1395,19 @@ export const updateMemoRecord = async (
     isSuspiciousMemoOverwrite(current.title, current.content_text, title, contentText)
   ) {
     return {
-      error: "suspicious_memo_overwrite",
-      message: "Save blocked because the title changed while most of the note content disappeared.",
+      error: SUSPICIOUS_MEMO_OVERWRITE_ERROR,
+      message: SUSPICIOUS_MEMO_OVERWRITE_MESSAGE,
     };
   }
   const tags = input.tags === undefined ? parseJsonArray(current.tags_json) : normalizeTags(input.tags);
   const excerpt = createExcerpt(contentText);
   const notebookId = input.notebookId ?? current.notebook_id;
+  if (hasPosterDocumentMarker(current.content_markdown) && !parsePosterDocument(contentMarkdown)) {
+    return { error: "poster_update_required", message: "Poster source must be edited on a supported client.", status: 409 };
+  }
+  if (hasPosterDocumentMarker(contentMarkdown) && !parsePosterDocument(contentMarkdown)) {
+    return { error: "invalid_poster", message: "Invalid poster source.", status: 400 };
+  }
   const currentTable = parseTableDocument(current.content_markdown);
   const nextTable = parseTableDocument(contentMarkdown);
   if (currentTable && !nextTable) {

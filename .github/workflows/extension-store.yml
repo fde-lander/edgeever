@@ -1,0 +1,110 @@
+name: Submit Web Clipper
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to build or retry. Leave empty to build the selected workflow ref."
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: "Store to submit. Chrome also covers the Edge install link."
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - chrome
+          - firefox
+      release_notes:
+        description: "Firefox release notes. Leave empty for a one-line version note."
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Build the packages without calling the stores"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgeever-web-clipper-store
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: github.repository == 'tianma-if/edgeever' && (github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease && startsWith(github.event.release.tag_name, 'v')))
+    name: Submit Chrome and Firefox
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate formal release tag
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag || github.sha }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
+
+      - name: Write release notes
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: printf '%s' "$RELEASE_NOTES" > "$RUNNER_TEMP/web-clipper-release-notes.txt"
+
+      - name: Submit stores
+        id: submit
+        env:
+          PLATFORM: ${{ inputs.platform || 'both' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEB_STORE_SERVICE_ACCOUNT_JSON }}
+          CHROME_WEB_STORE_CLIENT_ID: ${{ secrets.CHROME_WEB_STORE_CLIENT_ID }}
+          CHROME_WEB_STORE_CLIENT_SECRET: ${{ secrets.CHROME_WEB_STORE_CLIENT_SECRET }}
+          CHROME_WEB_STORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEB_STORE_REFRESH_TOKEN }}
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          EDGE_EVER_REVIEW_INSTANCE_URL: ${{ secrets.EDGE_EVER_REVIEW_INSTANCE_URL }}
+          EDGE_EVER_REVIEW_API_TOKEN: ${{ secrets.EDGE_EVER_REVIEW_API_TOKEN }}
+        run: |
+          args=(--platform "$PLATFORM" --notes-file "$RUNNER_TEMP/web-clipper-release-notes.txt")
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          bun scripts/publish-web-clipper.mjs "${args[@]}"
+
+      - name: Upload submission packages
+        if: always() && steps.submit.outputs.version != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-clipper-${{ steps.submit.outputs.version }}
+          if-no-files-found: warn
+          path: |
+            ${{ steps.submit.outputs.chromium_zip }}
+            ${{ steps.submit.outputs.firefox_zip }}
+            ${{ steps.submit.outputs.source_zip }}

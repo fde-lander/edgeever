@@ -34,12 +34,18 @@ describe("editor typography contract", () => {
     expect(markdownRules).toMatch(/font-feature-settings\s*:\s*["']chws["']\s*1/);
   });
 
-  test("keeps compact rhythm unless a paper editor theme is selected", () => {
+  test("keeps the native editor and applies account prose instead of paper themes", () => {
     const editorPane = readStyle("../components/EditorPane.tsx");
     const publishLayout = readStyle("./publish-layout.css");
 
-    expect(editorPane).toContain("isPaperEditorTheme(editorTheme)");
-    expect(editorPane).toContain("MEMO_CONTENT_STYLE.body.lineHeight");
+    expect(editorPane).toContain('data-editor-theme="default"');
+    expect(editorPane).toContain("data-note-palette={noteProse.palette}");
+    expect(editorPane).toContain("data-note-heading-style={noteProseStyle.headingStyle}");
+    expect(editorPane).toContain("data-note-quote-style={noteProseStyle.quoteStyle}");
+    expect(editorPane).toContain("data-note-emphasis-style={noteProseStyle.emphasisStyle}");
+    expect(editorPane).toContain("noteProseCssVariables(noteProse)");
+    expect(editorPane).not.toContain("isPaperEditorTheme");
+    expect(editorPane).toContain("MEMO_CONTENT_STYLE.divider");
     expect(publishLayout).toContain('[data-editor-theme="letter"]');
     expect(publishLayout).toContain("[data-paper-theme]");
     expect(publishLayout).not.toContain("[data-publish-layout]");
@@ -67,6 +73,36 @@ describe("editor typography contract", () => {
     expect(placeholderRules).toMatch(/font-weight\s*:\s*inherit/);
     expect(placeholderRules).toMatch(/line-height\s*:\s*inherit/);
     expect(placeholderRules).toMatch(/color\s*:\s*#a8b5c4/);
+  });
+
+  test("paints bold text with the palette accent", () => {
+    const prose = readStyle("./note-prose.css");
+    const boldRules = declarationsForSelector(prose, ".ProseMirror strong");
+
+    expect(boldRules).toMatch(/color:\s*var\(--note-palette-accent\)/);
+    expect(prose).toMatch(/--note-palette-accent:\s*var\(--note-palette-dark-accent\)\s*!important/);
+    expect(prose).not.toContain('data-note-palette="custom"');
+  });
+
+  test("named palettes recolor links, bold, checked task boxes, and table surfaces while inline code stays neutral", () => {
+    const prose = readStyle("./note-prose.css");
+
+    expect(prose).toMatch(/color:\s*var\(--note-palette-link\)/);
+    expect(prose).toMatch(/color:\s*var\(--note-palette-accent\)/);
+    expect(prose).toMatch(/accent-color:\s*var\(--note-palette-accent\)/);
+    expect(prose).toMatch(/ul\[data-type="taskList"\] li\[data-checked\] > label input/);
+    expect(prose).toMatch(/\.ProseMirror pre code/);
+    expect(prose).toMatch(/background:\s*var\(--note-palette-accent\)/);
+    expect(prose).toMatch(/background:\s*#f9fafb/);
+    const globals = readStyle("./globals.css");
+    expect(declarationsForSelector(globals, ".ProseMirror :not(pre) > code")).toContain("color: #1f2937;");
+    expect(declarationsForSelector(globals, ".ProseMirror :not(pre) > code")).toContain("background: #f3f4f6;");
+    expect(prose).not.toMatch(/--note-palette-code-text/);
+    expect(prose).not.toMatch(/--note-palette-code-bg/);
+    expect(prose).not.toMatch(/--note-palette-text/);
+    expect(prose).not.toMatch(/--note-palette-muted/);
+    expect(prose).not.toMatch(/--note-palette-divider/);
+    expect(prose).not.toMatch(/blockquote/);
   });
 
   test("keeps bold and italic text visible across platform font fallbacks", () => {
@@ -116,6 +152,28 @@ describe("editor typography contract", () => {
       expect(editorRules).not.toMatch(/(?:font-size|line-height)\s*:/);
       expect(paragraphRules).not.toMatch(/(?:line-height|margin|padding)(?:-[a-z]+)?\s*:/);
       expect(listRules).not.toMatch(/(?:line-height|margin)(?:-[a-z]+)?\s*:/);
+    }
+  });
+
+  test("lets the system font follow the OS locale for Han glyphs", () => {
+    const globals = readStyle("./globals.css");
+    const mobileEditor = readStyle("./mobile-markdown-editor.css");
+    const systemStack =
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, ui-sans-serif, system-ui, sans-serif';
+    const regionFaces = ["PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC"];
+    const fontSans = globals.match(/--font-sans:\s*([^;]+);/)?.[1];
+    const systemFamily = globals.match(/--edgeever-system-font-family:\s*([^;]+);/)?.[1];
+
+    expect(fontSans).toBe(systemStack);
+    expect(systemFamily).toBe(systemStack);
+    for (const face of regionFaces) {
+      expect(fontSans).not.toContain(face);
+    }
+
+    const mobileDiagramText = declarationsForSelector(mobileEditor, ".edgeever-mermaid-svg text");
+    expect(mobileDiagramText).toContain("var(--edgeever-system-font-family,");
+    for (const face of regionFaces) {
+      expect(mobileDiagramText).not.toContain(face);
     }
   });
 

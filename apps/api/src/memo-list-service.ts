@@ -5,10 +5,11 @@ import {
   markdownToDoc,
   getDiagramSummary,
   getInfographicSummary,
+  getPosterSummary,
   getTableSummary,
   type MemoSummary,
 } from "@edgeever/shared";
-import { parseJsonArray } from "./entity-utils";
+import { clampNumber, parseJsonArray } from "./entity-utils";
 import type { DatabaseAdapter } from "./storage-contract";
 
 export type MemoSummaryRow = {
@@ -17,6 +18,7 @@ export type MemoSummaryRow = {
   title: string | null;
   excerpt: string;
   content_text?: string | null;
+  is_poster?: number;
   content_markdown?: string | null;
   tags_json: string;
   is_pinned: number;
@@ -28,7 +30,7 @@ export type MemoSummaryRow = {
   revision: number;
 };
 
-type MemoListSortMode = "updated-desc" | "created-desc" | "title-asc";
+type MemoListSortMode = "updated-desc" | "created-desc" | "title-asc" | "title-desc";
 type MemoListFilterMode = "all" | "tagged" | "untagged" | "pinned";
 
 type MemoListCursor = {
@@ -43,6 +45,7 @@ type MemoListCursor = {
 
 export type ListMemosInput = {
   workspaceId: string;
+  includeTotal?: boolean;
   notebookId?: string;
   includeNotebookDescendants?: boolean;
   query?: string;
@@ -56,7 +59,7 @@ export type ListMemosInput = {
 
 export type ListMemosResult = {
   memos: MemoSummary[];
-  totalCount: number;
+  totalCount?: number;
   nextCursor: string | null;
 };
 
@@ -73,6 +76,8 @@ export const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => ({
     createExcerpt(docToText(markdownToDoc(row.content_markdown ?? ""))),
   ...getDiagramSummary(row.content_markdown),
   ...getInfographicSummary(row.content_markdown),
+  ...getPosterSummary(row.content_markdown),
+  ...(row.is_poster !== undefined ? { poster: Boolean(row.is_poster) } : {}),
   ...getTableSummary(row.content_markdown),
   tags: parseJsonArray(row.tags_json),
   isPinned: Boolean(row.is_pinned),
@@ -90,15 +95,14 @@ const normalizeMemoTitle = (value: string | null | undefined) => {
 };
 
 const normalizeMemoListSort = (value: string | undefined): MemoListSortMode =>
-  value === "created-desc" || value === "title-asc" ? value : "updated-desc";
+  value === "created-desc" || value === "title-asc" || value === "title-desc" ? value : "updated-desc";
+
+const isTitleSort = (sort: MemoListSortMode): sort is "title-asc" | "title-desc" =>
+  sort === "title-asc" || sort === "title-desc";
 
 const normalizeMemoListFilter = (value: string | undefined): MemoListFilterMode =>
   value === "tagged" || value === "untagged" || value === "pinned" ? value : "all";
 
-const clampNumber = (value: number, min: number, max: number) => {
-  if (Number.isNaN(value)) return min;
-  return Math.min(Math.max(value, min), max);
-};
 
 const encodeMemoListCursor = (
   memo: MemoSummaryRow,
@@ -110,7 +114,7 @@ const encodeMemoListCursor = (
   else cursor.pinned = memo.is_pinned;
 
   if (sort === "created-desc") cursor.createdAt = memo.created_at;
-  else if (sort === "title-asc") {
+  else if (isTitleSort(sort)) {
     cursor.title = normalizeMemoTitle(memo.title).toLocaleLowerCase();
     cursor.updatedAt = memo.updated_at;
   } else cursor.updatedAt = memo.updated_at;
@@ -208,8 +212,9 @@ export const listMemos = async (
   const getOrderBy = () => {
     if (includeTrash) return "m.deleted_at DESC, m.id DESC";
     if (sort === "created-desc") return "m.is_pinned DESC, m.created_at DESC, m.id DESC";
-    if (sort === "title-asc") {
-      return `m.is_pinned DESC, ${titleSortExpression} ASC, m.updated_at DESC, m.id DESC`;
+    if (isTitleSort(sort)) {
+      const direction = sort === "title-desc" ? "DESC" : "ASC";
+      return `m.is_pinned DESC, ${titleSortExpression} ${direction}, m.updated_at DESC, m.id DESC`;
     }
     return "m.is_pinned DESC, m.updated_at DESC, m.id DESC";
   };
@@ -223,9 +228,10 @@ export const listMemos = async (
     } else if (sort === "created-desc") {
       cursorConditions.push("(m.is_pinned < ? OR (m.is_pinned = ? AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))))");
       cursorBinds.push(cursor.pinned ?? 0, cursor.pinned ?? 0, cursor.createdAt ?? "", cursor.createdAt ?? "", cursor.id);
-    } else if (sort === "title-asc") {
+    } else if (isTitleSort(sort)) {
+      const titleOperator = sort === "title-desc" ? "<" : ">";
       cursorConditions.push(
-        `(m.is_pinned < ? OR (m.is_pinned = ? AND (${titleSortExpression} > ? OR (${titleSortExpression} = ? AND (m.updated_at < ? OR (m.updated_at = ? AND m.id < ?))))))`,
+        `(m.is_pinned < ? OR (m.is_pinned = ? AND (${titleSortExpression} ${titleOperator} ? OR (${titleSortExpression} = ? AND (m.updated_at < ? OR (m.updated_at = ? AND m.id < ?))))))`,
       );
       cursorBinds.push(cursor.pinned ?? 0, cursor.pinned ?? 0, cursor.title ?? "", cursor.title ?? "", cursor.updatedAt ?? "", cursor.updatedAt ?? "", cursor.id);
     } else {
@@ -239,7 +245,7 @@ export const listMemos = async (
     const page = rows.slice(0, limit);
     return {
       memos: page.map(mapMemoSummary),
-      totalCount: totalCount ?? page.length,
+      ...(input.includeTotal === false ? {} : { totalCount: totalCount ?? page.length }),
       nextCursor: rows.length > limit
         ? encodeMemoListCursor(page[page.length - 1], sort, includeTrash)
         : null,
@@ -282,7 +288,7 @@ export const listMemos = async (
            ORDER BY ${getOrderBy()}
            LIMIT ?`,
         ).bind(...searchPrefix, ...cursorBinds, pageLimit).all<MemoSummaryRow>(),
-        database.prepare(
+        input.includeTotal === false ? Promise.resolve(null) : database.prepare(
           `WITH raw_matches(memo_id) AS (
              SELECT memo_id
              FROM memos_fts
@@ -327,7 +333,7 @@ export const listMemos = async (
          ORDER BY ${getOrderBy()}
          LIMIT ?`,
       ).bind(...searchCursorBinds, pageLimit).all<MemoSummaryRow>(),
-      database.prepare(
+      input.includeTotal === false ? Promise.resolve(null) : database.prepare(
         `SELECT COUNT(*) AS count
          FROM memos m
          INNER JOIN memo_contents mc ON mc.memo_id = m.id
@@ -348,7 +354,7 @@ export const listMemos = async (
        ORDER BY ${getOrderBy()}
        LIMIT ?`,
     ).bind(...cursorBinds, pageLimit).all<MemoSummaryRow>(),
-    database.prepare(
+    input.includeTotal === false ? Promise.resolve(null) : database.prepare(
       `SELECT COUNT(*) AS count
        FROM memos m
        WHERE ${baseConditions.join(" AND ")}`,

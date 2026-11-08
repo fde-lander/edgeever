@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 const actionsSource = readFileSync(new URL("./MemoEditorHeaderActions.tsx", import.meta.url), "utf8");
 const editorSource = readFileSync(new URL("./EditorPane.tsx", import.meta.url), "utf8");
 const diagramSource = readFileSync(new URL("./DiagramEditorPane.tsx", import.meta.url), "utf8");
+const tableSource = readFileSync(new URL("./TableEditorPane.tsx", import.meta.url), "utf8");
+const workspaceSource = readFileSync(new URL("./WorkspaceApp.tsx", import.meta.url), "utf8");
 const densitySource = readFileSync(new URL("./MemoEditorChromeDensity.ts", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("./EditorToolbar.tsx", import.meta.url), "utf8");
 const diagramToolbarSource = readFileSync(new URL("./DiagramToolbar.tsx", import.meta.url), "utf8");
@@ -15,18 +17,23 @@ describe("shared memo editor header actions", () => {
   test("owns every action shared by text and diagram notes", () => {
     expect(actionsSource).toContain("<Search");
     expect(actionsSource).toContain("<GitHubRepositoryLink");
-    expect(actionsSource).toContain("<SystemInfoDialog");
+    expect(actionsSource).not.toContain("SystemInfoDialog");
+    expect(actionsSource).not.toContain("systemInfo.title");
+    expect(actionsSource).not.toContain("setPreference(nextTheme)");
+    expect(actionsSource).not.toContain('t("common.githubRepository")');
     expect(actionsSource).toContain("<ExecutionCenterButton");
-    expect(actionsSource).toContain("setPreference(nextTheme)");
     expect(actionsSource).toContain("<MoreHorizontal");
   });
 
   test("is reused by both editors while text-only actions remain explicit slots", () => {
     expect(editorSource).toContain("<MemoEditorHeaderActions");
     expect(diagramSource).toContain("<MemoEditorHeaderActions");
-    expect(editorSource).toContain("textNoteActions={(\n");
     expect(editorSource).toContain("textNoteMenuItems=");
+    expect(editorSource).toContain("data-ai-assistant-launcher");
+    expect(editorSource).not.toContain("textNoteActions=");
     expect(diagramSource).not.toContain("textNoteActions=");
+    expect(diagramSource).toContain("data-ai-assistant-launcher");
+    expect(diagramSource).toContain("<AiSidebar");
     expect(diagramSource).not.toContain("<WeChatIcon");
   });
 
@@ -45,6 +52,20 @@ describe("shared memo editor header actions", () => {
     expect(editorSource).not.toContain("<Maximize2");
     expect(diagramSource).not.toContain("<Maximize2");
     expect(metadataRowSource).not.toContain("<Maximize2");
+  });
+
+  test("opens the same assistant on diagram and table notes", () => {
+    expect(tableSource).toContain("data-ai-assistant-launcher");
+    expect(tableSource).toContain("<AiSidebar");
+    expect(tableSource).not.toContain("infographic=");
+    expect(diagramSource).not.toContain("infographic=");
+    const diagramPane = workspaceSource.slice(workspaceSource.indexOf("<DiagramEditorPane"), workspaceSource.indexOf("<InfographicEditorPane"));
+    const tablePane = workspaceSource.slice(workspaceSource.indexOf("<TableEditorPane"), workspaceSource.indexOf("<EditorPane\n"));
+    expect(diagramPane).toContain("aiAssistantOpenToken={noteAiAssistantOpenToken}");
+    expect(diagramPane).toContain("companionAvailable={authRequired && Boolean(user) && !demoMode}");
+    expect(tablePane).toContain("aiAssistantOpenToken={noteAiAssistantOpenToken}");
+    expect(tablePane).toContain("notebooks={notebooks}");
+    expect(tablePane).toContain("companionAvailable={authRequired && Boolean(user) && !demoMode}");
   });
 
   test("leaves sequential note navigation to the memo list", () => {
@@ -71,6 +92,13 @@ describe("shared memo editor header actions", () => {
     expect(densitySource.match(/MEMO_EDITOR_TOOLBAR_PADDING_CLASS_NAME =\s*"([^"]+)"/)?.[1]).not.toContain("sm:px-7");
     expect(densitySource).toContain("[--editor-reading-gutter:1rem] sm:[--editor-reading-gutter:1.75rem] lg:[--editor-reading-gutter:6rem]");
     expect(densitySource).not.toContain("min-[1600px]:flex");
+  });
+
+  test("cycles rich text and markdown from one toolbar button", () => {
+    expect(editorToolbarSource).toContain("const nextEditorViewMode = EDITOR_VIEW_MODES[activeEditorView === \"rich\" ? 1 : 0]");
+    expect(editorToolbarSource).toContain("onEditorViewChange(nextEditorViewMode.value)");
+    expect(editorToolbarSource).not.toContain("EDITOR_VIEW_MODES.map");
+    expect(editorToolbarSource).not.toContain('t("editorToolbar.viewMode")');
   });
 
   test("aligns the note title, notebook row, and article on one reading gutter", () => {

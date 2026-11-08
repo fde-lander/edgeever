@@ -1,6 +1,6 @@
 import hljs from "highlight.js/lib/common";
-import { renderMermaidSVG, THEMES } from "beautiful-mermaid";
 import { MERMAID_THEME_PALETTES } from "@/components/ThemeProvider";
+import { renderThemedMermaidSvg } from "@/lib/mermaid-renderer";
 
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const EXPORT_FONT_FAMILY =
@@ -65,6 +65,7 @@ export const getHtmlImageEmbedNoticeKind = (
 
 export const buildHtmlFilename = (title: string, fallback: string) => {
   const sanitized = title
+    // oxlint-disable-next-line no-control-regex -- replaces control characters in export filenames
     .replace(/[\u0000-\u001f<>:"/\\|?*]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
@@ -176,7 +177,10 @@ const resolveResourceUrl = (src: string) => {
   }
 };
 
-export const renderMermaidBlocksForHtmlExport = async (root: HTMLElement) => {
+export const renderMermaidBlocksForHtmlExport = async (
+  root: HTMLElement,
+  renderSvg = renderThemedMermaidSvg,
+) => {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>("pre > code.language-mermaid"));
   await Promise.all(blocks.map(async (code) => {
     const source = code.textContent?.trim();
@@ -186,10 +190,8 @@ export const renderMermaidBlocksForHtmlExport = async (root: HTMLElement) => {
     }
 
     try {
-      const svg = renderMermaidSVG(source, {
-        ...THEMES["zinc-light"],
-        ...MERMAID_THEME_PALETTES["zinc-light"],
-        transparent: true,
+      const svg = await renderSvg(source, {
+        palette: MERMAID_THEME_PALETTES["zinc-light"],
         font: EXPORT_FONT_FAMILY,
         padding: 24,
       });

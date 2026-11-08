@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { MockLanguageModelV4 } from "ai/test";
 import { CompanionDiscoveryOutputSchema } from "@edgeever/shared";
 import { discoveryContext, discoveryInputHash } from "./companion-discovery-context.ts";
-import { generateCompanionDiscovery } from "./companion-discovery-runtime.ts";
+import { generateCompanionDiscovery } from "../../../packages/client/src/discovery-direct.ts";
 
 const candidates = Array.from({ length: 6 }, (_, i) => ({ id: `memo_00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
   title: `Idea ${i}`, contentMarkdown: `原文 ${i}: n1 is quoted data.\nKeep **formatting** and links.`, updatedAt: "2026-09-03T01:02:03.000Z", plainText: false }));
@@ -68,4 +68,16 @@ test("actual SDK uses compact input and translates its output before leaving the
   const prompt = JSON.stringify(model.doGenerateCalls[0].prompt);
   for (const note of candidates) expect(prompt).not.toContain(note.id);
   expect(prompt).toContain("untrusted DATA");
+});
+
+test("asks for the reply in the interface language, falling back to English", () => {
+  const reply = (locale) => discoveryContext({ ...input, locale }).instructions.match(/Reply in ([A-Za-z ]+)\./)?.[1];
+  expect(reply("zh-CN")).toBe("Simplified Chinese");
+  expect(reply("en-US")).toBe("English");
+  expect(reply("ja")).toBe("Japanese");
+  expect(reply("pl-PL")).toBe("Polish");
+  expect(reply("ru")).toBe("Russian");
+  expect(reply("de")).toBe("German");
+  expect(reply("it")).toBe("English");
+  expect(reply("")).toBe("English");
 });

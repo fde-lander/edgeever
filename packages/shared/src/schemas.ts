@@ -1,4 +1,9 @@
+import { isValidMemoShareSlug, PUBLISHED_NOTE_BODY_FONTS } from "./sharing";
 import { z } from "zod";
+import {
+  MAX_NOTE_PROSE_CSS_BYTES,
+  NOTE_PROSE_PALETTE_CHOICES,
+} from "./note-prose";
 import {
   AI_ACTIONS,
   AI_ATTACHMENT_MEDIA_TYPES,
@@ -13,6 +18,8 @@ import {
   getBase64DecodedByteLength,
   isAiTextAttachment,
 } from "./ai-assistant";
+import { AI_MODEL_OUTPUT_BUDGET_LIMITS, type AiModelOutputBudgetField } from "./ai-output-budgets";
+import { AI_MODEL_CAPABILITY_MAX_TOKENS, AI_MODEL_CAPABILITY_SOURCES } from "./ai-model-capabilities";
 
 export const NotebookCreateSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -23,6 +30,13 @@ export const NotebookUpdateSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   parentId: z.string().trim().min(1).nullable().optional(),
   sortOrder: z.number().int().optional(),
+  icon: z.string().trim().regex(/^[a-z][a-z0-9-]{0,79}$/).nullable().optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+  textColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+  colorTarget: z.enum(["icon", "name", "both"]).optional(),
+  isBold: z.boolean().optional(),
+  iconInverted: z.boolean().optional(),
+  rowInverted: z.boolean().optional(),
 });
 
 export const MemoCreateSchema = z.object({
@@ -71,6 +85,9 @@ export const TemplateUpdateSchema = z.object({
 
 export const TemplateUseSchema = z.object({
   notebookId: z.string().trim().min(1),
+  // The client's UI language. Default templates nobody edited are used in
+  // this language; without it every template is used as stored.
+  locale: z.string().trim().min(1).max(64).optional(),
 });
 
 const ScheduledPluginCommandPayloadSchema = z.object({
@@ -159,6 +176,11 @@ export const DeleteMemosSchema = z.object({
   permanent: z.boolean().optional(),
 });
 
+export const DuplicateMemoSchema = z.object({
+  notebookId: z.string().trim().min(1).optional(),
+  title: z.string().trim().max(160).optional(),
+});
+
 export const MergeMemosSchema = z.object({
   memoIds: z.array(z.string().trim().min(1)).min(2).max(50),
   notebookId: z.string().trim().min(1).optional(),
@@ -169,6 +191,45 @@ export const LoginSchema = z.object({
   username: z.string().trim().min(1).max(80),
   password: z.string().min(1).max(512),
   deviceId: z.string().trim().min(16).max(160).optional(),
+  // The client's resolved UI locale. Used once, to localize a new workspace's
+  // default notebooks and notes at its first sign-in.
+  locale: z.string().trim().min(1).max(35).optional(),
+});
+
+const TotpCodeField = z.string().trim().min(6).max(12);
+const RecoveryCodeField = z.string().trim().min(10).max(32);
+
+export const LoginMfaSchema = z.object({
+  challengeToken: z.string().trim().min(16).max(128),
+  code: TotpCodeField.optional(),
+  recoveryCode: RecoveryCodeField.optional(),
+  deviceId: z.string().trim().min(16).max(160).optional(),
+  locale: z.string().trim().min(1).max(35).optional(),
+}).refine((input) => Boolean(input.code) !== Boolean(input.recoveryCode), {
+  message: "Provide either an authenticator code or a recovery code.",
+  path: ["code"],
+});
+
+/** Identity check before enabling (password) or changing TOTP (password + code). */
+export const TotpReauthSchema = z.object({
+  password: z.string().min(1).max(512).optional(),
+  code: TotpCodeField.optional(),
+  /** Alternative to `code` when the authenticator is unavailable; it is consumed. */
+  recoveryCode: RecoveryCodeField.optional(),
+});
+
+/** Opaque id the server issued for one enrollment flow or one batch of recovery codes. */
+const TotpFlowIdField = z.string().trim().min(8).max(80);
+
+/** Step 2 of enrollment: the authenticator code, for the setup the client was shown. */
+export const TotpSetupVerifySchema = z.object({
+  setupId: TotpFlowIdField,
+  code: TotpCodeField,
+});
+
+/** Last step of enrollment or of regenerating codes: the batch the user saved. */
+export const TotpBatchConfirmSchema = z.object({
+  batchId: TotpFlowIdField,
 });
 
 export const LoginDeviceSessionUpdateSchema = z.object({
@@ -246,11 +307,14 @@ export const ObjectStorageConnectionTestSchema = z.object({
 
 export const AiProviderSchema = z.enum(["openai-compatible", "anthropic", "google"]);
 
-const AiBaseUrlSchema = z.string().trim().url().max(500).superRefine((value, context) => {
+export const AiTranscriptionStandardSchema = z.enum(["openai-compatible"]);
+
+const rejectUnsafeAiBaseUrl = (value: string, context: z.RefinementCtx) => {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
+    context.addIssue({ code: "custom", message: "AI Base URL must be a valid URL." });
     return;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -259,6 +323,42 @@ const AiBaseUrlSchema = z.string().trim().url().max(500).superRefine((value, con
   if (url.username || url.password) {
     context.addIssue({ code: "custom", message: "AI Base URL must not contain credentials." });
   }
+};
+
+const AiBaseUrlSchema = z.string().trim().url().max(500).superRefine(rejectUnsafeAiBaseUrl);
+
+const AiTranscriptionProviderBaseUrlSchema = z.string().trim().min(1).max(500).superRefine((value, context) => {
+  if (!z.string().url().safeParse(value).success) {
+    context.addIssue({ code: "custom", message: "AI Base URL must be a valid URL." });
+    return;
+  }
+  rejectUnsafeAiBaseUrl(value, context);
+});
+
+export const AiTranscriptionProviderCreateSchema = z.object({
+  provider: AiTranscriptionStandardSchema.default("openai-compatible"),
+  displayName: z.string().trim().min(1).max(80),
+  baseUrl: AiTranscriptionProviderBaseUrlSchema,
+  apiKey: z.string().trim().min(1).max(4096),
+  isEnabled: z.boolean().default(true),
+  initialModelId: z.string().trim().min(1).max(200).optional(),
+});
+
+export const AiTranscriptionProviderUpdateSchema = z.object({
+  provider: AiTranscriptionStandardSchema.default("openai-compatible"),
+  displayName: z.string().trim().min(1).max(80),
+  baseUrl: AiTranscriptionProviderBaseUrlSchema,
+  apiKey: z.string().trim().min(1).max(4096).optional(),
+  isEnabled: z.boolean().default(true),
+});
+
+export const AiTranscriptionModelCreateSchema = z.object({
+  modelId: z.string().trim().min(1).max(200),
+  displayName: z.string().trim().min(1).max(80).optional(),
+});
+
+export const AiTranscriptionDefaultModelUpdateSchema = z.object({
+  modelConfigId: z.string().trim().min(1).nullable(),
 });
 
 const AiProviderConfigFieldsSchema = z.object({
@@ -284,16 +384,53 @@ export const AiProviderConnectionTestSchema = z.object({
   apiKey: z.string().min(1).max(4096).optional(),
 });
 
+const aiModelOutputBudget = (field: AiModelOutputBudgetField) => z.number()
+  .int()
+  .min(AI_MODEL_OUTPUT_BUDGET_LIMITS[field].min)
+  .max(AI_MODEL_OUTPUT_BUDGET_LIMITS[field].max)
+  .nullable()
+  .optional();
+
+const aiModelOutputBudgetShape = {
+  generationMaxOutputTokens: aiModelOutputBudget("generationMaxOutputTokens"),
+  tagSuggestionMaxOutputTokens: aiModelOutputBudget("tagSuggestionMaxOutputTokens"),
+  companionMaxOutputTokens: aiModelOutputBudget("companionMaxOutputTokens"),
+};
+
 export const AiModelConfigCreateSchema = z.object({
   modelId: z.string().trim().min(1).max(200),
   displayName: z.string().trim().min(1).max(200).optional(),
+  ...aiModelOutputBudgetShape,
 });
+
+const aiCapabilityTokens = z.number().int().positive().max(AI_MODEL_CAPABILITY_MAX_TOKENS).nullable();
+
+/** Limits a client read from the provider for one model; checked against the saved model and endpoint. */
+export const AiModelCapabilitiesReportSchema = z.object({
+  provider: AiProviderSchema,
+  modelId: z.string().trim().min(1).max(200),
+  baseUrl: z.string().trim().min(1).max(2048),
+  /** The provider configuration the limits were read for (its `updated_at`). */
+  configVersion: z.string().trim().min(1).max(64),
+  maxOutputTokens: aiCapabilityTokens,
+  maxInputTokens: aiCapabilityTokens,
+  contextWindowTokens: aiCapabilityTokens,
+  source: z.enum(AI_MODEL_CAPABILITY_SOURCES),
+}).strict();
+
+/** An omitted field keeps its current value; `null` restores the EdgeEver default. */
+export const AiModelConfigUpdateSchema = z.object(aiModelOutputBudgetShape)
+  .strict()
+  .refine((value) => Object.values(value).some((field) => field !== undefined), {
+    message: "At least one model setting is required.",
+  });
 
 export const AiDefaultModelUpdateSchema = z.object({
   modelConfigId: z.string().trim().min(1).nullable(),
 });
 
 export const AiAttachmentSchema = z.object({
+  // oxlint-disable-next-line no-control-regex -- rejects control characters in attachment filenames
   filename: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001F\u007F]+$/),
   mediaType: z.enum(AI_ATTACHMENT_MEDIA_TYPES),
   base64Data: z.string().min(1).max(Math.ceil(MAX_AI_ATTACHMENT_BYTES / 3) * 4),
@@ -322,7 +459,30 @@ export const AiGenerateSchema = z.object({
   tone: z.enum(AI_TONES).optional(),
   instruction: z.string().trim().min(1).max(2_000).optional(),
   attachments: z.array(AiAttachmentSchema).max(MAX_AI_ATTACHMENTS).default([]),
+  /** The client can send a request without an output limit when none is known (#652). */
+  allowUnboundedOutput: z.boolean().optional(),
+  /**
+   * The client can run a long source-sized task in parts (#652). When one request cannot finish
+   * it, prepare returns `segments` instead of a request. `depth` > 0 re-splits a part that was cut off.
+   */
+  segmentation: z.object({ depth: z.number().int().min(0).max(2).default(0) }).strict().optional(),
+  /** This request is one part of a long note, with context from the parts before it. */
+  segment: z.object({
+    index: z.number().int().min(0).max(199),
+    count: z.number().int().min(1).max(200),
+    headingPath: z.array(z.string().max(200)).max(6).default([]),
+    previousSourceTail: z.string().max(1_000).optional(),
+    previousOutputTail: z.string().max(1_000).optional(),
+  }).strict().refine((segment) => segment.index < segment.count, { message: "The part index is out of range." }).optional(),
+  /** Continue a result that was cut off: the end of what was written so far. */
+  continuation: z.object({
+    round: z.number().int().min(1).max(3),
+    previousOutput: z.string().min(1).max(20_000),
+  }).strict().optional(),
 }).superRefine((input, context) => {
+  if (input.continuation && (input.segment || input.segmentation)) {
+    context.addIssue({ code: "custom", path: ["continuation"], message: "A continuation cannot be split into parts." });
+  }
   if (!input.promptId && input.action === "translate" && !input.targetLanguage) {
     context.addIssue({ code: "custom", path: ["targetLanguage"], message: "A target language is required for translation." });
   }
@@ -378,12 +538,51 @@ export const AiPromptTemplateUpdateSchema = z.object({
   message: "At least one field is required.",
 });
 
-export const MemoShareUpdateSchema = z.object({
+export const SharePasswordUpdateSchema = z.object({
   passwordProtected: z.boolean(),
 });
 
+export const MemoShareUpdateSchema = z.object({
+  passwordProtected: z.boolean().optional(),
+  password: z.string().trim().min(4).max(64).optional(),
+  slug: z.string().trim().toLowerCase().refine(isValidMemoShareSlug).nullable().optional(),
+  showUpdatedAt: z.boolean().optional(),
+  showBranding: z.boolean().optional(),
+  /** ISO instant with an offset, or null to remove the expiry. The server rejects past instants. */
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+}).refine((input) => input.passwordProtected !== undefined || input.password !== undefined || input.slug !== undefined || input.showUpdatedAt !== undefined || input.showBranding !== undefined || input.expiresAt !== undefined, {
+  message: "At least one field is required.",
+});
+export const NotebookShareUpdateSchema = SharePasswordUpdateSchema;
+
 export const NoteBodyFontUpdateSchema = z.object({
-  bodyFont: z.enum(["wenkai", "wenkai-screen", "zhuque", "source-han-serif", "neo-zhi-song", "source-han-sans", "source-serif"]).nullable(),
+  bodyFont: z.enum(PUBLISHED_NOTE_BODY_FONTS).nullable(),
+});
+
+const noteProseHexColor = z.string().regex(/^#[0-9a-f]{6}$/i);
+const noteProseCustomColorSetSchema = z.object({
+  background: noteProseHexColor,
+  text: noteProseHexColor,
+  muted: noteProseHexColor,
+  heading: noteProseHexColor,
+  accent: noteProseHexColor,
+  soft: noteProseHexColor,
+  codeBackground: noteProseHexColor,
+  border: noteProseHexColor,
+});
+
+export const NoteProseUpdateSchema = z.object({
+  fontSize: z.union([z.literal(14), z.literal(16), z.literal(18), z.literal(20)]).nullable().optional(),
+  lineHeight: z.union([z.literal(1.5), z.literal(1.65), z.literal(2)]).nullable().optional(),
+  palette: z.union([z.enum(NOTE_PROSE_PALETTE_CHOICES), z.literal("orange")])
+    .transform((value) => value === "orange" ? "clay" as const : value).nullable().optional(),
+  customCss: z.string().refine((value) => new TextEncoder().encode(value).byteLength <= MAX_NOTE_PROSE_CSS_BYTES).nullable().optional(),
+  customColors: z.object({
+    light: noteProseCustomColorSetSchema,
+    dark: noteProseCustomColorSetSchema,
+  }).nullable().optional(),
+}).refine((input) => Object.values(input).some((value) => value !== undefined), {
+  message: "At least one field is required.",
 });
 
 export const PublicShareUnlockSchema = z.object({
@@ -455,6 +654,10 @@ export type MoveMemosInput = z.infer<typeof MoveMemosSchema>;
 export type DeleteMemosInput = z.infer<typeof DeleteMemosSchema>;
 export type MergeMemosInput = z.infer<typeof MergeMemosSchema>;
 export type LoginInput = z.infer<typeof LoginSchema>;
+export type LoginMfaInput = z.infer<typeof LoginMfaSchema>;
+export type TotpReauthInput = z.infer<typeof TotpReauthSchema>;
+export type TotpSetupVerifyInput = z.infer<typeof TotpSetupVerifySchema>;
+export type TotpBatchConfirmInput = z.infer<typeof TotpBatchConfirmSchema>;
 export type LoginDeviceSessionUpdateInput = z.infer<typeof LoginDeviceSessionUpdateSchema>;
 export type ChangePasswordInput = z.infer<typeof ChangePasswordSchema>;
 export type UserCreateInput = z.infer<typeof UserCreateSchema>;
@@ -468,6 +671,8 @@ export type AiProviderConfigCreateInput = z.infer<typeof AiProviderConfigCreateS
 export type AiProviderConfigUpdateInput = z.infer<typeof AiProviderConfigUpdateSchema>;
 export type AiProviderConnectionTestInput = z.infer<typeof AiProviderConnectionTestSchema>;
 export type AiModelConfigCreateInput = z.infer<typeof AiModelConfigCreateSchema>;
+export type AiModelConfigUpdateInput = z.infer<typeof AiModelConfigUpdateSchema>;
+export type AiModelCapabilitiesReportInput = z.infer<typeof AiModelCapabilitiesReportSchema>;
 export type AiDefaultModelUpdateInput = z.infer<typeof AiDefaultModelUpdateSchema>;
 export type AiGenerateInput = z.input<typeof AiGenerateSchema>;
 export type AiAttachmentInput = z.infer<typeof AiAttachmentSchema>;

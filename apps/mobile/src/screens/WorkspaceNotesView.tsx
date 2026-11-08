@@ -1,13 +1,13 @@
 import { memo, useRef, type ReactNode } from "react";
 import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
-import { DEFAULT_MEMO_TITLE, getMemoListTimestamp, type MemoSummary, type Notebook } from "@edgeever/shared";
-import { MOBILE_UI_METRICS, toggleMobileMemoFilterMode } from "@edgeever/shared/mobile-ui";
-import { FlatList, Platform, RefreshControl, View } from "react-native";
-import Animated, { FadeInDown, FadeOutUp, LinearTransition, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
+import { DEFAULT_MEMO_TITLE, getMemoListTimestamp, getNotebookDescendantMemoCount, type MemoSummary, type Notebook } from "@edgeever/shared";
+import { toggleMobileMemoFilterMode } from "@edgeever/shared/mobile-ui";
+import { FlatList, Platform, RefreshControl, useWindowDimensions, View } from "react-native";
+import { Gesture, GestureDetector, MouseButton, PointerType } from "react-native-gesture-handler";
 import { ActivityIndicator, Check, ChevronDown, ChevronLeft, LayoutTemplate, MoreHorizontal, Plus, RotateCcw, Search, Sparkles, Tag, X } from "../components/icons";
 import { Pressable, Text, TextInput } from "../components/LocalizedText";
 import type { MobileBootstrapProgress } from "../lib/local-mirror";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { useMobileLocale, getMobileCatalog } from "../lib/mobile-locale";
 import { useMobileTheme } from "../lib/mobile-theme";
 import type { MobileMemoListDensity } from "../lib/preferences";
 import { formatMemoPreviewDate } from "./workspace-utils";
@@ -46,6 +46,7 @@ export const NotesView = ({
   onSetMemoView,
   searchText,
   selectedTag,
+  showDescendantNotes,
   totalMemoCount,
   selectedMemoIds,
   selectionMode,
@@ -80,14 +81,19 @@ export const NotesView = ({
   onSetMemoView: (memoView: MemoView) => void;
   searchText: string;
   selectedTag: string | null;
+  showDescendantNotes: boolean;
   totalMemoCount: number;
   selectionMode: boolean;
   selectedMemoIds: Set<string>;
 }) => {
   const { resolvedTheme } = useMobileTheme();
-  const { preference: localePreference, translate } = useMobileLocale();
+  const { translate } = useMobileLocale();
   const searchActive = searchText.trim().length > 0;
   const filterActive = memoFilterMode !== "all" || Boolean(selectedTag);
+  // With sub-notebooks hidden, an empty parent must not look like its notes are gone.
+  const hiddenDescendantMemoCount = !showDescendantNotes && memoView === "notebook" && activeNotebook && !searchActive && !filterActive
+    ? getNotebookDescendantMemoCount(notebooks, activeNotebook.id)
+    : 0;
   const searchStatusLabel = translate("正在搜索");
   const searchResultLabel = translate(`${totalMemoCount} 条结果`);
   const exitSearchLabel = translate("退出搜索");
@@ -191,16 +197,18 @@ export const NotesView = ({
       </View>
 
     <MemoList
-      emptyActions={memoView === "notebook" && notebooks.length > 0 && !searchActive && !filterActive
-        ? [
-          { label: "新建笔记", onPress: onCreate, variant: "primary" as const },
-          ...(onCreateFromTemplate
-            ? [{ label: "从模板新建", onPress: onCreateFromTemplate, variant: "secondary" as const }]
-            : []),
-        ]
+      emptyActions={memoView === "notebook" && !searchActive && !filterActive
+        ? notebooks.length === 0
+          ? [{ label: "新建笔记本", onPress: onOpenNotebookPicker, variant: "primary" as const }]
+          : [
+            { label: "新建笔记", onPress: onCreate, variant: "primary" as const },
+            ...(onCreateFromTemplate
+              ? [{ label: "从模板新建", onPress: onCreateFromTemplate, variant: "secondary" as const }]
+              : []),
+          ]
         : undefined}
-      emptyDescription={searchActive ? "换个关键词再试" : filterActive ? "试试切换筛选条件，或调整搜索关键词。" : memoView === "trash" ? "删除的笔记会显示在这里。" : "先创建一条笔记，之后可以在这里快速预览、搜索和批量整理。"}
-      emptyTitle={searchActive ? "没有找到匹配笔记" : filterActive ? "没有符合筛选的笔记" : memoView === "trash" ? "回收站为空" : "暂无笔记"}
+      emptyDescription={hiddenDescendantMemoCount > 0 ? `子笔记本中还有 ${hiddenDescendantMemoCount} 条笔记。可以打开子笔记本查看，或在设置中开启“父笔记本中显示子笔记本笔记”。` : searchActive ? "换个关键词再试" : filterActive ? "试试切换筛选条件，或调整搜索关键词。" : memoView === "trash" ? "删除的笔记会显示在这里。" : notebooks.length === 0 ? "先创建一个笔记本，再开始记录。" : "先创建一条笔记，之后可以在这里快速预览、搜索和批量整理。"}
+      emptyTitle={hiddenDescendantMemoCount > 0 ? "本级暂无笔记" : searchActive ? "没有找到匹配笔记" : filterActive ? "没有符合筛选的笔记" : memoView === "trash" ? "回收站为空" : notebooks.length === 0 ? "暂无笔记本" : "暂无笔记"}
       error={error}
       initialSyncProgress={initialSyncProgress}
       isError={isError}
@@ -227,7 +235,6 @@ const MemoList = ({
   emptyActions,
   emptyDescription,
   emptyTitle,
-  error,
   isError,
   initialSyncProgress,
   isLoading,
@@ -264,7 +271,9 @@ const MemoList = ({
   selectionMode?: boolean;
   selectedMemoIds?: Set<string>;
 }) => {
-  const { preference: localePreference, translate } = useMobileLocale();
+  const { translate } = useMobileLocale();
+  const { width } = useWindowDimensions();
+  const columnCount = width >= 1000 ? 3 : width >= 600 ? 2 : 1;
   const hasInitialSyncProgress = initialSyncProgress !== null;
   const loadedCount = initialSyncProgress?.loadedCount ?? 0;
   const totalCount = initialSyncProgress?.totalCount ?? 0;
@@ -314,26 +323,30 @@ const MemoList = ({
 
   return (
     <FlatList
-      contentContainerStyle={memos.length === 0 ? styles.emptyList : styles.list}
+      contentContainerStyle={memos.length === 0 ? styles.emptyList : [styles.list, columnCount > 1 && styles.memoGridList]}
       data={memos}
       initialNumToRender={10}
+      key={`memo-list-${columnCount}`}
       keyExtractor={(memo) => memo.id}
       maxToRenderPerBatch={8}
+      numColumns={columnCount}
       onEndReached={onLoadMore}
       onEndReachedThreshold={0.35}
       removeClippedSubviews={Platform.OS === "android"}
       refreshControl={<RefreshControl onRefresh={onRefresh} refreshing={isRefreshing} tintColor="#0f172a" />}
       style={styles.memoList}
       renderItem={({ item }) => (
-        <MemoCard
-          memo={item}
-          listDensity={listDensity}
-          sortMode={sortMode}
-          onLongPress={!selectionMode && onMemoLongPress ? () => onMemoLongPress(item) : undefined}
-          onPress={() => onMemoPress(item.id)}
-          selected={selectedMemoIds.has(item.id)}
-          selectionMode={selectionMode}
-        />
+        <View style={columnCount === 1 ? undefined : columnCount === 2 ? styles.memoGridCellHalf : styles.memoGridCellThird}>
+          <MemoCard
+            memo={item}
+            listDensity={listDensity}
+            sortMode={sortMode}
+            onLongPress={!selectionMode && onMemoLongPress ? () => onMemoLongPress(item) : undefined}
+            onPress={() => onMemoPress(item.id)}
+            selected={selectedMemoIds.has(item.id)}
+            selectionMode={selectionMode}
+          />
+        </View>
       )}
       ListEmptyComponent={
         <View style={styles.memoListEmptyCard}>
@@ -432,85 +445,79 @@ const MemoCard = memo(function MemoCard({
   const listTimestamp = getMemoListTimestamp(memo, sortMode);
   const listTimestampLabel = formatMemoPreviewDate(listTimestamp.value, localePreference);
   const listTimestampKind = listTimestamp.field === "createdAt"
-    ? (resolvedLocale !== "zh-CN" ? "Created" : "创建")
-    : (resolvedLocale !== "zh-CN" ? "Updated" : "更新");
+    ? getMobileCatalog(resolvedLocale).mobile.notes.created
+    : getMobileCatalog(resolvedLocale).mobile.notes.updated;
   const handledLongPressRef = useRef(false);
-  const pressScale = useSharedValue(1);
-  const pressAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: pressScale.value }],
-  }));
-
+  const rightClickGesture = Gesture.Tap()
+    .mouseButton(MouseButton.RIGHT)
+    .runOnJS(true)
+    .onEnd((event, success) => {
+      if (success && event.pointerType === PointerType.MOUSE && !selectionMode) onLongPress?.();
+    });
   return (
-    <Animated.View
-      entering={FadeInDown.duration(260).springify().damping(18)}
-      exiting={FadeOutUp.duration(220)}
-      layout={LinearTransition.duration(220)}
-      style={[
-        styles.memoCard,
-        listDensity === "compact" && styles.memoCardCompact,
-        selected && styles.memoCardSelected,
-        pressAnimatedStyle,
-      ]}
-    >
-      {selectionMode ? (
+    <GestureDetector gesture={rightClickGesture}>
+      <View
+        style={[
+          styles.memoCard,
+          listDensity === "compact" && styles.memoCardCompact,
+          selected && styles.memoCardSelected,
+        ]}
+      >
+        {selectionMode ? (
+          <Pressable
+            accessibilityLabel={`${selected ? "取消选择" : "选择"} ${memoTitle}`}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            onPress={onPress}
+            style={styles.memoSelectionButton}
+          >
+            <View style={[styles.selectionIndicator, selected && styles.selectionIndicatorActive]}>
+              {selected ? <Check color="#ffffff" size={14} /> : null}
+            </View>
+          </Pressable>
+        ) : null}
         <Pressable
-          accessibilityLabel={`${selected ? "取消选择" : "选择"} ${memoTitle}`}
+          accessibilityHint={selectionMode ? undefined : getMobileCatalog(resolvedLocale).mobile.notes.selectHint}
+          accessibilityLabel={memoTitle}
           accessibilityRole="button"
-          accessibilityState={{ selected }}
-          onPress={onPress}
-          style={styles.memoSelectionButton}
+          delayLongPress={520}
+          onLongPress={onLongPress ? () => {
+            handledLongPressRef.current = true;
+            onLongPress();
+          } : undefined}
+          onPress={() => {
+            if (handledLongPressRef.current) {
+              handledLongPressRef.current = false;
+              return;
+            }
+            onPress();
+          }}
+          style={[styles.memoCardContent, listDensity === "compact" && styles.memoCardContentCompact, selectionMode && styles.memoCardContentWithSelection]}
         >
-          <View style={[styles.selectionIndicator, selected && styles.selectionIndicatorActive]}>
-            {selected ? <Check color="#ffffff" size={14} /> : null}
+          <View style={styles.memoCardTop}>
+            {memo.isPinned ? (
+              <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.memoPinnedStar}>★</Text>
+            ) : null}
+            <Text numberOfLines={1} style={styles.memoTitle}>
+              {memoTitle}
+            </Text>
+          </View>
+          {listDensity === "preview" ? (
+            <Text numberOfLines={2} style={styles.memoExcerpt}>
+              {memo.excerpt || "空笔记"}
+            </Text>
+          ) : null}
+          <View style={[styles.memoMeta, listDensity === "compact" && styles.memoMetaCompact]}>
+            <Text style={styles.memoDate}>{listTimestampKind} {listTimestampLabel}</Text>
+            {memo.tags.slice(0, 3).map((tag) => (
+              <Text key={tag} style={styles.tag}>
+                #{tag}
+              </Text>
+            ))}
           </View>
         </Pressable>
-      ) : null}
-      <Pressable
-        accessibilityLabel={memoTitle}
-        accessibilityRole="button"
-        delayLongPress={520}
-        onLongPress={() => {
-          handledLongPressRef.current = true;
-          onLongPress?.();
-        }}
-        onPress={() => {
-          if (handledLongPressRef.current) {
-            handledLongPressRef.current = false;
-            return;
-          }
-          onPress();
-        }}
-        onPressIn={() => {
-          pressScale.value = withTiming(0.985, { duration: 100 });
-        }}
-        onPressOut={() => {
-          pressScale.value = withTiming(1, { duration: 160 });
-        }}
-        style={[styles.memoCardContent, listDensity === "compact" && styles.memoCardContentCompact, selectionMode && styles.memoCardContentWithSelection]}
-      >
-        <View style={styles.memoCardTop}>
-          {memo.isPinned ? (
-            <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.memoPinnedStar}>★</Text>
-          ) : null}
-          <Text numberOfLines={1} style={styles.memoTitle}>
-            {memoTitle}
-          </Text>
-        </View>
-        {listDensity === "preview" ? (
-          <Text numberOfLines={2} style={styles.memoExcerpt}>
-            {memo.excerpt || "空笔记"}
-          </Text>
-        ) : null}
-        <View style={[styles.memoMeta, listDensity === "compact" && styles.memoMetaCompact]}>
-          <Text style={styles.memoDate}>{listTimestampKind} {listTimestampLabel}</Text>
-          {memo.tags.slice(0, 3).map((tag) => (
-            <Text key={tag} style={styles.tag}>
-              #{tag}
-            </Text>
-          ))}
-        </View>
-      </Pressable>
-    </Animated.View>
+      </View>
+    </GestureDetector>
   );
 }, (previous, next) =>
   previous.memo === next.memo &&

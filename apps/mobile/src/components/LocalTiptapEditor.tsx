@@ -1,6 +1,9 @@
 'use dom';
 
+import { prepareNoteImageAssets } from "@edgeever/shared/note-image-fonts";
+import { noteImageAssetUrls } from "./note-image-asset-urls";
 import "katex/dist/katex.min.css";
+import { attachMobileReaderScroll } from "../lib/mobile-reader-scroll";
 import { Graph } from "@antv/x6";
 import Image from "@tiptap/extension-image";
 import CodeBlock from "@tiptap/extension-code-block";
@@ -28,6 +31,7 @@ import {
   markdownToDoc,
   MEMO_CONTENT_STYLE,
   createEdgeEverDocumentExtensions,
+  applyImageAlignment,
   DETAILS_EDITOR_CSS,
   wrapDetailsContentHtml,
   NativeAttachmentMetadata,
@@ -64,14 +68,18 @@ import {
 import {
   MOBILE_EDITOR_ACTIVE_FLAGS,
   MOBILE_EDITOR_TOOLBAR_ACTIONS,
+  clearMobileEditorUndoHistory,
   getMobileEditorInputAttributes,
   getMobileEditorImageScaleLabel,
   getMobileEditorImageWidthPresetLabel,
+  getMobileEditorCopy,
+  type MobileEditorLocale,
   getMobileEditorPlaceholder,
   getMobileEditorToolbarActionLabel,
   getMobileEditorToolbarLabel,
   type MobileEditorToolbarActionId,
 } from "@edgeever/shared/mobile-editor";
+import { formatAiPartList, type AiDraftIncompleteReason } from "@edgeever/shared/ai-generation";
 import {
   type NoteImageTheme,
   type NoteImageFontStyle,
@@ -84,8 +92,10 @@ import {
   buildImageExportBasename,
   buildNoteImageCardMarkup,
   generateCardCss,
+  prepareNoteImageContent,
 } from "@edgeever/shared/note-image-card";
 import { useDOMImperativeHandle, type DOMImperativeFactory, type DOMProps } from "expo/dom";
+import { toCanvas } from "html-to-image";
 import { createImageInsertTransaction, createNativeImageGalleryView, groupUploadedImages, NATIVE_IMAGE_GALLERY_CSS } from "@edgeever/shared/native-image-gallery";
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type Ref, type SetStateAction } from "react";
 import {
@@ -107,6 +117,7 @@ import {
   createMobileNoteSearchHighlightPlugin,
   getMobileNoteSearchMatches,
 } from "../lib/mobile-note-search";
+import { planMobileNoteImageRender } from "../lib/mobile-note-image-export";
 import { toProtectedResourceLoadPath } from "../lib/mobile-protected-resources";
 
 type EditorDoc = TiptapDoc;
@@ -139,9 +150,10 @@ type LocalTiptapEditorSharedProps = {
   onResourcePress?: (targetJson: string) => Promise<void>;
   onReady?: (startupMs: number) => Promise<void>;
   onSearchResult?: (count: number, index: number, query: string) => Promise<void>;
+  onReaderScroll?: (collapsed: boolean) => Promise<void>;
   onImageExportEvent?: (payloadJson: string) => Promise<void>;
   ref: Ref<LocalTiptapEditorRef>;
-  locale: "zh-CN" | "en-US" | "ja";
+  locale: MobileEditorLocale;
   theme: "light" | "dark";
   /** Live-switchable. The same DomWebView stays mounted across viewer → editor. */
   mode?: "editor" | "viewer";
@@ -172,8 +184,7 @@ const TRANSIENT_IMAGE_UPLOAD_META = "edgeeverImageUploadPlaceholder";
 const ignoreSearchResult = async () => undefined;
 const ignoreAiRequest = async () => undefined;
 const AI_PROMPT_OPTION_PREFIX = "prompt:";
-const IMAGE_EXPORT_PIXEL_RATIO = 2;
-const IMAGE_EXPORT_CHUNK_SIZE = 256 * 1024;
+const IMAGE_EXPORT_CHUNK_BYTES = 192 * 1024;
 
 type ImageExportRequest = {
   requestId: string;
@@ -193,16 +204,6 @@ type ImageExportRequest = {
   showTags?: boolean;
   showUpdatedAt?: boolean;
   branding?: boolean;
-};
-
-const blobToBytes = async (blob: Blob) => new Uint8Array(await blob.arrayBuffer());
-
-const bytesToBase64 = (bytes: Uint8Array) => {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
 };
 
 const fallbackPromptParameterKind = (action: AiAction): AiPromptParameterKind =>
@@ -234,6 +235,14 @@ type MobileAiPanelState = {
   error: string | null;
   generating: boolean;
   requestId: string | null;
+  /**
+   * Why the draft is incomplete; an incomplete draft must not replace the selection (#652).
+   * A new request starts as "interrupted" and only a clean finish clears it.
+   */
+  incomplete?: AiDraftIncompleteReason | null;
+  /** The part a long run is working on, and the parts that kept their source text (#652). */
+  progress?: { part: number; parts: number } | null;
+  incompleteParts?: number[];
 };
 
 type MobileAiBridgePayload = {
@@ -305,6 +314,32 @@ const buildImageResourceTargetJson = (figure: HTMLElement): string | null => {
   } satisfies EditorResourceTarget);
 };
 
+const buildMobileImagePreviewPayload = (figure: HTMLElement): string => {
+  const source = figure.dataset.resourceHref ?? "";
+  const alt = figure.dataset.resourceFilename || "";
+  const allFigures = typeof document !== "undefined"
+    ? Array.from(document.querySelectorAll<HTMLElement>("figure.edgeever-image-node[data-resource-href]"))
+    : [];
+  const images = allFigures
+    .map((fig) => ({
+      alt: fig.dataset.resourceFilename || "",
+      source: fig.dataset.resourceHref || "",
+    }))
+    .filter((img) => Boolean(img.source));
+
+  let index = allFigures.indexOf(figure);
+  if (index < 0 && source) {
+    index = images.findIndex((img) => img.source === source);
+  }
+
+  return JSON.stringify({
+    alt,
+    source,
+    index: Math.max(0, index),
+    images: images.length > 0 ? images : [{ alt, source }],
+  });
+};
+
 const handleMobileResourceEvent = (
   event: Event,
   onResourcePress?: (targetJson: string) => Promise<void>,
@@ -344,35 +379,11 @@ const handleMobileResourceEvent = (
   if (options?.allowImagePreview && options.onImagePreview && !imageActionRequested) {
     event.preventDefault();
     event.stopPropagation();
-    void options.onImagePreview(JSON.stringify({
-      alt: imageFigure.dataset.resourceFilename || "",
-      source: imageHref,
-    }));
+    void options.onImagePreview(buildMobileImagePreviewPayload(imageFigure));
     return true;
   }
 
   return false;
-};
-
-let beautifulMermaidRuntime: Promise<typeof import("beautiful-mermaid")> | null = null;
-
-const loadBeautifulMermaid = () => {
-  beautifulMermaidRuntime ??= import("beautiful-mermaid");
-  return beautifulMermaidRuntime;
-};
-
-const renderWithBeautifulMermaid = async (source: string, theme: "light" | "dark") => {
-  try {
-    const { renderMermaidSVG, THEMES } = await loadBeautifulMermaid();
-    return renderMermaidSVG(source, {
-      ...THEMES[theme === "dark" ? "zinc-dark" : "zinc-light"],
-      transparent: true,
-      font: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-      padding: 24,
-    });
-  } catch {
-    return null;
-  }
 };
 
 export default function LocalTiptapEditor(props: LocalTiptapEditorProps | MermaidRendererProps) {
@@ -396,30 +407,11 @@ const MermaidRenderRuntime = (props: MermaidRendererProps) => {
         sources = [];
       }
 
-      const mermaid = await loadMermaid();
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: "strict",
-        suppressErrorRendering: true,
-        theme: "base",
-        themeVariables: getMobileMermaidThemeVariables(props.theme),
-        flowchart: { htmlLabels: false },
-      });
-
       const results: Array<{ source: string; svg: string | null }> = [];
       for (const source of sources) {
+        if (cancelled) return;
         try {
-          const beautifulSvg = await renderWithBeautifulMermaid(source, props.theme);
-          if (beautifulSvg) {
-            results.push({ source, svg: inlineMermaidSvgStyles(beautifulSvg) });
-            continue;
-          }
-          const valid = await mermaid.parse(source, { suppressErrors: true });
-          if (!valid) {
-            throw new Error("Invalid Mermaid diagram");
-          }
-          mermaidRenderSequence += 1;
-          const { svg } = await mermaid.render(`edgeever-mobile-mermaid-${mermaidRenderSequence}`, source);
+          const { svg } = await renderMobileMermaid(source, props.theme, false);
           results.push({ source, svg: inlineMermaidSvgStyles(svg) });
         } catch {
           results.push({ source, svg: null });
@@ -452,7 +444,7 @@ const ReadOnlyX6Diagram = ({
   theme,
 }: {
   diagram: DiagramDocument;
-  locale: "zh-CN" | "en-US" | "ja";
+  locale: MobileEditorLocale;
   theme: "light" | "dark";
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -500,9 +492,11 @@ const ReadOnlyX6Diagram = ({
     };
   }, [diagram, theme, locale]);
 
-  const title = locale !== "zh-CN"
-    ? diagram.kind === "mind-map" ? "Mind map" : diagram.kind === "architecture" ? "Architecture diagram" : "Flowchart"
-    : diagram.kind === "mind-map" ? "思维导图" : diagram.kind === "architecture" ? "架构图" : "流程图";
+  const title = diagram.kind === "mind-map"
+    ? getMobileEditorCopy(locale).diagram.mindMap
+    : diagram.kind === "architecture"
+      ? getMobileEditorCopy(locale).diagram.architecture
+      : getMobileEditorCopy(locale).diagram.flowchart;
   return (
     <section className="edgeever-x6-document">
       <div aria-label={title} className="edgeever-x6-diagram" key={diagram.kind} ref={containerRef} role="img" />
@@ -674,6 +668,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const onAiCancelRef = useRef(props.mode === "viewer" ? undefined : props.onAiCancel);
   const onReadyRef = useRef(props.onReady ?? (async () => undefined));
   const onSearchResultRef = useRef(props.onSearchResult ?? ignoreSearchResult);
+  const onReaderScrollRef = useRef(props.onReaderScroll);
   const onImageExportEventRef = useRef(props.onImageExportEvent);
   const searchStateRef = useRef({ activeIndex: -1, query: "" });
   const [aiPanel, setAiPanel] = useState<MobileAiPanelState | null>(null);
@@ -696,9 +691,8 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
             parameterKind: "none",
             resultMode: "both",
             output: "",
-            error: props.locale === "en-US"
-              ? "The selected prompt no longer exists. Choose another prompt."
-              : "所选指令已不存在，请重新选择。",
+            incomplete: null,
+            error: getMobileEditorCopy(props.locale).ai.promptMissing,
           };
         }
         return {
@@ -731,6 +725,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   onAiCancelRef.current = props.mode === "viewer" ? undefined : props.onAiCancel;
   onReadyRef.current = props.onReady ?? (async () => undefined);
   onSearchResultRef.current = props.onSearchResult ?? ignoreSearchResult;
+  onReaderScrollRef.current = props.onReaderScroll;
   onImageExportEventRef.current = props.onImageExportEvent;
   const protectedImageExtension = useMemo(
     () => createProtectedImageExtension(
@@ -869,6 +864,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       // composer reset). Callers already own persistence for that state, so an
       // emitted update would create a delayed stale write during screen teardown.
       editor.commands.setContent(next, { emitUpdate: false });
+      clearMobileEditorUndoHistory(editor);
     } catch {
       // Ignore malformed payloads from the native bridge.
     }
@@ -934,7 +930,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     insertImageUploadPlaceholder(
       editor,
       createMobileImageUploadPlaceholderSource(uploadIdValue),
-      props.locale !== "zh-CN" ? "Uploading image…" : "图片上传中…",
+      getMobileEditorCopy(props.locale).image.uploading,
       previewDataUrlValue,
       pendingImageSelectionRef.current
     );
@@ -984,7 +980,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       type: "paragraph",
       content: [{
         type: "text",
-        text: `${props.locale !== "zh-CN" ? "Attachment: " : "附件："}${filenameValue}`,
+        text: `${getMobileEditorCopy(props.locale).attachmentPrefix}${filenameValue}`,
         marks: [{
           type: "link",
           attrs: {
@@ -1026,7 +1022,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     editor.view.dispatch(editor.state.tr.replaceWith(
       range.from,
       range.to,
-      editor.schema.text(`${props.locale !== "zh-CN" ? "Attachment: " : "附件："}${filenameValue}`, [linkMark])
+      editor.schema.text(`${getMobileEditorCopy(props.locale).attachmentPrefix}${filenameValue}`, [linkMark])
     ));
   }, [editor, props.locale]);
 
@@ -1100,6 +1096,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       customInstruction: "",
       refineInstruction: "",
       output: "",
+      incomplete: null,
       error: null,
       generating: false,
       requestId: null,
@@ -1133,6 +1130,9 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     setAiPanel((current) => current ? {
       ...current,
       output: "",
+      incomplete: "interrupted",
+      progress: null,
+      incompleteParts: [],
       error: null,
       generating: true,
       requestId,
@@ -1152,7 +1152,8 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
         ...current,
         generating: false,
         requestId: null,
-        error: requestError instanceof Error ? requestError.message : (props.locale !== "zh-CN" ? "AI generation failed." : "AI 生成失败。"),
+        incomplete: current.incomplete === "stopped" ? "stopped" : "interrupted",
+        error: requestError instanceof Error ? requestError.message : getMobileEditorCopy(props.locale).ai.generationFailed,
       } : current);
     });
   }, [aiPanel, props.locale]);
@@ -1167,11 +1168,33 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
         if (payload.event.type === "text-delta") {
           return { ...current, output: current.output + payload.event.text };
         }
+        if (payload.event.type === "text-reset") {
+          return { ...current, output: payload.event.text };
+        }
+        if (payload.event.type === "progress") {
+          return { ...current, progress: { part: payload.event.part, parts: payload.event.parts } };
+        }
         if (payload.event.type === "error") {
-          return { ...current, generating: false, requestId: null, error: payload.event.message };
+          // Text that arrived before the error stays an incomplete draft.
+          return {
+            ...current,
+            generating: false,
+            requestId: null,
+            incomplete: "interrupted",
+            // An interrupted stream is explained by the incomplete notice instead.
+            error: payload.event.code === "ai_stream_interrupted" ? null : payload.event.message,
+          };
         }
         if (payload.event.type === "finish") {
-          return { ...current, generating: false, requestId: null };
+          const incompleteParts = payload.event.incompleteParts ?? [];
+          return {
+            ...current,
+            generating: false,
+            requestId: null,
+            progress: null,
+            incompleteParts,
+            incomplete: payload.event.truncated || incompleteParts.length ? "truncated" : null,
+          };
         }
         return current;
       });
@@ -1183,7 +1206,12 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const stopAiSelectionRequest = useCallback(() => {
     if (!aiPanel?.requestId) return;
     void (onAiCancelRef.current ?? ignoreAiRequest)(aiPanel.requestId);
-    setAiPanel((current) => current ? { ...current, generating: false, requestId: null } : current);
+    setAiPanel((current) => current ? {
+      ...current,
+      generating: false,
+      requestId: null,
+      incomplete: current.output ? "stopped" : null,
+    } : current);
   }, [aiPanel?.requestId]);
 
   const applyAiSelectionDraft = useCallback((mode: "append" | "replace") => {
@@ -1192,14 +1220,13 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     if (!isAiSelectionSnapshotCurrent(aiPanel.selection, currentDocument, editor.state.doc.content.size)) {
       setAiPanel((current) => current ? {
         ...current,
-        error: props.locale === "en-US"
-          ? "The selection expired because the note changed. Select the text again."
-          : "笔记内容已变化，选区已失效，请重新选择文本。",
+        error: getMobileEditorCopy(props.locale).ai.selectionExpired,
       } : current);
       return;
     }
     if (mode === "append" && aiPanel.resultMode === "replace") return;
     if (mode === "replace" && aiPanel.resultMode === "append") return;
+    if (mode === "replace" && aiPanel.incomplete) return;
     const replacementDraft = mode === "replace"
       ? normalizeAiSelectionReplacement(aiPanel.output)
       : aiPanel.output;
@@ -1236,24 +1263,30 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const exportImage = useCallback((requestJsonValue: DOMValue) => {
     if (typeof requestJsonValue !== "string" || !editor || editor.isDestroyed || !onImageExportEventRef.current) return;
 
+    let request: ImageExportRequest;
+    try {
+      request = JSON.parse(requestJsonValue) as ImageExportRequest;
+      if (!request.requestId || (request.format !== "png" && request.format !== "jpeg")) return;
+    } catch {
+      return;
+    }
+
+    const notify = (payload: Record<string, unknown>) =>
+      onImageExportEventRef.current?.(JSON.stringify({ requestId: request.requestId, ...payload }));
+    const exportStartedAt = performance.now();
+    const reportProgress = (stage: "prepare" | "render" | "transfer") => {
+      void Promise.resolve(notify({ type: "progress", stage, elapsedMs: Math.round(performance.now() - exportStartedAt) })).catch(() => {});
+    };
+    const missingImagePlaceholder = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+
     void (async () => {
-      let request: ImageExportRequest;
-      try {
-        request = JSON.parse(requestJsonValue) as ImageExportRequest;
-        if (!request.requestId || (request.format !== "png" && request.format !== "jpeg")) return;
-      } catch {
-        return;
-      }
-
-      const notify = (payload: Record<string, unknown>) =>
-        onImageExportEventRef.current?.(JSON.stringify({ requestId: request.requestId, ...payload }));
-
+      reportProgress("prepare");
       const resolvedTheme = resolveTheme(request.background, request.theme);
-      const fontStyle = request.fontStyle ?? "serif";
+      const fontStyle = request.fontStyle ?? "auto";
       const fontSize = request.fontSize ?? "lg";
-      const cardWidth = request.cardWidth ?? "standard";
-      const targetWidth = NOTE_IMAGE_CARD_WIDTH_PIXELS[cardWidth] || 680;
-      const themeCfg = NOTE_IMAGE_THEMES[resolvedTheme] || NOTE_IMAGE_THEMES.slate;
+      const cardWidth = request.cardWidth ?? "wide";
+      const targetWidth = NOTE_IMAGE_CARD_WIDTH_PIXELS[cardWidth] || NOTE_IMAGE_CARD_WIDTH_PIXELS.wide;
+      const themeCfg = NOTE_IMAGE_THEMES[resolvedTheme] || NOTE_IMAGE_THEMES.aurora;
 
       const editorClone = editor.view.dom.cloneNode(true) as HTMLElement;
       editorClone.removeAttribute("contenteditable");
@@ -1262,6 +1295,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
         if (element instanceof HTMLButtonElement) element.remove();
       });
 
+      prepareNoteImageContent(editorClone);
       const bodyHtml = editorClone.innerHTML;
 
       const host = document.createElement("div");
@@ -1277,7 +1311,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
         bodyHtml,
         theme: resolvedTheme,
         fontStyle,
-        showTitle: request.showTitle ?? true,
+        showTitle: request.showTitle ?? false,
         showNotebook: request.showNotebook ?? false,
         showTags: request.showTags ?? false,
         showUpdatedAt: request.showUpdatedAt ?? true,
@@ -1294,60 +1328,117 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       document.body.appendChild(host);
 
       try {
-        await document.fonts?.ready;
-        await Promise.all(Array.from(documentRoot.querySelectorAll("img")).map(async (image) => {
-          if (image.complete) return;
-          try { await image.decode(); } catch { /* Export the readable remainder. */ }
-        }));
+        await notify({ type: "font-status", status: "loading" });
+        const assets = await prepareNoteImageAssets({ theme: resolvedTheme, fontStyle, text: [request.title, request.notebook, ...(request.tags || []), request.updatedAt, bodyHtml].join(" "), urls: noteImageAssetUrls });
+        await notify({ type: "font-status", status: assets.fontFallback ? "fallback" : "ready" });
+        void assets.fontsReady?.then(() => notify({ type: "fonts-ready" }), () => {}).catch(() => {});
+        style.textContent = assets.css + generateCardCss({ theme: resolvedTheme, fontStyle, fontSize, cardWidth });
+        const images = Array.from(documentRoot.querySelectorAll<HTMLImageElement>("img"));
+        await Promise.race([
+          Promise.all([
+            document.fonts?.ready,
+            ...images.map(async (image) => {
+              if (image.complete) return;
+              try { await image.decode(); } catch { /* Export the readable remainder. */ }
+            }),
+          ]),
+          new Promise<void>((resolve) => window.setTimeout(resolve, 8_000)),
+        ]);
         const exportedImages = Array.from(
           documentRoot.querySelectorAll<HTMLImageElement>(".edgeever-card-body img"),
         );
         const failedImages = exportedImages.filter((image) => !image.complete || image.naturalWidth === 0).length;
         const totalHeight = Math.max(1, Math.ceil(documentRoot.getBoundingClientRect().height));
+        const renderPlan = planMobileNoteImageRender(targetWidth, totalHeight);
+        let embedFailedImages = 0;
+        let captureRoot = documentRoot;
+        let captureWrapper: HTMLDivElement | null = null;
+        if (renderPlan.sourceScale < 1) {
+          const wrapper = document.createElement("div");
+          wrapper.style.cssText = `position:relative;width:${renderPlan.sourceWidth}px;height:${renderPlan.sourceHeight}px;overflow:hidden;`;
+          documentRoot.replaceWith(wrapper);
+          wrapper.appendChild(documentRoot);
+          documentRoot.style.transform = `scale(${renderPlan.sourceScale})`;
+          documentRoot.style.transformOrigin = "top left";
+          captureRoot = wrapper;
+          captureWrapper = wrapper;
+        }
         const backgroundColor = NOTE_IMAGE_BACKGROUND_COLORS[resolvedTheme] || themeCfg.canvasBg;
 
-        const { toCanvas } = await import("html-to-image");
-        const canvas = await toCanvas(documentRoot, {
+        reportProgress("render");
+        const renderCanvas = (root: HTMLElement, width: number, height: number) => toCanvas(root, {
           backgroundColor,
           cacheBust: false,
-          height: totalHeight,
-          pixelRatio: IMAGE_EXPORT_PIXEL_RATIO,
-          skipFonts: true,
-          width: targetWidth,
+          height,
+          imagePlaceholder: missingImagePlaceholder,
+          onImageErrorHandler: (event) => {
+            embedFailedImages += 1;
+            if (event instanceof Event && event.target instanceof HTMLImageElement) {
+              event.target.src = missingImagePlaceholder;
+            }
+          },
+          pixelRatio: renderPlan.pixelRatio,
+          fontEmbedCSS: assets.fontCss,
+          width,
         });
-        const blob = await new Promise<Blob>((resolve, reject) => {
-          canvas.toBlob(
-            (result) => result ? resolve(result) : reject(new Error("Image renderer returned an empty file")),
-            request.format === "jpeg" ? "image/jpeg" : "image/png",
-            request.format === "jpeg" ? 0.92 : 1,
-          );
-        });
-
+        let canvas: HTMLCanvasElement;
+        try {
+          canvas = await renderCanvas(captureRoot, renderPlan.sourceWidth, renderPlan.sourceHeight);
+        } catch {
+          // Android WebView can reject a large SVG image without an Error message.
+          // Try a smaller source once while keeping the entire card visible.
+          const retryScale = renderPlan.sourceScale * 0.75;
+          const retryWidth = Math.max(1, Math.floor(targetWidth * retryScale));
+          const retryHeight = Math.max(1, Math.floor(totalHeight * retryScale));
+          if (retryScale < 0.5) throw new Error("NOTE_IMAGE_RENDER_FAILED");
+          if (!captureWrapper) {
+            captureWrapper = document.createElement("div");
+            documentRoot.replaceWith(captureWrapper);
+            captureWrapper.appendChild(documentRoot);
+          }
+          captureWrapper.style.cssText = `position:relative;width:${retryWidth}px;height:${retryHeight}px;overflow:hidden;`;
+          documentRoot.style.transform = `scale(${retryScale})`;
+          documentRoot.style.transformOrigin = "top left";
+          try {
+            canvas = await renderCanvas(captureWrapper, retryWidth, retryHeight);
+          } catch {
+            throw new Error("NOTE_IMAGE_RENDER_FAILED");
+          }
+        }
         const extension = request.format === "jpeg" ? "jpg" : "png";
         const basename = buildImageExportBasename(request.title, request.fallbackTitle);
-        const bytes = await blobToBytes(blob);
         const filename = `${basename}.${extension}`;
         const mimeType = request.format === "jpeg" ? "image/jpeg" : "image/png";
+        // Android WebView can take many seconds to return canvas.toBlob for a
+        // long note. This encodes promptly and gives the bridge base64 directly.
+        const dataUrl = canvas.toDataURL(mimeType, request.format === "jpeg" ? 0.92 : 1);
+        const dataUrlPrefix = `data:${mimeType};base64,`;
+        if (!dataUrl.startsWith(dataUrlPrefix)) throw new Error("Image renderer returned an empty file");
+        const base64 = dataUrl.slice(dataUrlPrefix.length);
 
-        const base64 = bytesToBase64(bytes);
-        for (let offset = 0; offset < base64.length; offset += IMAGE_EXPORT_CHUNK_SIZE) {
-          await notify({ type: "chunk", chunk: base64.slice(offset, offset + IMAGE_EXPORT_CHUNK_SIZE) });
+        reportProgress("transfer");
+        const chunkChars = (IMAGE_EXPORT_CHUNK_BYTES / 3) * 4;
+        for (let offset = 0; offset < base64.length; offset += chunkChars) {
+          await notify({ type: "chunk", chunk: base64.slice(offset, offset + chunkChars) });
         }
         await notify({
           type: "complete",
+          fontFallback: assets.fontFallback,
           filename,
           mimeType,
           width: canvas.width,
           height: canvas.height,
           totalImages: exportedImages.length,
-          failedImages,
+          failedImages: Math.min(exportedImages.length, failedImages + embedFailedImages),
         });
       } catch (error) {
         await notify({ type: "error", message: error instanceof Error ? error.message : "Image export failed" });
       } finally {
         host.remove();
       }
-    })();
+    })().catch((error: unknown) => {
+      void notify({ type: "error", message: error instanceof Error ? error.message : "Image export failed" });
+    });
   }, [editor]);
 
   useDOMImperativeHandle(
@@ -1449,6 +1540,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     const incoming = JSON.stringify(next);
     if (current !== incoming) {
       editor.commands.setContent(next, { emitUpdate: false });
+      clearMobileEditorUndoHistory(editor);
     }
   }, [editor, isViewer, props.baseUrl, props.content, props.locale]);
 
@@ -1555,6 +1647,16 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     };
   }, [editor, isViewer]);
 
+  useEffect(() => {
+    if (!editor || !isViewer) return;
+    const scrollContainer = document.querySelector<HTMLElement>(".edgeever-editor-scroll");
+    if (!scrollContainer) return;
+
+    return attachMobileReaderScroll(scrollContainer, (collapsed) => {
+      void onReaderScrollRef.current?.(collapsed);
+    });
+  }, [editor, isViewer, visualDiagram]);
+
   const toolbarState = useEditorState({
     editor,
     selector: ({ editor: activeEditor }) =>
@@ -1562,6 +1664,20 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       (activeEditor?.isActive("bulletList") ? MOBILE_EDITOR_ACTIVE_FLAGS.bulletList : 0) |
       (activeEditor?.isActive("taskList") ? MOBILE_EDITOR_ACTIVE_FLAGS.taskList : 0) |
       (activeEditor?.isActive("blockquote") ? MOBILE_EDITOR_ACTIVE_FLAGS.blockquote : 0),
+  });
+  const historyState = useEditorState({
+    editor,
+    selector: ({ editor: activeEditor }) => {
+      if (!activeEditor) return 0;
+      const available = (command: "undo" | "redo") => {
+        try {
+          return activeEditor.can().chain().focus()[command]().run();
+        } catch {
+          return false;
+        }
+      };
+      return (available("undo") ? 1 : 0) | (available("redo") ? 2 : 0);
+    },
   });
   const requestOpenAiForSelection = () => {
     if (openAiForSelection()) {
@@ -1600,6 +1716,8 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   };
 
   const toolbarIcons: Record<MobileEditorToolbarActionId, ReactNode> = {
+    undo: <UndoIcon />,
+    redo: <RedoIcon />,
     image: <ImagePlusIcon />,
     bold: <BoldIcon />,
     bulletList: <ListIcon />,
@@ -1611,6 +1729,8 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   };
   const activeListItemType = editor?.isActive("taskItem") ? "taskItem" : "listItem";
   const toolbarHandlers: Record<MobileEditorToolbarActionId, () => void> = {
+    undo: () => editor?.chain().focus().undo().run(),
+    redo: () => editor?.chain().focus().redo().run(),
     image: () => void insertImage(),
     bold: () => editor?.chain().focus().toggleBold().run(),
     bulletList: () => editor?.chain().focus().toggleBulletList().run(),
@@ -1630,10 +1750,12 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
               <ToolbarButton
                 key={action.id}
                 active={action.activeFlag > 0 && Boolean(toolbarState & action.activeFlag)}
-                disabled={(action.id === "increaseListIndent"
-                    && !Boolean(editor?.can().chain().focus().sinkListItem(activeListItemType).run()))
+                disabled={(action.id === "undo" && ((historyState ?? 0) & 1) === 0)
+                  || (action.id === "redo" && ((historyState ?? 0) & 2) === 0)
+                  || (action.id === "increaseListIndent"
+                    && !editor?.can().chain().focus().sinkListItem(activeListItemType).run())
                   || (action.id === "decreaseListIndent"
-                    && !Boolean(editor?.can().chain().focus().liftListItem(activeListItemType).run()))}
+                    && !editor?.can().chain().focus().liftListItem(activeListItemType).run())}
                 icon={toolbarIcons[action.id]}
                 label={getMobileEditorToolbarActionLabel(action.id, props.locale)}
                 onRun={toolbarHandlers[action.id]}
@@ -1641,7 +1763,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
             ))}
           {onAiRequestRef.current ? (
             <button
-              aria-label={props.locale !== "zh-CN" ? "Use AI on the note or selected text" : "用 AI 处理正文或选中内容"}
+              aria-label={getMobileEditorCopy(props.locale).ai.openForNote}
               className="edgeever-ai-toolbar-button"
               onClick={requestOpenAiForSelection}
               onMouseDown={(event) => event.preventDefault()}
@@ -1662,7 +1784,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       )}
       {aiSelectionTrigger && !aiPanel ? (
         <button
-          aria-label={props.locale !== "zh-CN" ? "Use AI on selected text" : "用 AI 处理选中内容"}
+          aria-label={getMobileEditorCopy(props.locale).ai.openForSelection}
           className="edgeever-ai-selection-trigger"
           onClick={requestOpenAiForSelection}
           onMouseDown={(event) => event.preventDefault()}
@@ -1676,14 +1798,14 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       ) : null}
       {aiSelectionHint ? (
         <div aria-live="polite" className="edgeever-ai-selection-hint" role="status">
-          {props.locale !== "zh-CN" ? "Add some note content first." : "请先输入正文内容。"}
+          {getMobileEditorCopy(props.locale).ai.emptyNote}
         </div>
       ) : null}
       {aiUndoFingerprint && !aiPanel ? (
         <div aria-live="polite" className="edgeever-ai-undo" role="status">
-          <span>{props.locale !== "zh-CN" ? "AI updated the selection." : "AI 已更新选中内容。"}</span>
+          <span>{getMobileEditorCopy(props.locale).ai.selectionUpdated}</span>
           <button onClick={undoAiSelectionDraft} onMouseDown={(event) => event.preventDefault()} type="button">
-            {props.locale !== "zh-CN" ? "Undo" : "撤销"}
+            {getMobileEditorCopy(props.locale).actions.undo}
           </button>
         </div>
       ) : null}
@@ -1729,7 +1851,7 @@ const MobileSelectionAiPanel = ({
   panel,
   prompts,
 }: {
-  locale: "zh-CN" | "en-US" | "ja";
+  locale: MobileEditorLocale;
   onApply: (mode: "append" | "replace") => void;
   onChange: Dispatch<SetStateAction<MobileAiPanelState | null>>;
   onClose: () => void;
@@ -1739,44 +1861,14 @@ const MobileSelectionAiPanel = ({
   panel: MobileAiPanelState;
   prompts: AiPromptTemplate[];
 }) => {
-  const english = locale !== "zh-CN";
   const [picker, setPicker] = useState<MobileAiPickerKind | null>(null);
-  const actionLabels: Record<AiAction, string> = {
-    summarize: english ? "Summarize" : "精简总结",
-    "extract-key-points": english ? "Key points" : "提炼要点",
-    "extract-todos": english ? "Extract tasks" : "提取待办",
-    "rewrite-proofread": english ? "Rewrite & proofread" : "改写与校对",
-    translate: english ? "Translate" : "全文翻译",
-    "improve-writing": english ? "Polish" : "润色表达",
-    "fix-spelling-grammar": english ? "Fix spelling & grammar" : "修正拼写与语法",
-    "make-shorter": english ? "Make concise" : "精炼表达",
-    "make-longer": english ? "Make longer" : "扩写内容",
-    "simplify-language": english ? "Simplify language" : "简化表达",
-    "change-tone": english ? "Change tone" : "调整语气",
-    "continue-writing": english ? "Continue writing" : "继续写作",
-    custom: english ? "Custom prompt" : "自定义指令",
-  };
-  const languageLabels: Record<AiTargetLanguage, string> = {
-    en: english ? "English" : "英语",
-    "zh-CN": english ? "Simplified Chinese" : "简体中文",
-    "zh-TW": english ? "Traditional Chinese" : "繁体中文",
-    ja: english ? "Japanese" : "日语",
-    ko: english ? "Korean" : "韩语",
-    es: english ? "Spanish" : "西班牙语",
-    fr: english ? "French" : "法语",
-    de: english ? "German" : "德语",
-    pt: english ? "Portuguese" : "葡萄牙语",
-  };
-  const toneLabels: Record<AiTone, string> = {
-    professional: english ? "Professional" : "专业",
-    friendly: english ? "Friendly" : "友好",
-    casual: english ? "Casual" : "轻松",
-    direct: english ? "Direct" : "直接",
-  };
+  const actionLabels: Record<AiAction, string> = getMobileEditorCopy(locale).ai.actions;
+  const languageLabels: Record<AiTargetLanguage, string> = getMobileEditorCopy(locale).ai.languages;
+  const toneLabels: Record<AiTone, string> = getMobileEditorCopy(locale).ai.tones;
   const update = (next: Partial<MobileAiPanelState>) => onChange((current) => current ? { ...current, ...next } : current);
   const generateDisabled = panel.generating || (!panel.promptId && panel.action === "custom" && !panel.customInstruction.trim());
   const appendDisabled = panel.generating || !panel.output || panel.resultMode === "replace";
-  const replaceDisabled = panel.generating || !panel.output || panel.resultMode === "append";
+  const replaceDisabled = panel.generating || !panel.output || panel.resultMode === "append" || Boolean(panel.incomplete);
   const selectedPrompt = panel.promptId ? prompts.find((prompt) => prompt.id === panel.promptId) ?? null : null;
 
   const persistLastAction = (
@@ -1810,6 +1902,7 @@ const MobileSelectionAiPanel = ({
         parameterKind: prompt.parameterKind,
         resultMode: prompt.resultMode,
         output: "",
+        incomplete: null,
         error: null,
       });
       return;
@@ -1822,6 +1915,7 @@ const MobileSelectionAiPanel = ({
       parameterKind: fallbackPromptParameterKind(action),
       resultMode: fallbackPromptResultMode(action),
       output: "",
+      incomplete: null,
       error: null,
     });
   };
@@ -1856,22 +1950,22 @@ const MobileSelectionAiPanel = ({
         : [];
 
   const pickerTitle = picker === "action"
-    ? (english ? "Choose an action" : "选择处理方式")
+    ? getMobileEditorCopy(locale).ai.chooseAction
     : picker === "language"
-      ? (english ? "Choose target language" : "选择目标语言")
-      : (english ? "Choose tone" : "选择语气");
+      ? getMobileEditorCopy(locale).ai.chooseTargetLanguage
+      : getMobileEditorCopy(locale).ai.chooseTone;
 
   const choosePickerOption = (value: string) => {
     if (picker === "action") selectPromptOrAction(value);
     if (picker === "language") {
       const targetLanguage = value as AiTargetLanguage;
       persistLastAction(panel.action, panel.promptId, targetLanguage);
-      update({ targetLanguage, output: "", error: null });
+      update({ targetLanguage, output: "", error: null, incomplete: null });
     }
     if (picker === "tone") {
       const tone = value as AiTone;
       persistLastAction(panel.action, panel.promptId, panel.targetLanguage, tone);
-      update({ tone, output: "", error: null });
+      update({ tone, output: "", error: null, incomplete: null });
     }
     setPicker(null);
   };
@@ -1888,8 +1982,8 @@ const MobileSelectionAiPanel = ({
   return (
     <section
       aria-label={panel.selection.wholeNote
-        ? (english ? "AI whole-note assistant" : "AI 全文助手")
-        : (english ? "AI selection assistant" : "AI 选区助手")}
+        ? getMobileEditorCopy(locale).ai.noteTitle
+        : getMobileEditorCopy(locale).ai.selectionTitle}
       aria-modal="true"
       className="edgeever-ai-panel"
       role="dialog"
@@ -1897,19 +1991,19 @@ const MobileSelectionAiPanel = ({
       <header className="edgeever-ai-panel-header">
         <div>
           <strong>{panel.selection.wholeNote
-            ? (english ? "AI whole-note assistant" : "AI 全文助手")
-            : (english ? "AI selection assistant" : "AI 选区助手")}</strong>
+            ? getMobileEditorCopy(locale).ai.noteTitle
+            : getMobileEditorCopy(locale).ai.selectionTitle}</strong>
           <small>{panel.selection.wholeNote
-            ? (english ? "No text selected; the whole note will be processed." : "未选择文字，将处理整篇正文。")
-            : (english ? "Only the selected text will be processed." : "只处理当前选中的正文。")}</small>
+            ? getMobileEditorCopy(locale).ai.noteScopeHint
+            : getMobileEditorCopy(locale).ai.selectionScopeHint}</small>
         </div>
-        <button aria-label={english ? "Close" : "关闭"} onClick={onClose} type="button">×</button>
+        <button aria-label={getMobileEditorCopy(locale).close} onClick={onClose} type="button">×</button>
       </header>
       <div className="edgeever-ai-panel-body">
         <MobileAiPickerField
           disabled={panel.generating}
           expanded={picker === "action"}
-          label={english ? "Action" : "处理方式"}
+          label={getMobileEditorCopy(locale).ai.action}
           onOpen={() => setPicker("action")}
           value={selectedPrompt?.name ?? actionLabels[panel.action]}
         />
@@ -1917,7 +2011,7 @@ const MobileSelectionAiPanel = ({
           <MobileAiPickerField
             disabled={panel.generating}
             expanded={picker === "language"}
-            label={english ? "Target language" : "目标语言"}
+            label={getMobileEditorCopy(locale).ai.targetLanguage}
             onOpen={() => setPicker("language")}
             value={languageLabels[panel.targetLanguage]}
           />
@@ -1926,34 +2020,34 @@ const MobileSelectionAiPanel = ({
           <MobileAiPickerField
             disabled={panel.generating}
             expanded={picker === "tone"}
-            label={english ? "Tone" : "语气"}
+            label={getMobileEditorCopy(locale).ai.tone}
             onOpen={() => setPicker("tone")}
             value={toneLabels[panel.tone]}
           />
         ) : null}
         {!panel.promptId && panel.action === "custom" ? (
           <label>
-            <span>{english ? "Tell AI what to do" : "告诉 AI 你想怎么处理"}</span>
+            <span>{getMobileEditorCopy(locale).ai.instruction}</span>
             <textarea
               disabled={panel.generating}
               maxLength={2000}
               onChange={(event) => update({ customInstruction: event.target.value })}
-              placeholder={english ? "For example: Rewrite this as a concise email." : "例如：改写成一封简洁的邮件。"}
+              placeholder={getMobileEditorCopy(locale).ai.instructionPlaceholder}
               rows={3}
               value={panel.customInstruction}
             />
           </label>
         ) : null}
         <div className="edgeever-ai-result-heading">
-          <span>{english ? "AI draft" : "AI 草稿"}</span>
-          {panel.generating ? <small>{english ? "Generating…" : "生成中…"}</small> : null}
+          <span>{getMobileEditorCopy(locale).ai.draft}</span>
+          {panel.generating ? <small>{getMobileEditorCopy(locale).ai.generating}</small> : null}
         </div>
         <div aria-live="polite" className="edgeever-ai-result">
-          {panel.output || <span>{english ? "The generated draft will appear here." : "生成的草稿会显示在这里。"}</span>}
+          {panel.output || <span>{getMobileEditorCopy(locale).ai.draftPlaceholder}</span>}
         </div>
         {panel.output && !panel.generating ? (
           <label>
-            <span>{english ? "Refine result" : "继续调整"}</span>
+            <span>{getMobileEditorCopy(locale).ai.refineResult}</span>
             <div className="edgeever-ai-refine-row">
               <input
                 maxLength={2000}
@@ -1964,31 +2058,49 @@ const MobileSelectionAiPanel = ({
                     onRefine(panel.refineInstruction);
                   }
                 }}
-                placeholder={english ? "Make it more concise" : "例如：再简洁一点"}
+                placeholder={getMobileEditorCopy(locale).ai.refinePlaceholder}
                 value={panel.refineInstruction}
               />
               <button disabled={!panel.refineInstruction.trim()} onClick={() => onRefine(panel.refineInstruction)} type="button">
-                {english ? "Refine" : "调整"}
+                {getMobileEditorCopy(locale).ai.refine}
               </button>
             </div>
           </label>
+        ) : null}
+        {panel.generating && panel.progress ? (
+          <p aria-live="polite" className="edgeever-ai-progress">
+            {getMobileEditorCopy(locale).ai.progressPart
+              .replace("{{part}}", String(panel.progress.part))
+              .replace("{{parts}}", String(panel.progress.parts))}
+          </p>
+        ) : null}
+        {panel.incomplete && panel.output && !panel.generating ? (
+          <p className="edgeever-ai-error" role="alert">
+            {panel.incomplete === "truncated" && panel.incompleteParts?.length
+              ? getMobileEditorCopy(locale).ai.incompleteParts.replace("{{parts}}", formatAiPartList(panel.incompleteParts, locale))
+              : panel.incomplete === "truncated"
+              ? getMobileEditorCopy(locale).ai.incompleteTruncated
+              : panel.incomplete === "stopped"
+                ? getMobileEditorCopy(locale).ai.incompleteStopped
+                : getMobileEditorCopy(locale).ai.incompleteInterrupted}
+          </p>
         ) : null}
         {panel.error ? <p className="edgeever-ai-error" role="alert">{panel.error}</p> : null}
       </div>
       <footer className="edgeever-ai-panel-footer">
         <div>
           <button disabled={appendDisabled} onClick={() => onApply("append")} type="button">
-            {english ? "Insert after" : "插入到选区后"}
+            {getMobileEditorCopy(locale).ai.insertAfter}
           </button>
           <button disabled={replaceDisabled} onClick={() => onApply("replace")} type="button">
-            {english ? "Replace selection" : "替换选中内容"}
+            {getMobileEditorCopy(locale).ai.replaceSelection}
           </button>
         </div>
         {panel.generating ? (
-          <button className="is-primary" onClick={onStop} type="button">{english ? "Stop" : "停止"}</button>
+          <button className="is-primary" onClick={onStop} type="button">{getMobileEditorCopy(locale).ai.stop}</button>
         ) : (
           <button className="is-primary" disabled={generateDisabled} onClick={onGenerate} type="button">
-            {panel.output ? (english ? "Regenerate" : "重新生成") : (english ? "Generate" : "生成")}
+            {panel.output ? getMobileEditorCopy(locale).ai.regenerate : getMobileEditorCopy(locale).ai.generate}
           </button>
         )}
       </footer>
@@ -2004,7 +2116,7 @@ const MobileSelectionAiPanel = ({
             <div aria-hidden="true" className="edgeever-ai-picker-handle" />
             <header className="edgeever-ai-picker-header">
               <strong>{pickerTitle}</strong>
-              <button aria-label={english ? "Close" : "关闭"} onClick={() => setPicker(null)} type="button">×</button>
+              <button aria-label={getMobileEditorCopy(locale).close} onClick={() => setPicker(null)} type="button">×</button>
             </header>
             <div aria-label={pickerTitle} className="edgeever-ai-picker-options" role="radiogroup">
               {pickerOptions.map((option) => (
@@ -2066,6 +2178,20 @@ const EditorIcon = ({ children, size, strokeWidth }: { children: ReactNode; size
 
 // Keep the same Lucide paths as the PWA toolbar without pulling the full icon
 // barrel into the standalone DOM bundle (which adds roughly 1.8 MB in Metro).
+const UndoIcon = () => (
+  <EditorIcon size={18} strokeWidth={2}>
+    <path d="M9 14 4 9l5-5" />
+    <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
+  </EditorIcon>
+);
+
+const RedoIcon = () => (
+  <EditorIcon size={18} strokeWidth={2}>
+    <path d="m15 14 5-5-5-5" />
+    <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13" />
+  </EditorIcon>
+);
+
 const ImagePlusIcon = () => (
   <EditorIcon size={18} strokeWidth={2}>
     <path d="M16 5h6" />
@@ -2186,6 +2312,7 @@ const applyImageWidth = (
   const width = parseImageWidth(attributes.width) ?? NEW_IMAGE_WIDTH_PERCENT;
   element.style.width = `${width}%`;
   element.dataset.width = String(width);
+  applyImageAlignment(element, attributes.alignment);
   return width;
 };
 
@@ -2225,8 +2352,29 @@ const loadMermaid = () => {
   return mermaidRuntime;
 };
 
+let mermaidRenderQueue: Promise<unknown> = Promise.resolve();
+
+const renderMobileMermaid = (source: string, theme: "light" | "dark", htmlLabels = true) => {
+  // Mermaid shares its configuration across renders, including different themes.
+  const result = mermaidRenderQueue.then(async () => {
+    const mermaid = await loadMermaid();
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: "base",
+      themeVariables: getMobileMermaidThemeVariables(theme),
+      htmlLabels,
+      flowchart: { nodeSpacing: 25, rankSpacing: 30, subGraphTitleMargin: { bottom: 12 } },
+    });
+    return mermaid.render(`edgeever-mobile-mermaid-${++mermaidRenderSequence}`, source);
+  });
+  mermaidRenderQueue = result.catch(() => undefined);
+  return result;
+};
+
 const createMobileCodeBlockExtension = (
-  locale: "zh-CN" | "en-US" | "ja",
+  locale: MobileEditorLocale,
   theme: "light" | "dark",
   hideCopyForVisualDiagram = false,
 ) => CodeBlock.extend({
@@ -2254,12 +2402,12 @@ const createMobileCodeBlockExtension = (
       message.className = "edgeever-mermaid-message";
       svgContainer.className = "edgeever-mermaid-svg";
       svgContainer.setAttribute("role", "img");
-      svgContainer.setAttribute("aria-label", locale !== "zh-CN" ? "Mermaid diagram preview" : "Mermaid 图表预览");
+      svgContainer.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.mermaidPreview);
       copyButton.type = "button";
       copyButton.className = "edgeever-code-copy-button";
       copyButton.contentEditable = "false";
-      copyButton.setAttribute("aria-label", locale !== "zh-CN" ? "Copy code" : "复制代码");
-      copyButton.textContent = locale !== "zh-CN" ? "Copy code" : "复制代码";
+      copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copy);
+      copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copy;
       copyButton.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2268,21 +2416,21 @@ const createMobileCodeBlockExtension = (
         event.preventDefault();
         event.stopPropagation();
         void Clipboard.setStringAsync(currentNode.textContent).then(() => {
-          copyButton.textContent = locale !== "zh-CN" ? "Copied" : "已复制";
-          copyButton.setAttribute("aria-label", locale !== "zh-CN" ? "Copied" : "已复制");
+          copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copied;
+          copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copied);
           if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
           copyResetTimer = window.setTimeout(() => {
-            copyButton.textContent = locale !== "zh-CN" ? "Copy code" : "复制代码";
-            copyButton.setAttribute("aria-label", locale !== "zh-CN" ? "Copy code" : "复制代码");
+            copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copy;
+            copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copy);
             copyResetTimer = null;
           }, 1800);
         }).catch(() => {
-          copyButton.textContent = locale !== "zh-CN" ? "Copy failed" : "复制失败";
-          copyButton.setAttribute("aria-label", locale !== "zh-CN" ? "Copy failed" : "复制失败");
+          copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copyFailed;
+          copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copyFailed);
           if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
           copyResetTimer = window.setTimeout(() => {
-            copyButton.textContent = locale !== "zh-CN" ? "Copy code" : "复制代码";
-            copyButton.setAttribute("aria-label", locale !== "zh-CN" ? "Copy code" : "复制代码");
+            copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copy;
+            copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copy);
             copyResetTimer = null;
           }, 1800);
         });
@@ -2312,8 +2460,8 @@ const createMobileCodeBlockExtension = (
         wrapper.dataset.language = language;
         preview.hidden = !isMermaid;
         code.setAttribute("aria-label", isMermaid
-          ? (locale !== "zh-CN" ? "Mermaid source" : "Mermaid 源码")
-          : (locale !== "zh-CN" ? "Code source" : "代码源码"));
+          ? getMobileEditorCopy(locale).codeBlock.mermaidSource
+          : getMobileEditorCopy(locale).codeBlock.codeSource);
         if (!isMermaid) {
           preview.replaceChildren();
           return;
@@ -2322,7 +2470,7 @@ const createMobileCodeBlockExtension = (
         const source = currentNode.textContent.trim();
         if (!source) {
           message.className = "edgeever-mermaid-message";
-          message.textContent = locale !== "zh-CN" ? "Enter Mermaid source below." : "请在下方输入 Mermaid 源码。";
+          message.textContent = getMobileEditorCopy(locale).codeBlock.mermaidEmpty;
           preview.replaceChildren(message);
           return;
         }
@@ -2330,33 +2478,21 @@ const createMobileCodeBlockExtension = (
         const activeRequest = renderRequest;
         renderTimer = window.setTimeout(() => {
           message.className = "edgeever-mermaid-message";
-          message.textContent = locale !== "zh-CN" ? "Rendering diagram…" : "正在渲染图表…";
+          message.textContent = getMobileEditorCopy(locale).codeBlock.rendering;
           preview.replaceChildren(message);
-          void loadMermaid()
-            .then(async (mermaid) => {
-              const beautifulSvg = await renderWithBeautifulMermaid(source, theme);
-              if (beautifulSvg) {
-                return { svg: beautifulSvg };
-              }
-              mermaid.initialize({
-                startOnLoad: false,
-                securityLevel: "strict",
-                suppressErrorRendering: true,
-                theme: "base",
-                themeVariables: getMobileMermaidThemeVariables(theme),
-              });
-              const valid = await mermaid.parse(source, { suppressErrors: true });
-              if (!valid) {
-                throw new Error("Invalid Mermaid diagram");
-              }
-              mermaidRenderSequence += 1;
-              return mermaid.render(`edgeever-mobile-editor-mermaid-${mermaidRenderSequence}`, source);
-            })
+          void renderMobileMermaid(source, theme)
             .then(({ svg }) => {
               if (activeRequest !== renderRequest) {
                 return;
               }
               svgContainer.innerHTML = svg;
+              const renderedSvg = svgContainer.querySelector("svg");
+              const viewBox = renderedSvg?.viewBox.baseVal;
+              if (renderedSvg && viewBox && viewBox.width > 0 && viewBox.height > 0) {
+                renderedSvg.style.width = `${Math.ceil(viewBox.width)}px`;
+                renderedSvg.style.height = `${Math.ceil(viewBox.height)}px`;
+                renderedSvg.style.maxWidth = "none";
+              }
               preview.replaceChildren(svgContainer);
             })
             .catch(() => {
@@ -2364,9 +2500,7 @@ const createMobileCodeBlockExtension = (
                 return;
               }
               message.className = "edgeever-mermaid-error";
-              message.textContent = locale !== "zh-CN"
-                ? "Unable to render this diagram. Check its syntax."
-                : "无法渲染此图表，请检查语法。";
+              message.textContent = getMobileEditorCopy(locale).codeBlock.renderFailed;
               preview.replaceChildren(message);
             });
         }, 300);
@@ -2394,7 +2528,7 @@ const createMobileCodeBlockExtension = (
 });
 
 const createMobileImageSizeControls = (
-  locale: "zh-CN" | "en-US" | "ja",
+  locale: MobileEditorLocale,
   updateWidth: (width: number) => void
 ) => {
   const controls = document.createElement("div");
@@ -2446,7 +2580,7 @@ const createMobileImageSizeControls = (
 
 const createProtectedImageExtension = (
   baseUrl: string,
-  locale: "zh-CN" | "en-US" | "ja",
+  locale: MobileEditorLocale,
   loadResource: (source: string) => Promise<string | null>,
   options?: {
     readOnly?: boolean | (() => boolean);
@@ -2507,10 +2641,7 @@ const createProtectedImageExtension = (
         if (!options?.onImagePreview) return false;
         const source = figure.dataset.resourceHref ?? "";
         if (!source) return false;
-        void options.onImagePreview(JSON.stringify({
-          alt: figure.dataset.resourceFilename || "",
-          source,
-        }));
+        void options.onImagePreview(buildMobileImagePreviewPayload(figure));
         return true;
       };
 
@@ -2551,7 +2682,7 @@ const createProtectedImageExtension = (
         const spinner = document.createElement("span");
         spinner.className = "edgeever-image-upload-spinner";
         spinner.setAttribute("aria-hidden", "true");
-        overlay.append(spinner, locale !== "zh-CN" ? "Uploading image…" : "图片上传中…");
+        overlay.append(spinner, getMobileEditorCopy(locale).image.uploading);
         if (previewSource) {
           placeholder.append(preview);
         }
@@ -2606,7 +2737,7 @@ const createProtectedImageExtension = (
             if (activeRequestId !== requestId) {
               return;
             }
-            overlay.textContent = locale !== "zh-CN" ? "Image failed to load" : "图片加载失败";
+            overlay.textContent = getMobileEditorCopy(locale).image.loadFailed;
           };
           preload.src = displaySource;
         };
@@ -2631,11 +2762,11 @@ const createProtectedImageExtension = (
                 revealLoadedImage(dataUrl, attributes, activeRequestId);
                 return;
               }
-              overlay.textContent = locale !== "zh-CN" ? "Image failed to load" : "图片加载失败";
+              overlay.textContent = getMobileEditorCopy(locale).image.loadFailed;
             })
             .catch(() => {
               if (activeRequestId === requestId) {
-                overlay.textContent = locale !== "zh-CN" ? "Image failed to load" : "图片加载失败";
+                overlay.textContent = getMobileEditorCopy(locale).image.loadFailed;
               }
             });
         };
@@ -2699,7 +2830,7 @@ const createProtectedImageExtension = (
       actionButton.className = "edgeever-image-actions";
       actionButton.contentEditable = "false";
       actionButton.hidden = true;
-      actionButton.setAttribute("aria-label", locale !== "zh-CN" ? "Image actions" : "图片操作");
+      actionButton.setAttribute("aria-label", getMobileEditorCopy(locale).image.actions);
       actionButton.textContent = "⋯";
       bindImageActionButton(wrapper, actionButton);
       image.addEventListener("click", (event) => {
@@ -2735,7 +2866,7 @@ const createProtectedImageExtension = (
           loading.replaceChildren();
           const label = document.createElement("span");
           label.className = "edgeever-image-loading-label";
-          label.textContent = locale !== "zh-CN" ? "Image failed to load" : "图片加载失败";
+          label.textContent = getMobileEditorCopy(locale).image.loadFailed;
           loading.append(label);
           loading.hidden = false;
         } else if (phase === "loading") {
@@ -2967,14 +3098,14 @@ const removeImageUploadPlaceholder = (editor: TiptapEditor, source: string) => {
 
 const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }) => {
   const bodyFontSize = MEMO_CONTENT_STYLE.body.fontSize;
-  const bodyLineHeight = MEMO_CONTENT_STYLE.body.lineHeight / MEMO_CONTENT_STYLE.body.fontSize;
-  const paragraphSpacing = MEMO_CONTENT_STYLE.body.paragraphSpacing;
+  const bodyLineHeight = 24 / bodyFontSize;
+  const paragraphSpacing = 6;
   return `
   :root {
     color-scheme: ${theme};
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-feature-settings: "chws" 1;
-    /* Match PC/Web memo body (MEMO_CONTENT_STYLE) so notes don't feel oversized on phone. */
+    /* Keep the shared body font size while using tighter spacing on mobile. */
     --editor-body-font-size: ${bodyFontSize}px;
     --editor-body-line-height: ${bodyLineHeight};
     --editor-paragraph-spacing: ${paragraphSpacing}px;
@@ -3073,6 +3204,7 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-ai-refine-row input { min-width: 0; flex: 1; }
   .edgeever-ai-refine-row button, .edgeever-ai-panel-footer button { min-height: 40px; padding: 0 12px; border: 1px solid ${theme === "dark" ? "#475569" : "#cbd5e1"}; border-radius: 9px; background: ${theme === "dark" ? "#111c18" : "#fff"}; color: ${theme === "dark" ? "#f8fafc" : "#0f172a"}; font-weight: 700; }
   .edgeever-ai-panel button:disabled { opacity: 0.42; }
+  .edgeever-ai-progress { margin: 0; color: ${theme === "dark" ? "#a1a1aa" : "#52525b"}; font-size: 13px; line-height: 1.45; }
   .edgeever-ai-error { margin: 0; color: ${theme === "dark" ? "#fda4af" : "#be123c"}; font-size: 13px; line-height: 1.45; }
   .edgeever-ai-panel-footer { display: grid; flex: 0 0 auto; gap: 9px; padding: 10px 12px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid ${theme === "dark" ? "#334155" : "#e2e8f0"}; background: ${theme === "dark" ? "#111c18" : "#fff"}; }
   .edgeever-ai-panel-footer > div { display: flex; gap: 8px; }
@@ -3135,24 +3267,24 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-editor-content ul[data-type="taskList"] li[data-checked] > div > p { margin-bottom: 0; }
   .edgeever-editor-content ul[data-type="taskList"] li[data-checked="true"] > div > p { color: #94a3b8; text-decoration: line-through; }
   .edgeever-editor-content ul[data-type="taskList"] ul[data-type="taskList"] { margin: 4px 0 0; padding-left: 24px; }
-  .edgeever-editor-content blockquote { margin-left: 0; max-width: 100%; padding: 6px 12px; border-left: 3px solid #16a06e; border-radius: 1px 4px 4px 1px; background: ${theme === "dark" ? "rgba(22, 160, 110, 0.08)" : "rgba(22, 160, 110, 0.04)"}; color: ${theme === "dark" ? "#cbd5e1" : "#334155"}; }
+  .edgeever-editor-content blockquote { margin-left: 0; margin-right: 0; max-width: 100%; padding: 6px 12px; border-left: 3px solid ${theme === "dark" ? "#475569" : "#cbd5e1"}; border-radius: 1px 4px 4px 1px; background: ${theme === "dark" ? "rgba(255, 255, 255, 0.05)" : "#f3f5f7"}; color: ${theme === "dark" ? "#f8fafc" : "#3d4450"}; }
   .edgeever-editor-content pre { max-width: 100%; overflow-x: auto; border-radius: 8px; border: 1px solid ${theme === "dark" ? "#334155" : "#e2e8f0"}; padding: 12px 90px 12px 14px; background: ${theme === "dark" ? "#1e293b" : "#f8fafc"}; color: ${theme === "dark" ? "#e2e8f0" : "#0f172a"}; font-size: 0.88rem; box-shadow: 0 1px 2px ${theme === "dark" ? "rgba(0, 0, 0, 0.2)" : "rgba(15, 23, 42, 0.03)"}; }
-  .edgeever-editor-content code { border-radius: 4px; padding: 2px 5px; border: 1px solid ${theme === "dark" ? "rgba(22, 160, 110, 0.28)" : "#d4ebdc"}; background: ${theme === "dark" ? "rgba(22, 160, 110, 0.12)" : "#f2f9f5"}; color: ${theme === "dark" ? "#6ee7b7" : "#0d5f3a"}; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; font-weight: 550; }
+  .edgeever-editor-content code { border-radius: 4px; padding: 2px 5px; border: 1px solid ${theme === "dark" ? "rgba(255, 255, 255, 0.12)" : "#e1e5ea"}; background: ${theme === "dark" ? "rgba(255, 255, 255, 0.06)" : "#f3f5f7"}; color: ${theme === "dark" ? "#f8fafc" : "#3d4450"}; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; font-weight: 400; }
   .edgeever-editor-content pre code { padding: 0; border: 0; background: transparent; font-size: inherit; font-weight: normal; color: inherit; }
   .edgeever-editor-content .tiptap-mathematics-render[data-type="block-math"] { max-width: 100%; margin: 16px 0; overflow-x: auto; overflow-y: hidden; padding: 4px 0; text-align: center; -webkit-overflow-scrolling: touch; }
   .edgeever-editor-content .inline-math-error, .edgeever-editor-content .block-math-error { color: ${theme === "dark" ? "#fda4af" : "#be123c"}; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   /* External hyperlinks (match Web default ProseMirror). Attachment chips override below. */
   .edgeever-editor-content a {
-    color: ${theme === "dark" ? "#86efac" : "#00751f"};
+    color: ${theme === "dark" ? "#cad4ce" : "#404040"};
     font-weight: 500;
     text-decoration: underline;
-    text-decoration-color: ${theme === "dark" ? "rgba(134, 239, 172, 0.45)" : "rgba(0, 117, 31, 0.45)"};
+    text-decoration-color: ${theme === "dark" ? "rgba(202, 212, 206, 0.45)" : "rgba(64, 64, 64, 0.45)"};
     text-underline-offset: 2px;
     cursor: pointer;
   }
   .edgeever-editor-content a:active {
-    color: ${theme === "dark" ? "#4ade80" : "#00a82d"};
-    text-decoration-color: ${theme === "dark" ? "#4ade80" : "#00a82d"};
+    color: ${theme === "dark" ? "#eef3f0" : "#0a0a0a"};
+    text-decoration-color: ${theme === "dark" ? "#eef3f0" : "#0a0a0a"};
   }
   /* Compact attachment chips: still ≥48px touch height, less vertical bulk than 58px. */
   .edgeever-editor-content a.edgeever-attachment-link, .edgeever-editor-content a[href*="/api/v1/resources/"] {
@@ -3199,6 +3331,21 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-editor-content a.edgeever-attachment-kind-archive::before { background: ${theme === "dark" ? "#713f12" : "#fffbeb"}; color: ${theme === "dark" ? "#fde68a" : "#d97706"}; content: "ZIP"; }
   .edgeever-editor-content a.edgeever-attachment-kind-code::before { background: ${theme === "dark" ? "#581c87" : "#faf5ff"}; color: ${theme === "dark" ? "#d8b4fe" : "#8b5cf6"}; content: "</>"; }
   .edgeever-editor-content a.edgeever-attachment-kind-text::before { background: ${theme === "dark" ? "#334155" : "#f1f5f9"}; color: ${theme === "dark" ? "#cbd5e1" : "#64748b"}; content: "TXT"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-apk::before { background: ${theme === "dark" ? "#064e3b" : "#ecfdf5"}; color: ${theme === "dark" ? "#6ee7b7" : "#059669"}; content: "APK"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-exe::before { background: ${theme === "dark" ? "#0c4a6e" : "#f0f9ff"}; color: ${theme === "dark" ? "#7dd3fc" : "#0284c7"}; content: "EXE"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-dmg::before { background: ${theme === "dark" ? "#4c1d95" : "#f5f3ff"}; color: ${theme === "dark" ? "#c4b5fd" : "#7c3aed"}; content: "DMG"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-linux::before { background: ${theme === "dark" ? "#7c2d12" : "#fff7ed"}; color: ${theme === "dark" ? "#fdba74" : "#ea580c"}; content: "LINUX"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-executable::before { background: ${theme === "dark" ? "#134e4a" : "#ccfbf1"}; color: ${theme === "dark" ? "#5eead4" : "#0d9488"}; content: "BIN"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-book::before { background: ${theme === "dark" ? "#78350f" : "#fef3c7"}; color: ${theme === "dark" ? "#fcd34d" : "#b45309"}; content: "BOOK"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-font::before { background: ${theme === "dark" ? "#312e81" : "#e0e7ff"}; color: ${theme === "dark" ? "#a5b4fc" : "#4f46e5"}; content: "FONT"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-diskimage::before { background: ${theme === "dark" ? "#164e63" : "#cffafe"}; color: ${theme === "dark" ? "#67e8f9" : "#0891b2"}; content: "ISO"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-database::before { background: ${theme === "dark" ? "#701a75" : "#fae8ff"}; color: ${theme === "dark" ? "#f0abfc" : "#c026d3"}; content: "DB"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-design::before { background: ${theme === "dark" ? "#831843" : "#fdf2f8"}; color: ${theme === "dark" ? "#f472b6" : "#db2777"}; content: "DESIGN"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-model3d::before { background: ${theme === "dark" ? "#1e3a8a" : "#eff6ff"}; color: ${theme === "dark" ? "#93c5fd" : "#2563eb"}; content: "3D"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-script::before { background: ${theme === "dark" ? "#064e3b" : "#ecfdf5"}; color: ${theme === "dark" ? "#6ee7b7" : "#059669"}; content: "SHELL"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-log::before { background: ${theme === "dark" ? "#27272a" : "#f4f4f5"}; color: ${theme === "dark" ? "#a1a1aa" : "#71717a"}; content: "LOG"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-certificate::before { background: ${theme === "dark" ? "#713f12" : "#fefce8"}; color: ${theme === "dark" ? "#fde047" : "#ca8a04"}; content: "KEY"; }
+  .edgeever-editor-content a.edgeever-attachment-kind-diagram::before { background: ${theme === "dark" ? "#134e4a" : "#f0fdfa"}; color: ${theme === "dark" ? "#5eead4" : "#0d9488"}; content: "DIAG"; }
   .edgeever-editor-content .edgeever-unsupported-content {
     border: 1px dashed ${theme === "dark" ? "#64748b" : "#94a3b8"};
     border-radius: 8px;
@@ -3231,10 +3378,10 @@ const getEditorStyles = (theme: "light" | "dark", options?: { viewer?: boolean }
   .edgeever-x6-diagram .x6-node { cursor: pointer; }
   .edgeever-mermaid-code-block > pre { display: none; margin: 8px 0 0; }
   .edgeever-mermaid-code-block.is-source-visible > pre { display: block; }
-  .edgeever-mermaid-preview { display: flex; min-height: 104px; align-items: center; justify-content: center; overflow-x: auto; padding: 16px 4px; background: transparent; }
+  .edgeever-mermaid-preview { display: flex; min-height: 72px; align-items: center; justify-content: flex-start; overflow-x: auto; padding: 8px 4px; background: transparent; }
   .edgeever-mermaid-preview[hidden] { display: none; }
-  .edgeever-mermaid-svg { width: 100%; text-align: center; }
-  .edgeever-mermaid-svg svg { display: block; width: auto; max-width: 100%; height: auto; max-height: 440px; margin: auto; }
+  .edgeever-mermaid-svg { display: flex; width: max-content; min-width: 100%; flex: none; justify-content: center; }
+  .edgeever-mermaid-svg svg { display: block; max-width: none; max-height: none; flex: none; }
   .edgeever-mermaid-message, .edgeever-mermaid-error { margin: 0; font-size: 14px; line-height: 1.5; text-align: center; }
   .edgeever-mermaid-message { color: ${theme === "dark" ? "#94a3b8" : "#64748b"}; }
   .edgeever-mermaid-error { color: ${theme === "dark" ? "#fda4af" : "#be123c"}; }

@@ -6,7 +6,10 @@ describe("companion locale", () => {
     expect(companionLocale("zh-CN")).toBe("zh-CN");
     expect(companionLocale("zh-TW")).toBe("zh-CN");
     expect(companionLocale("ja-JP")).toBe("ja");
+    expect(companionLocale("pl-PL")).toBe("pl");
     expect(companionLocale("en-GB")).toBe("en-US");
     expect(companionLocale()).toBe("en-US");
+    // Older servers reject "ru"; Russian messages are still answered in Russian.
+    expect(companionLocale("ru-RU")).toBe("en-US");
   });
 });

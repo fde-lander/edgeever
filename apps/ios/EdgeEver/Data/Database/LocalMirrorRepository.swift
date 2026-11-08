@@ -70,6 +70,12 @@ final class LocalMirrorRepository: @unchecked Sendable {
         }
     }
 
+    func saveNotebook(scope: String, notebook: Notebook) throws {
+        try dbQueue.write { db in
+            try upsertNotebook(db, scope: scope, notebook: notebook)
+        }
+    }
+
     func listTags(scope: String) throws -> [TagSummary] {
         try dbQueue.read { db in
             let rows = try Row.fetchAll(
@@ -127,6 +133,7 @@ final class LocalMirrorRepository: @unchecked Sendable {
                 switch params.sort {
                 case .createdDesc: orderBy = "is_pinned DESC, created_at DESC, id DESC"
                 case .titleAsc: orderBy = "is_pinned DESC, title COLLATE NOCASE ASC, updated_at DESC, id DESC"
+                case .titleDesc: orderBy = "is_pinned DESC, title COLLATE NOCASE DESC, updated_at DESC, id DESC"
                 case .updatedDesc: orderBy = "is_pinned DESC, updated_at DESC, id DESC"
                 }
             }

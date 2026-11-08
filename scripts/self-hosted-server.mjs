@@ -4,7 +4,11 @@ import { dirname, extname, join, normalize, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url";
 import { hasBootstrapCredential } from "../apps/api/src/auth-bootstrap.ts";
 import { isUnauthenticatedAccessEnabled } from "../apps/api/src/auth-state.ts";
+import { isEdgeEverAppPath } from "../apps/api/src/app-paths.ts";
 import { fetchEdgeEverApp } from "../apps/api/src/index.ts";
+import { isNotebookSitePagePath, renderNotebookSitePage } from "../apps/api/src/notebook-site-page.ts";
+import { isPublicMemoSharePagePath, renderPublicMemoSharePage } from "../apps/api/src/share-page.ts";
+import { isPublicPagePath, PUBLIC_PAGE_HEADERS } from "../packages/shared/src/public-page-headers.ts";
 import { nodePublicFetch } from "../apps/api/src/node-public-network.ts";
 import { createSelfHostedStorageAdapter } from "../apps/api/src/self-hosted-storage-adapter.ts";
 import { resolveSelfHostedConfig } from "./self-hosted-config.mjs";
@@ -86,6 +90,9 @@ const env = {
   EDGE_EVER_CONTAINER_IMAGE: runtimeEnvironment.EDGE_EVER_CONTAINER_IMAGE,
   EDGE_EVER_DEPLOYMENT_TRIGGER: runtimeEnvironment.EDGE_EVER_DEPLOYMENT_TRIGGER,
   EDGE_EVER_DEPLOYMENT_METHOD: runtimeEnvironment.EDGE_EVER_DEPLOYMENT_METHOD,
+  EDGE_EVER_BUILD_CREATED_AT: runtimeEnvironment.EDGE_EVER_BUILD_CREATED_AT,
+  EDGE_EVER_BUILD_TRIGGER: runtimeEnvironment.EDGE_EVER_BUILD_TRIGGER,
+  EDGE_EVER_BUILD_METHOD: runtimeEnvironment.EDGE_EVER_BUILD_METHOD,
   EDGE_EVER_AUTH_PASSWORD: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD,
   EDGE_EVER_AUTH_PASSWORD_HASH: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD_HASH,
   EDGE_EVER_AUTH_PASSWORD_FALLBACK: runtimeEnvironment.EDGE_EVER_AUTH_PASSWORD_FALLBACK,
@@ -101,6 +108,7 @@ const env = {
   EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY_PREVIOUS: runtimeEnvironment.EDGE_EVER_CREDENTIALS_ENCRYPTION_KEY_PREVIOUS,
   EDGE_EVER_DEMO_MODE: runtimeEnvironment.EDGE_EVER_DEMO_MODE,
   EDGE_EVER_ALLOW_UNAUTHENTICATED: runtimeEnvironment.EDGE_EVER_ALLOW_UNAUTHENTICATED,
+  EDGE_EVER_COMMUNITY_REGISTRY_URL: runtimeEnvironment.EDGE_EVER_COMMUNITY_REGISTRY_URL,
 };
 
 const executionContext = {
@@ -112,6 +120,7 @@ const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",
@@ -138,7 +147,13 @@ const serveStatic = async (request) => {
 
   const index = Bun.file(join(webDirectory, "index.html"));
   return (await index.exists())
-    ? new Response(index, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+    ? new Response(index, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          // Share and form links render the app shell; keep them out of search indexes and caches.
+          ...(isPublicPagePath(url.pathname) ? PUBLIC_PAGE_HEADERS : {}),
+        },
+      })
     : new Response("Web build not found. Run bun run build:web first.", { status: 503 });
 };
 
@@ -150,7 +165,15 @@ const server = Bun.serve({
   idleTimeout: config.idleTimeout,
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
-    if (pathname.startsWith("/api/") || pathname === "/mcp" || pathname.startsWith("/mcp/")) {
+    const loadAppShell = () => serveStatic(new Request(new URL("/index.html", request.url)));
+    if (isNotebookSitePagePath(pathname)) {
+      return renderNotebookSitePage(request, storage.db, loadAppShell);
+    }
+    if (isPublicMemoSharePagePath(pathname)) {
+      const page = await renderPublicMemoSharePage(request, storage.db, loadAppShell);
+      if (page) return page;
+    }
+    if (isEdgeEverAppPath(pathname)) {
       return fetchEdgeEverApp(request, env, executionContext);
     }
     return serveStatic(request);

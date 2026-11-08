@@ -1,3 +1,5 @@
+import { matchSupportedLocale, type SupportedLocale } from "./i18n/locales";
+
 export const AI_ACTIONS = [
   "summarize",
   "extract-key-points",
@@ -19,7 +21,7 @@ export type AiAction = (typeof AI_ACTIONS)[number];
 export const AI_TONES = ["professional", "friendly", "casual", "direct"] as const;
 export type AiTone = (typeof AI_TONES)[number];
 
-export const AI_TARGET_LANGUAGES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "fr", "de", "pt"] as const;
+export const AI_TARGET_LANGUAGES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "fr", "de", "pt", "pl"] as const;
 export type AiTargetLanguage = (typeof AI_TARGET_LANGUAGES)[number];
 
 export const AI_ATTACHMENT_MEDIA_TYPES = [
@@ -106,11 +108,21 @@ export const resolveAiAssistantOpenAction = ({
   prompts,
 });
 
+const DEFAULT_AI_TARGET_LANGUAGE_BY_UI_LOCALE: Record<SupportedLocale, AiTargetLanguage> = {
+  "zh-CN": "en",
+  "zh-TW": "en",
+  "en-US": "zh-CN",
+  ja: "ja",
+  pl: "en",
+  ru: "en",
+  es: "en",
+  de: "en",
+  fr: "en",
+};
+
 export const getDefaultAiTargetLanguage = (locale: string | undefined): AiTargetLanguage => {
-  const normalized = locale?.toLowerCase() ?? "";
-  if (normalized.startsWith("zh")) return "en";
-  if (normalized.startsWith("ja")) return "ja";
-  return "zh-CN";
+  const uiLocale = matchSupportedLocale(locale);
+  return uiLocale ? DEFAULT_AI_TARGET_LANGUAGE_BY_UI_LOCALE[uiLocale] : "zh-CN";
 };
 
 export const AI_ASSISTANT_LAST_ACTION_STORAGE_KEY = "edgeever.aiAssistant.lastAction";

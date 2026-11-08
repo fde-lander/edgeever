@@ -55,6 +55,7 @@ PREBUILD_FINGERPRINT="$({
     apps/mobile/app.json \
     apps/mobile/assets/adaptive-icon-transparent.svg \
     apps/web/public/pwa-512x512.png \
+    patches/expo-sharing@57.0.22.patch \
     bun.lock
 } | shasum | awk '{print $1}')"
 PREBUILD_STAMP="$ANDROID_DIR/.edgeever-prebuild-fingerprint"
@@ -81,6 +82,15 @@ COMMON_ARGS=(
 : "${ANDROID_KEYSTORE_PASSWORD:?请设置 ANDROID_KEYSTORE_PASSWORD}"
 : "${ANDROID_KEY_ALIAS:?请设置 ANDROID_KEY_ALIAS}"
 : "${ANDROID_KEY_PASSWORD:?请设置 ANDROID_KEY_PASSWORD}"
+
+# Expo's DOM exporter writes current files without pruning old files. React Native's
+# Gradle inputs also omit workspace packages. Rebuild only the generated JS/DOM
+# assets from an empty directory; native compilation keeps its existing caches.
+rm -rf "$ANDROID_DIR/app/build/generated/assets/react/release" \
+  "$ANDROID_DIR/app/build/generated/res/react/release"
+run_timed "刷新生产 JavaScript 与 DOM 资源" ./gradlew \
+  :app:createBundleReleaseJsAndAssets --rerun --no-build-cache "${COMMON_ARGS[@]:1}"
+
 
 PLAY_ARCHS="${EDGE_EVER_ANDROID_PLAY_ARCHS:-arm64-v8a}"
 APK_ARCHS="${EDGE_EVER_ANDROID_APK_ARCHS:-arm64-v8a}"

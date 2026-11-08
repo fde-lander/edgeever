@@ -143,7 +143,7 @@ jobs:
       }}
     name: Deliver Google Play
     runs-on: [self-hosted, macOS, ARM64, edgeever-mobile]
-    timeout-minutes: 60
+    timeout-minutes: 120
     environment: ${{ inputs.android_track == 'production' && 'store-production' || 'store-delivery' }}
     env:
       ANDROID_HOME: /opt/homebrew/share/android-commandlinetools
@@ -170,9 +170,22 @@ jobs:
       - name: Install dependencies
         if: ${{ !inputs.recover_play_apk }}
         run: |
+          set -o pipefail
+          cache_key="$(
+            {
+              printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+              bun --version
+              shasum -a 256 bun.lock patches/*.patch
+            } | shasum -a 256 | awk '{print $1}'
+          )"
+          store_cache="$RUNNER_TOOL_CACHE/edgeever-store-bun/$cache_key"
           for attempt in 1 2 3; do
+            cache_dir="$store_cache"
+            if [ "$attempt" -gt 1 ]; then
+              cache_dir="$RUNNER_TEMP/edgeever-bun-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
+            fi
             if bun install --frozen-lockfile \
-              --cache-dir "$RUNNER_TEMP/edgeever-bun-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"; then
+              --cache-dir "$cache_dir"; then
               exit 0
             fi
             echo "Dependency install failed on attempt ${attempt}/3" >&2

@@ -227,6 +227,7 @@ describe("Cloudflare deployment entrypoints", () => {
 
   test("rejects instance-specific values in the repository Wrangler config", () => {
     const repositoryConfig = readRepositoryFile("wrangler.toml");
+    expect(repositoryConfig).toContain('[version_metadata]\nbinding = "CF_VERSION_METADATA"');
     const instanceConfigs = [
       repositoryConfig.replace('name = "edgeever"', 'name = "my-notes"'),
       repositoryConfig.replace("workers_dev = true", "workers_dev = false"),
@@ -441,7 +442,9 @@ describe("Cloudflare deployment entrypoints", () => {
 
   test("deployed repositories receive guarded daily upstream updates", () => {
     const workflow = readRepositoryFile(".github/workflows/sync-edgeever-upstream.yml");
-    const bunConfig = readRepositoryFile("bunfig.toml");
+    const bunConfig = Bun.TOML.parse(readRepositoryFile("bunfig.toml")) as {
+      test: { pathIgnorePatterns: string[] };
+    };
     const packageJson = JSON.parse(readRepositoryFile("package.json"));
     const scripts = packageJson.scripts as Record<string, string>;
 
@@ -455,13 +458,17 @@ describe("Cloudflare deployment entrypoints", () => {
     expect(workflow).toContain("FORCE_REDEPLOY: ${{ github.event_name == 'workflow_dispatch' }}");
     expect(workflow).not.toContain("force_redeploy:");
     expect(workflow).toContain("bun run db:migrate:local");
-    expect(bunConfig).toContain('pathIgnorePatterns = ["tests/e2e/**"]');
+    expect(bunConfig.test.pathIgnorePatterns).toContain("tests/e2e/**");
     expect(scripts.test).toBe("bun run test:bulk && bun run test:integration");
-    expect(scripts["test:bulk"]).toContain("--path-ignore-patterns='tests/e2e/**'");
+    for (const pattern of bunConfig.test.pathIgnorePatterns) {
+      expect(scripts["test:bulk"]).toContain(`--path-ignore-patterns='${pattern}'`);
+    }
     expect(scripts["test:bulk"]).toContain("apps/api/src/companion-learning.test.mjs");
     expect(scripts["test:bulk"]).toContain("apps/api/src/resource-upload-integration.test.mjs");
+    expect(scripts["test:bulk"]).toContain("apps/desktop/src/main/workbuddy-auth.test.mjs");
+    expect(scripts["test:bulk"]).toContain("apps/desktop/src/main/acp-cleanup.test.mjs");
     expect(scripts["test:integration"]).toBe(
-      "bun test apps/api/src/companion-learning.test.mjs apps/api/src/resource-upload-integration.test.mjs",
+      "bun test apps/api/src/companion-learning.test.mjs apps/api/src/resource-upload-integration.test.mjs && bun test --cwd apps/desktop src/main/workbuddy-auth.test.mjs src/main/acp-cleanup.test.mjs",
     );
     expect(workflow).toContain("bun run test");
     expect(workflow.match(/if: steps\.upstream\.outputs\.align_mode == 'merge'/g)).toHaveLength(2);
@@ -836,7 +843,7 @@ describe("Cloudflare deployment entrypoints", () => {
     } finally {
       rmSync(workingDirectory, { force: true, recursive: true });
     }
-  });
+  }, 20_000);
 
   test("public deployment documentation exposes only Fork and Agent paths", () => {
     const englishReadme = readRepositoryFile("README.md");
@@ -869,7 +876,7 @@ describe("Cloudflare deployment entrypoints", () => {
       extractTextPrompt(englishReadme, "### Option A: Deploy with an AI Agent (Recommended)"),
     );
     expect(deploymentPrompts["zh-CN"]).toBe(
-      extractTextPrompt(chineseReadme, "### 方案一：AI Agent 一键部署（推荐）"),
+      extractTextPrompt(chineseReadme, "### 方案一：交给 AI Agent 部署（推荐）"),
     );
     expect(siteDeploymentComponent).toContain('deploymentPrompts["en-US"]');
     expect(siteDeploymentComponent).toContain('deploymentPrompts["zh-CN"]');

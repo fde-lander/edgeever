@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Notebook } from "@edgeever/shared";
+import type { MemoSummary, Notebook } from "@edgeever/shared";
 import {
   filterCollapsedNotebookOptions,
   formatMemoDetailDate,
@@ -11,6 +11,7 @@ import {
   isEnglishMobileLocale,
   markdownToLocalText,
   parseTags,
+  sortMemoSummaries,
 } from "./workspace-utils";
 
 const notebook = (id: string, parentId: string | null, sortOrder: number): Notebook => ({
@@ -63,11 +64,13 @@ describe("mobile workspace utilities", () => {
   test("treats explicit locale preferences as the resolved UI locale", () => {
     expect(getResolvedMobileLocale("zh-CN")).toBe("zh-CN");
     expect(getResolvedMobileLocale("en-US")).toBe("en-US");
+    expect(getResolvedMobileLocale("pl")).toBe("pl");
+    expect(getResolvedMobileLocale("ru")).toBe("ru");
     expect(isEnglishMobileLocale("zh-CN")).toBe(false);
     expect(isEnglishMobileLocale("en-US")).toBe(true);
   });
 
-  test("resolves Japanese system languages to Japanese and unmatched languages to English", () => {
+  test("resolves supported system languages and falls back to English for unmatched languages", () => {
     const original = Intl.DateTimeFormat.prototype.resolvedOptions;
     const withLocale = (locale: string) => {
       Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
@@ -78,11 +81,42 @@ describe("mobile workspace utilities", () => {
       withLocale("ja-JP");
       expect(getResolvedMobileLocale("system")).toBe("ja");
       expect(isEnglishMobileLocale("system")).toBe(true);
+      withLocale("pl-PL");
+      expect(getResolvedMobileLocale("system")).toBe("pl");
+      expect(isEnglishMobileLocale("system")).toBe(true);
+      withLocale("pl");
+      expect(getResolvedMobileLocale("system")).toBe("pl");
+      withLocale("ru-RU");
+      expect(getResolvedMobileLocale("system")).toBe("ru");
+      expect(isEnglishMobileLocale("system")).toBe(true);
       withLocale("fr-FR");
+      expect(getResolvedMobileLocale("system")).toBe("fr");
+      withLocale("it-IT");
       expect(getResolvedMobileLocale("system")).toBe("en-US");
       expect(isEnglishMobileLocale("system")).toBe(true);
     } finally {
       Intl.DateTimeFormat.prototype.resolvedOptions = original;
     }
+  });
+
+  test("reverses title order and keeps equal titles in their original order", () => {
+    const memo = (id: string, title: string): MemoSummary => ({
+      id,
+      notebookId: "nb",
+      title,
+      excerpt: "",
+      tags: [],
+      isPinned: false,
+      isArchived: false,
+      isDeleted: false,
+      revision: 1,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      deletedAt: null,
+    });
+    const memos = [memo("b", "Alpha"), memo("a", "Alpha"), memo("z", "Zulu")];
+
+    expect(sortMemoSummaries(memos, "title-asc").map((item) => item.id)).toEqual(["b", "a", "z"]);
+    expect(sortMemoSummaries(memos, "title-desc").map((item) => item.id)).toEqual(["z", "b", "a"]);
   });
 });

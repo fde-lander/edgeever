@@ -1,6 +1,6 @@
 import type {
   CompanionAnswer, CompanionMention, CompanionMemory, CompanionQuestion, CompanionSource, CompanionTodo,
-  CompanionToolCall, CompanionTurn, CompanionTurnInput,
+  CompanionToolCall, CompanionTurn, CompanionTurnAttachmentMeta, CompanionTurnInput,
 } from "@edgeever/shared";
 import { refreshCompanionPreferences } from "./companion-learning";
 import { AppError } from "./app-error";
@@ -15,6 +15,7 @@ export type TurnRow = {
   created_at: string; memory_revision: number; use_memory: number; allow_notes: number; locale: string;
   tools_json?: string; todos_json?: string; questions_json?: string; mentions_json?: string;
   focus_json?: string; answers_json?: string; process_text?: string; agent_session_json?: string;
+  attachment_meta_json?: string;
 };
 export const COMPANION_TURN_LEASE_MS = 180_000;
 export const companionTurnLease = () => new Date(Date.now() + COMPANION_TURN_LEASE_MS).toISOString();
@@ -25,13 +26,17 @@ export const turnInputFromRow = (row: TurnRow): CompanionTurnInput => ({
   focus: Object.keys(turnFocus(row)).length ? turnFocus(row) : undefined,
 });
 const bindScope = (scope: CompanionScope) => [scope.workspaceId, scope.ownerId];
-export const mapCompanionTurn = (row: TurnRow): CompanionTurn => ({
-  id: row.id, threadId: row.thread_id, message: row.message, response: row.response, process: row.process_text ?? "",
-  status: row.status, sources: parseJsonArray<CompanionSource>(row.sources_json),
-  tools: parseJsonArray<CompanionToolCall>(row.tools_json), todos: parseJsonArray<CompanionTodo>(row.todos_json),
-  questions: parseJsonArray<CompanionQuestion>(row.questions_json), mentions: parseJsonArray<CompanionMention>(row.mentions_json),
-  model: row.model, inputTokens: row.input_tokens, outputTokens: row.output_tokens, createdAt: row.created_at,
-});
+export const mapCompanionTurn = (row: TurnRow): CompanionTurn => {
+  const attachments = parseJsonArray<CompanionTurnAttachmentMeta>(row.attachment_meta_json);
+  return {
+    id: row.id, threadId: row.thread_id, message: row.message, response: row.response, process: row.process_text ?? "",
+    status: row.status, sources: parseJsonArray<CompanionSource>(row.sources_json),
+    tools: parseJsonArray<CompanionToolCall>(row.tools_json), todos: parseJsonArray<CompanionTodo>(row.todos_json),
+    questions: parseJsonArray<CompanionQuestion>(row.questions_json), mentions: parseJsonArray<CompanionMention>(row.mentions_json),
+    ...(attachments.length ? { attachments } : {}),
+    model: row.model, inputTokens: row.input_tokens, outputTokens: row.output_tokens, createdAt: row.created_at,
+  };
+};
 export const turnFocus = (row: TurnRow) => parseJsonObject<NonNullable<CompanionTurnInput["focus"]>>(row.focus_json, {});
 export const turnAnswers = (row: TurnRow) => parseJsonArray<CompanionAnswer>(row.answers_json);
 export const ensureCompanionState = async (db: DatabaseAdapter, scope: CompanionScope) => {
@@ -212,7 +217,9 @@ export const resumeCompanionTurn = async (db: DatabaseAdapter, scope: CompanionS
   await listCompanionTurns(db, scope);
   const row = await getCompanionTurn(db, scope, id);
   if (!row || row.status !== "interrupted") throw new AppError("companion_resume_unavailable", "This request cannot be continued.", 409);
-  const result = await db.prepare(`UPDATE companion_turns SET status = 'running', expires_at = ?, answers_json = COALESCE(?, answers_json)
+  // Answered questions are resolved; keeping them would end the resumed run as interrupted again.
+  const result = await db.prepare(`UPDATE companion_turns SET status = 'running', expires_at = ?, answers_json = COALESCE(?, answers_json),
+      questions_json = '[]'
     WHERE workspace_id = ? AND owner_id = ? AND id = ? AND status = 'interrupted'`).bind(
     companionTurnLease(), answers ? JSON.stringify(answers.slice(0, 3)) : null, ...bindScope(scope), id).run();
   if (Number(result.meta.changes) !== 1) throw new AppError("companion_busy", "A conversation is already running or this request was already submitted. Refresh to recover its result.", 409);

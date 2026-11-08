@@ -1,9 +1,13 @@
 export * from "./content";
 export * from "./document-extensions";
+export * from "./image-alignment";
 export * from "./companion";
+export * from "./companion-focus";
 export * from "./public-demo";
 export * from "./ai-assistant";
 export * from "./ai-generation";
+export * from "./ai-output-budgets";
+export * from "./ai-model-capabilities";
 export * from "./ai-prompt-seeds";
 export * from "./ai-tag-suggestions";
 export * from "./ai-selection";
@@ -24,11 +28,15 @@ export * from "./memo-content-style";
 export * from "./memo-timestamps";
 export * from "./memo-template-seeds";
 export * from "./note-links";
+export * from "./note-prose";
+export * from "./note-prose-css";
 export * from "./notebooks";
+export * from "./notebook-appearance";
 export * from "./revision-diff";
 export * from "./resource-links";
 export * from "./schemas";
 export * from "./sharing";
+export * from "./notebook-site";
 export * from "./sync";
 export * from "./desktop-rpc";
 export * from "./details";
@@ -36,6 +44,7 @@ export * from "./deployment-metadata";
 export * from "./diagram";
 export * from "./diagram-canvas";
 export * from "./infographic";
+export * from "./infographic-syntax";
 export * from "./table";
 export * from "./diagram-palette";
 export * from "./diagram-flowchart-style";
@@ -57,3 +66,19 @@ export {
 } from "./diagram-reader";
 
 export { attachDiagramScroll } from "./diagram-scroll";
+export * from "./front-matter";
+
+export * from "./poster";
+
+export * from "./poster-fonts";
+export * from "./poster-platforms";
+export * from "./poster-design-catalog";
+
+export * from "./structured-note-error";
+export * from "./diagram-operations";
+export * from "./table-operations";
+export * from "./poster-content-layout";
+export * from "./poster-operations";
+export * from "./infographic-operations";
+
+export * from "./resource-media";

@@ -1,0 +1,79 @@
+name: Bug report
+description: Something does not work as expected, or you see an error.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill in the required fields. GitHub Issues are public. Do not include passwords, tokens, instance URLs, or note contents.
+
+        System information is under Settings → System information. Choose Copy and paste it here. On Linux, also include the distribution, desktop environment, and whether you use Wayland or X11. If the desktop app is stuck on the crash recovery page, describe what you were doing before that page appeared.
+  - type: dropdown
+    id: client
+    attributes:
+      label: Affected client
+      description: Which client is affected?
+      multiple: true
+      options:
+        - Web
+        - macOS
+        - Windows
+        - Linux
+        - Android
+        - iOS
+        - Browser extension
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see, including the exact error text?
+      placeholder: "For example: After clicking Share, the button keeps spinning and the console shows a TypeError."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps in order.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What did you expect to happen?
+    validations:
+      required: false
+  - type: textarea
+    id: system-info
+    attributes:
+      label: System information
+      description: Paste the text copied from Settings → System information. In-app feedback fills this in automatically.
+      placeholder: |
+        - Client version: v1.93.0
+        - System: macOS
+        - Instance build: v1.93.0
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Filled automatically for crash and sync reports. Leave this empty when filing manually.
+    validations:
+      required: false
+  - type: upload
+    id: screenshots
+    attributes:
+      label: Screenshots or screen recording
+      description: Add a screenshot or screen recording when the issue is visible.
+    validations:
+      required: false
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"

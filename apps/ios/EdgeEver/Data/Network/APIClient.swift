@@ -4,6 +4,7 @@ actor APIClient {
     private(set) var baseURL: URL
     private(set) var token: String?
     private var onUnauthorized: (@Sendable () -> Void)?
+    private var onMfaRebindRequired: (@Sendable () -> Void)?
 
     private let session: URLSession
 
@@ -31,6 +32,12 @@ actor APIClient {
         onUnauthorized = handler
     }
 
+    /// Called when a business API answers 403 `mfa_rebind_required` (restricted
+    /// recovery-code session). The UI must switch to the forced rebind screen.
+    func setOnMfaRebindRequired(_ handler: (@Sendable () -> Void)?) {
+        onMfaRebindRequired = handler
+    }
+
     // MARK: - Instance diagnostics
 
     func getInstanceHealth() async throws -> InstanceHealth {
@@ -43,8 +50,56 @@ actor APIClient {
 
     // MARK: - Auth
 
+    /// Password step. When TOTP is enabled the server answers 401 `mfa_required`;
+    /// that surfaces as `APIError.mfaChallenge` and is never treated as session loss.
     func login(_ input: LoginInput) async throws -> AuthSession {
-        try await request(path: "/api/v1/auth/login", method: "POST", body: input)
+        try await request(path: "/api/v1/auth/login", method: "POST", body: input, notifyUnauthorized: false)
+    }
+
+    /// Second login step (TOTP code or recovery code). 401s here are inline errors.
+    func completeMfaLogin(_ input: LoginMfaInput) async throws -> AuthSession {
+        try await request(path: "/api/v1/auth/login/mfa", method: "POST", body: input, notifyUnauthorized: false)
+    }
+
+    // MARK: - TOTP
+
+    func getTotpStatus() async throws -> TotpStatus {
+        try await request(path: "/api/v1/auth/totp")
+    }
+
+    /// Body: `{password}` (enable), `{password, code|recoveryCode}` (voluntary rebind)
+    /// or `{}` (restricted session).
+    func startTotpSetup(_ input: TotpReauthInput) async throws -> TotpSetupResponse {
+        try await request(path: "/api/v1/auth/totp/setup", method: "POST", body: input)
+    }
+
+    /// Step 2: the code for the setup this client was shown. A setup replaced by a
+    /// newer one (another tab or device of the same session) answers 409 `totp_setup_expired`.
+    func verifyTotpSetup(setupId: String, code: String) async throws -> TotpRecoveryCodesResponse {
+        struct Body: Encodable { var setupId: String; var code: String }
+        return try await request(path: "/api/v1/auth/totp/setup/verify", method: "POST", body: Body(setupId: setupId, code: code))
+    }
+
+    /// Last step: activates exactly the batch of recovery codes the user saved.
+    func confirmTotpSetup(batchId: String) async throws -> TotpConfirmResponse {
+        try await request(path: "/api/v1/auth/totp/setup/confirm", method: "POST", body: TotpBatchBody(batchId: batchId))
+    }
+
+    func regenerateRecoveryCodes(_ input: TotpReauthInput) async throws -> TotpRecoveryCodesResponse {
+        try await request(path: "/api/v1/auth/totp/recovery-codes", method: "POST", body: input)
+    }
+
+    /// Activates exactly the batch from `regenerateRecoveryCodes`; a replaced batch answers 409.
+    func confirmRecoveryCodes(batchId: String) async throws {
+        let _: OkResponse = try await request(
+            path: "/api/v1/auth/totp/recovery-codes/confirm",
+            method: "POST",
+            body: TotpBatchBody(batchId: batchId)
+        )
+    }
+
+    func disableTotp(_ input: TotpReauthInput) async throws {
+        let _: OkResponse = try await request(path: "/api/v1/auth/totp/disable", method: "POST", body: input)
     }
 
     func logout() async throws {
@@ -85,7 +140,10 @@ actor APIClient {
 
     func getMobileSyncBootstrapPage(afterId: String?, limit: Int = 200) async throws -> MobileSyncBootstrapPage {
         var items: [URLQueryItem] = [.init(name: "limit", value: String(limit))]
-        if let afterId { items.append(.init(name: "afterId", value: afterId)) }
+        if let afterId, !afterId.isEmpty {
+            items.append(.init(name: "afterId", value: afterId))
+            items.append(.init(name: "includeMetadata", value: "0"))
+        }
         return try await request(path: "/api/v1/sync/bootstrap", query: items)
     }
 
@@ -97,6 +155,21 @@ actor APIClient {
                 .init(name: "limit", value: String(limit)),
             ]
         )
+    }
+
+    // MARK: - Notebooks
+
+    func createNotebook(name: String, parentId: String?) async throws -> Notebook {
+        struct Body: Encodable {
+            var name: String
+            var parentId: String?
+        }
+        let response: NotebookResponse = try await request(
+            path: "/api/v1/notebooks",
+            method: "POST",
+            body: Body(name: name, parentId: parentId)
+        )
+        return response.notebook
     }
 
     // MARK: - Memos
@@ -206,46 +279,43 @@ actor APIClient {
     }
 
     func suggestAiTags(_ input: AiTagSuggestionsInput) async throws -> AiTagSuggestionsResponse {
-        try await request(
-            path: "/api/v1/ai/tag-suggestions",
-            method: "POST",
-            body: input
-        )
+        let prepared: AiPreparedTagSuggestions = try await request(path: "/api/v1/ai/tag-suggestions/prepare", method: "POST", body: input)
+        let generation = AiPreparedGeneration(provider: prepared.provider, baseUrl: prepared.baseUrl, apiKey: prepared.apiKey,
+            modelId: prepared.modelId, system: prepared.system, prompt: prepared.prompt, maxOutputTokens: prepared.maxOutputTokens,
+            resultBoundary: AiGenerationResultBoundary(start: "", end: ""))
+        let providerRequest = try AiDirectStream.providerRequest(for: generation)
+        let (bytes, response) = try await session.bytes(for: providerRequest)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError(status: (response as? HTTPURLResponse)?.statusCode ?? 502, code: "ai_tag_suggestions_failed", message: "The model request failed.")
+        }
+        var text = ""
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data:"), let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            text += AiDirectStream.extractDelta(provider: prepared.provider, payload: json).text
+        }
+        return AiTagSuggestionsResponse(suggestions: AiDirectStream.tagSuggestions(text, currentTags: prepared.currentTags, canonicalTags: prepared.canonicalTags))
     }
 
     func streamAiGeneration(_ input: AiGenerateInput) -> AsyncThrowingStream<AiStreamEvent, Error> {
         let session = self.session
-        let unauthorized = onUnauthorized
-        let sessionToken = token
-        let generateURL = makeURL(path: "/api/v1/ai/generate")
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    do {
-                        let prepared: AiPreparedGeneration = try await self.request(
-                            path: "/api/v1/ai/generate/prepare",
-                            method: "POST",
-                            body: input
-                        )
-                        try await Self.streamDirectProvider(
-                            prepared,
-                            session: session,
-                            continuation: continuation
-                        )
-                    } catch let apiError as APIError where apiError.status == 404 {
-                        try await Self.streamEdgeEverGenerate(
-                            input: input,
-                            url: generateURL,
-                            token: sessionToken,
-                            session: session,
-                            unauthorized: unauthorized,
-                            continuation: continuation
-                        )
-                    }
+                    // This client can run a long task in parts or continue a cut-off result (#652 PR B).
+                    var first = input
+                    first.segmentation = AiSegmentationRequest()
+                    let prepared: AiPreparedGeneration = try await self.request(path: "/api/v1/ai/generate/prepare", method: "POST", body: first)
+                    try await AiLongGeneration.run(
+                        input: input,
+                        first: prepared,
+                        prepare: { next in try await self.request(path: "/api/v1/ai/generate/prepare", method: "POST", body: next) },
+                        stream: { next, emit in try await Self.streamDirectProvider(next, session: session, emit: emit) },
+                        emit: { event in continuation.yield(event) }
+                    )
                     continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+                } catch { continuation.finish(throwing: error) }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -254,7 +324,7 @@ actor APIClient {
     private static func streamDirectProvider(
         _ prepared: AiPreparedGeneration,
         session: URLSession,
-        continuation: AsyncThrowingStream<AiStreamEvent, Error>.Continuation
+        emit: @Sendable (AiStreamEvent) -> Void
     ) async throws {
         let request = try AiDirectStream.providerRequest(for: prepared)
         let (bytes, response) = try await session.bytes(for: request)
@@ -267,7 +337,7 @@ actor APIClient {
             let raw = String(data: data, encoding: .utf8) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             throw APIError(status: http.statusCode, code: "ai_generation_failed", message: String(raw.prefix(1000)))
         }
-        continuation.yield(AiStreamEvent(type: "start", text: nil, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
+        emit(AiStreamEvent(type: "start", text: nil, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
         let normalizer = AiGenerationStreamNormalizer(resultBoundary: prepared.resultBoundary)
         var hasContent = false
         var finishReason: String?
@@ -287,60 +357,22 @@ actor APIClient {
             let text = normalizer.push(delta.text)
             if text.isEmpty { continue }
             hasContent = hasContent || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            continuation.yield(AiStreamEvent(type: "text-delta", text: text, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
+            emit(AiStreamEvent(type: "text-delta", text: text, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
         }
         let trailing = normalizer.finish()
         if !trailing.isEmpty {
             hasContent = hasContent || !trailing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            continuation.yield(AiStreamEvent(type: "text-delta", text: trailing, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
+            emit(AiStreamEvent(type: "text-delta", text: trailing, code: nil, message: nil, finishReason: nil, inputTokens: nil, outputTokens: nil))
         }
         if !hasContent {
-            continuation.yield(AiStreamEvent(type: "error", text: nil, code: "ai_generation_failed", message: "The AI did not return a note result.", finishReason: nil, inputTokens: nil, outputTokens: nil))
+            emit(AiStreamEvent(type: "error", text: nil, code: "ai_generation_failed", message: "The AI did not return a note result.", finishReason: nil, inputTokens: nil, outputTokens: nil))
             return
         }
-        continuation.yield(AiStreamEvent(type: "finish", text: nil, code: nil, message: nil, finishReason: finishReason, inputTokens: inputTokens, outputTokens: outputTokens))
-    }
-
-    private static func streamEdgeEverGenerate(
-        input: AiGenerateInput,
-        url: URL,
-        token: String?,
-        session: URLSession,
-        unauthorized: (@Sendable () -> Void)?,
-        continuation: AsyncThrowingStream<AiStreamEvent, Error>.Continuation
-    ) async throws {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        request.httpBody = try EdgeEverJSON.encoder.encode(input)
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIError(status: -1, code: nil, message: "Invalid response")
-        }
-        if http.statusCode == 401 {
-            unauthorized?()
-        }
-        guard (200 ..< 300).contains(http.statusCode) else {
-            var data = Data()
-            for try await byte in bytes { data.append(byte) }
-            let message = Self.parseErrorMessage(data: data)
-                ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            throw APIError(
-                status: http.statusCode,
-                code: Self.parseErrorCode(data: data),
-                message: message
-            )
-        }
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data: ") else { continue }
-            let payload = String(line.dropFirst(6))
-            guard let data = payload.data(using: .utf8) else { continue }
-            continuation.yield(try EdgeEverJSON.decoder.decode(AiStreamEvent.self, from: data))
+        switch AiDirectStream.streamEnd(finishReason: finishReason, normalizer: normalizer) {
+        case .interrupted:
+            emit(AiStreamEvent(type: "error", text: nil, code: "ai_stream_interrupted", message: "The connection ended before the AI finished.", finishReason: nil, inputTokens: nil, outputTokens: nil))
+        case .finished(let truncated):
+            emit(AiStreamEvent(type: "finish", text: nil, code: nil, message: nil, finishReason: finishReason, inputTokens: inputTokens, outputTokens: outputTokens, truncated: truncated))
         }
     }
 
@@ -348,6 +380,14 @@ actor APIClient {
 
     func listTemplates() async throws -> [MemoTemplate] {
         let response: TemplatesResponse = try await request(path: "/api/v1/templates")
+        return response.templates
+    }
+
+    func listTemplateGallery(locale: String) async throws -> [MemoTemplateGalleryEntry] {
+        let response: TemplateGalleryResponse = try await request(
+            path: "/api/v1/templates/gallery",
+            query: [.init(name: "locale", value: locale)]
+        )
         return response.templates
     }
 
@@ -698,12 +738,14 @@ actor APIClient {
     // MARK: - Core request
 
     private struct EmptyBody: Encodable {}
+    private struct TotpBatchBody: Encodable { var batchId: String }
 
     private func request<T: Decodable>(
         path: String,
         method: String = "GET",
         query: [URLQueryItem] = [],
-        body: (any Encodable)? = nil
+        body: (any Encodable)? = nil,
+        notifyUnauthorized: Bool = true
     ) async throws -> T {
         var request = URLRequest(url: makeURL(path: path, query: query))
         request.httpMethod = method
@@ -715,7 +757,7 @@ actor APIClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try EdgeEverJSON.encoder.encode(AnyEncodable(body))
         }
-        let data = try await performRaw(request)
+        let data = try await performRaw(request, notifyUnauthorized: notifyUnauthorized)
         return try EdgeEverJSON.decoder.decode(T.self, from: data)
     }
 
@@ -724,20 +766,50 @@ actor APIClient {
         return try EdgeEverJSON.decoder.decode(ResourceResponse.self, from: data)
     }
 
-    private func performRaw(_ request: URLRequest) async throws -> Data {
+    private func performRaw(_ request: URLRequest, notifyUnauthorized: Bool = true) async throws -> Data {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw APIError(status: -1, code: nil, message: "Invalid response")
         }
-        if http.statusCode == 401 {
+        if http.statusCode == 401, notifyUnauthorized {
             onUnauthorized?()
         }
         guard (200 ..< 300).contains(http.statusCode) else {
-            let message = Self.parseErrorMessage(data: data) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            let code = Self.parseErrorCode(data: data)
-            throw APIError(status: http.statusCode, code: code, message: message)
+            let error = Self.decodeAPIError(
+                status: http.statusCode,
+                data: data,
+                retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+            )
+            if error.isMfaRebindRequired {
+                onMfaRebindRequired?()
+            }
+            throw error
         }
         return data
+    }
+
+    /// Build an `APIError` from an `{ "error": { code, message, details? } }` body.
+    static func decodeAPIError(status: Int, data: Data, retryAfter: String? = nil) -> APIError {
+        let message = parseErrorMessage(data: data) ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        let code = parseErrorCode(data: data)
+        var challenge: MfaChallenge?
+        if code == "mfa_required" {
+            struct Envelope: Decodable {
+                struct Body: Decodable { var details: MfaChallenge? }
+                var error: Body
+            }
+            challenge = (try? EdgeEverJSON.decoder.decode(Envelope.self, from: data))?.error.details
+        }
+        let retrySeconds = retryAfter
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .flatMap { Int($0) }
+        return APIError(
+            status: status,
+            code: code,
+            message: message,
+            mfaChallenge: challenge,
+            retryAfterSeconds: retrySeconds
+        )
     }
 
     private func makeURL(path: String, query: [URLQueryItem] = []) -> URL {
@@ -778,9 +850,14 @@ struct APIError: Error, LocalizedError, Equatable, Sendable {
     let status: Int
     let code: String?
     let message: String
+    /// Present when the login password step answered 401 `mfa_required`.
+    var mfaChallenge: MfaChallenge? = nil
+    /// Parsed `Retry-After` header (seconds) for 429 responses.
+    var retryAfterSeconds: Int? = nil
 
     var errorDescription: String? { message }
     var isUnauthorized: Bool { status == 401 }
+    var isMfaRebindRequired: Bool { status == 403 && code == "mfa_rebind_required" }
     var isRevisionConflict: Bool { code == "revision_conflict" || status == 409 }
     /// Server has no **memo** row for this id (update / edit-session).
     /// Tight match only — never treat notebook/resource/workspace "not found" as memo 404.

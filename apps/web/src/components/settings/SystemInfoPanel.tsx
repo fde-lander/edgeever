@@ -21,6 +21,7 @@ import {
 } from "@/lib/system-diagnostics";
 import { formatSystemInfoClipboard } from "@/lib/system-info-clipboard";
 import { cn } from "@/lib/utils";
+import { DesktopUpdateProgress } from "@/components/DesktopUpdateProgress";
 import { getReleaseTagForVersion, isClientAheadOfInstance } from "@/lib/version-check";
 
 export type SystemInfoItem = {
@@ -30,9 +31,10 @@ export type SystemInfoItem = {
   colSpan?: "full" | "two" | "double-sm";
   status?: "connected" | "connecting" | "failed" | "warning" | "error" | "default";
   localOnly?: boolean;
+  breakAll?: boolean;
 };
 
-type InstanceSystemDiagnostics = Pick<InstanceHealth, "build" | "containerImageSource" | "deployment" | "migration" | "objectStorageProvider" | "storage"> & {
+type InstanceSystemDiagnostics = Pick<InstanceHealth, "build" | "buildCreatedAt" | "buildProvenance" | "containerImageSource" | "deployment" | "deploymentVersionCreatedAt" | "migration" | "objectStorageProvider" | "storage"> & {
   runtime?: string | null;
 };
 
@@ -78,6 +80,11 @@ const getDeploymentDescription = (
   const method = t(`systemInfo.deploymentMethods.${deployment.method}`);
   return `${trigger} · ${method}`;
 };
+
+const formatInstanceTimestamp = (value: string | null | undefined, language: string) =>
+  value && Number.isFinite(Date.parse(value))
+    ? new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))
+    : null;
 
 const getContainerImageSourceTranslationKey = (source: string | null | undefined) => {
   if (source === "official-ghcr" || source === "official-cn-mirror" || source === "custom") return source;
@@ -162,6 +169,10 @@ const getWebSystemInfoGroups = (
           mono: true,
         },
         { label: t("systemInfo.instanceBuild"), value: diagnostics.instance?.build ?? t("systemInfo.unknown"), mono: true },
+        {
+          label: t("systemInfo.deploymentVersionTime"),
+          value: formatInstanceTimestamp(diagnostics.instance?.deploymentVersionCreatedAt, language) ?? t("systemInfo.unknown"),
+        },
         { label: t("systemInfo.databaseMigration"), value: diagnostics.instance?.migration ?? t("systemInfo.unknown"), mono: true },
         {
           label: t("systemInfo.databaseBackend"),
@@ -188,10 +199,20 @@ const getWebSystemInfoGroups = (
           value: t(`systemInfo.deploymentPlatforms.${resolveDeploymentPlatform(diagnostics.instance?.runtime)}`),
         },
         ...(diagnostics.instance?.runtime === "self-hosted-bun"
-          ? [{
-              label: t("systemInfo.containerImageSource"),
-              value: t(`systemInfo.containerImageSources.${getContainerImageSourceTranslationKey(diagnostics.instance.containerImageSource)}`),
-            }]
+          ? [
+              {
+                label: t("systemInfo.containerImageSource"),
+                value: t(`systemInfo.containerImageSources.${getContainerImageSourceTranslationKey(diagnostics.instance.containerImageSource)}`),
+              },
+              {
+                label: t("systemInfo.imageBuiltAt"),
+                value: formatInstanceTimestamp(diagnostics.instance.buildCreatedAt, language) ?? t("systemInfo.unknown"),
+              },
+              {
+                label: t("systemInfo.imageBuildSource"),
+                value: getDeploymentDescription(t, resolveSystemInfoDeploymentMetadata(diagnostics.instance.buildProvenance, {}, false)),
+              },
+            ]
           : []),
         { label: t("systemInfo.deployment"), value: getDeploymentDescription(t, deployment), colSpan: "full" },
       ],
@@ -269,7 +290,7 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
   const [desktopUpdateChecked, setDesktopUpdateChecked] = useState(false);
   const [viewportRevision, setViewportRevision] = useState(0);
   const queryClient = useQueryClient();
-  const { release } = useDeployedUpdateNotice();
+  const { markSeen, release } = useDeployedUpdateNotice();
   const desktopBridge = window.edgeeverDesktop;
   const desktopAvailable = desktopBridge?.isAvailable === true;
   const instanceUrl = desktopAvailable ? getConfiguredDesktopApiBaseUrl() : window.location.origin;
@@ -306,6 +327,9 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
     retry: 1,
   });
   useEffect(() => {
+    if (active) markSeen();
+  }, [active, markSeen]);
+  useEffect(() => {
     if (!active) return;
     const onResize = () => setViewportRevision((value) => value + 1);
     window.addEventListener("resize", onResize);
@@ -314,11 +338,18 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
   useEffect(() => () => {
     if (copyResetTimeoutRef.current !== null) window.clearTimeout(copyResetTimeoutRef.current);
   }, []);
+  const [updateDiagnosticCopyState, setUpdateDiagnosticCopyState] = useState<"idle" | "copied" | "error">("idle");
+  useEffect(() => {
+    if (!active || !desktopAvailable || !desktopBridge?.onUpdateStatus) return;
+    return desktopBridge.onUpdateStatus((status) => {
+      queryClient.setQueryData(["desktop-update-status"], status);
+    });
+  }, [active, desktopAvailable, desktopBridge, queryClient]);
   const desktopUpdateCheckMutation = useMutation({
     mutationFn: () => desktopBridge!.checkUpdate(),
     onSuccess: (status) => {
       queryClient.setQueryData(["desktop-update-status"], status);
-      setDesktopUpdateChecked(true);
+      setDesktopUpdateChecked(!status.error);
     },
   });
   const desktopUpdateInstallMutation = useMutation({
@@ -424,15 +455,30 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
   );
   const desktopUpdateState = desktopUpdateStatusQuery.data?.state ?? "idle";
   const desktopAutoUpdateSupported = clientRuntimeQuery.data?.autoUpdateSupported !== false;
+  const desktopUpdateDownloadLabel = t(desktopUpdateStatusQuery.data?.progress?.percent === 100
+    ? "systemInfo.desktopUpdateVerifying" : "systemInfo.desktopUpdateDownloading");
   const desktopUpdateBusy = desktopUpdateCheckMutation.isPending || desktopUpdateInstallMutation.isPending;
-  const desktopUpdateStatus = desktopUpdateInstallMutation.isError || desktopUpdateCheckMutation.isError || desktopUpdateStatusQuery.isError
+  const desktopUpdateDiagnostic = desktopUpdateStatusQuery.data?.error;
+  const updateDiagnosticText = desktopUpdateDiagnostic
+    ? JSON.stringify({ ...desktopUpdateDiagnostic, localTime: new Date(desktopUpdateDiagnostic.at).toLocaleString(i18n.language) }, null, 2)
+    : null;
+  const handleCopyUpdateDiagnostic = async () => {
+    if (!updateDiagnosticText) return;
+    try {
+      const copied = await desktopBridge!.copyText(updateDiagnosticText);
+      setUpdateDiagnosticCopyState(copied ? "copied" : "error");
+    } catch {
+      setUpdateDiagnosticCopyState("error");
+    }
+  };
+  const desktopUpdateStatus = desktopUpdateDiagnostic || desktopUpdateInstallMutation.isError || desktopUpdateCheckMutation.isError || desktopUpdateStatusQuery.isError
     ? t("systemInfo.desktopUpdateFailed")
     : desktopUpdateInstallMutation.isPending
       ? t("systemInfo.desktopUpdateInstalling")
       : desktopUpdateCheckMutation.isPending
         ? t("systemInfo.desktopUpdateChecking")
         : desktopUpdateState === "available"
-          ? t("systemInfo.desktopUpdateDownloading")
+          ? desktopUpdateDownloadLabel
           : desktopUpdateState === "downloaded"
             ? t("systemInfo.desktopUpdateReady")
             : desktopUpdateChecked
@@ -441,7 +487,10 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
 
   const handleDesktopUpdate = () => {
     if (desktopUpdateState === "downloaded") desktopUpdateInstallMutation.mutate();
-    else desktopUpdateCheckMutation.mutate();
+    else {
+      setUpdateDiagnosticCopyState("idle");
+      desktopUpdateCheckMutation.mutate();
+    }
   };
 
   return (
@@ -508,7 +557,7 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                   {desktopUpdateState === "downloaded"
                     ? t("systemInfo.desktopUpdateRestart")
                     : desktopUpdateState === "available"
-                      ? t("systemInfo.desktopUpdateDownloading")
+                      ? desktopUpdateDownloadLabel
                       : desktopUpdateCheckMutation.isPending
                         ? t("systemInfo.desktopUpdateChecking")
                         : t("systemInfo.desktopCheckForUpdates")}
@@ -543,11 +592,11 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                 </a>
               </div>
             ) : null}
-            {isClient && desktopAvailable && desktopAutoUpdateSupported && desktopUpdateStatus ? (
+            {isClient && desktopAvailable && desktopAutoUpdateSupported && desktopUpdateStatus && desktopUpdateState !== "available" ? (
               <p
                 className={cn(
                   "text-right text-xs",
-                  desktopUpdateInstallMutation.isError || desktopUpdateCheckMutation.isError || desktopUpdateStatusQuery.isError
+                  desktopUpdateDiagnostic || desktopUpdateInstallMutation.isError || desktopUpdateCheckMutation.isError || desktopUpdateStatusQuery.isError
                     ? "text-red-600"
                     : "text-slate-500",
                 )}
@@ -556,6 +605,29 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
               >
                 {desktopUpdateStatus}
               </p>
+            ) : null}
+            {isClient && desktopAvailable && desktopUpdateState === "available" && !desktopUpdateDiagnostic ? (
+              <DesktopUpdateProgress progress={desktopUpdateStatusQuery.data?.progress} />
+            ) : null}
+            {isClient && desktopAvailable && desktopUpdateDiagnostic && updateDiagnosticText ? (
+              <div className="grid gap-2 rounded-lg border border-red-200 bg-red-50/50 p-3 text-xs" role="alert">
+                <p className="break-words font-medium text-red-700">{desktopUpdateDiagnostic.code && !desktopUpdateDiagnostic.message.includes(desktopUpdateDiagnostic.code) ? `${desktopUpdateDiagnostic.code}: ` : ""}{desktopUpdateDiagnostic.message}</p>
+                <details>
+                  <summary className="cursor-pointer">{t("systemInfo.desktopUpdateDiagnosticDetails")}</summary>
+                  <p className="my-2 text-slate-600">{t("systemInfo.desktopUpdateDiagnosticHint")}</p>
+                  <pre className="max-h-56 select-text overflow-auto whitespace-pre-wrap break-all text-slate-700">{updateDiagnosticText}</pre>
+                </details>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => void handleCopyUpdateDiagnostic()}>
+                    <Copy className="h-3.5 w-3.5" />
+                    {updateDiagnosticCopyState === "copied" ? t("systemInfo.desktopUpdateDiagnosticCopied") : t("systemInfo.desktopCopyUpdateDiagnostic")}
+                  </Button>
+                  {updateDiagnosticCopyState === "error" ? <span role="status">{t("systemInfo.copyFailed")}</span> : null}
+                  <a className="underline underline-offset-2" href="https://github.com/tianma-if/edgeever/releases/latest" target="_blank" rel="noreferrer">
+                    {t("systemInfo.desktopUpdateManualDownload")}
+                  </a>
+                </div>
+              </div>
             ) : null}
             <div className="rounded-lg border border-slate-200/80 bg-card p-3 sm:p-3.5">
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3 sm:gap-x-5">
@@ -567,7 +639,7 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                     <dt className="truncate text-xs font-normal text-slate-400">{item.label}</dt>
                     <dd className="mt-0.5 flex min-w-0 items-center gap-1.5">
                       {item.status === "connected" ? (
-                        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-slate-950" />
+                        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
                       ) : item.status === "connecting" ? (
                         <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500 animate-pulse" />
                       ) : item.status === "failed" ? (
@@ -577,6 +649,7 @@ export const SystemInfoPanel = ({ active = true }: { active?: boolean }) => {
                         className={cn(
                           "break-words text-xs leading-5",
                           item.mono ? "font-mono font-medium" : "font-sans font-medium",
+                          item.breakAll && "break-all",
                           item.status === "failed" || item.status === "error"
                             ? "font-semibold text-rose-600"
                             : item.status === "warning"

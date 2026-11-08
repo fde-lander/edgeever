@@ -8,6 +8,7 @@ import {
   computeDiagramLayout,
   computeDiagramLayoutResult,
   DIAGRAM_READABLE_MIN_SCALE,
+  fitDefaultDiagramLabels,
   getDiagramLayoutViewport,
 } from "./diagram-layout.ts";
 
@@ -180,6 +181,102 @@ describe("diagram auto layout", () => {
     expect(compactArchitectureNodeSize("boundary", { width: 640, height: 360 })).toEqual({ width: 640, height: 360 });
   });
 
+  test("reserves height for wrapped architecture labels while shortening compact nodes", () => {
+    const document = compileDiagramIr({
+      kind: "architecture",
+      nodes: [
+        { id: "short", type: "service", label: "API" },
+        { id: "medium", type: "service", label: "商品与库存查询服务" },
+        { id: "long", type: "service", label: "商品与库存查询服务及活动规则配置中心" },
+      ],
+      edges: [],
+    });
+    const heights = Object.fromEntries(document.nodes.map((node) => [node.id, node.height]));
+    expect(heights.short).toBe(56);
+    expect(heights.medium).toBe(60);
+    expect(heights.long).toBeGreaterThan(heights.medium);
+  });
+
+  test("opens vertical lanes for groups with many cross-boundary relations", () => {
+    const nodes = [
+      { id: "business", type: "boundary", label: "业务层" },
+      { id: "data", type: "boundary", label: "数据层" },
+      ...Array.from({ length: 4 }, (_, index) => ({ id: `service-${index}`, type: "service", label: `服务 ${index}`, parentId: "business" })),
+      ...Array.from({ length: 4 }, (_, index) => ({ id: `store-${index}`, type: "database", label: `存储 ${index}`, parentId: "data" })),
+    ];
+    const edges = Array.from({ length: 4 }, (_, service) => Array.from({ length: 4 }, (_, store) => ({
+      source: `service-${service}`, target: `store-${store}`,
+    }))).flat();
+    const rowGap = (document) => {
+      const services = document.nodes.filter((node) => node.parentId === "business").sort((a, b) => a.y - b.y);
+      return Math.min(...services.slice(1).map((node, index) => node.y - services[index].y - services[index].height));
+    };
+    const sparse = compileDiagramIr({ kind: "architecture", nodes, edges: edges.slice(0, 1) });
+    const dense = compileDiagramIr({ kind: "architecture", nodes, edges });
+    expect(rowGap(dense)).toBeGreaterThan(rowGap(sparse) + 40);
+  });
+
+  test("turns a long ungrouped architecture pipeline downward on creation and auto layout", () => {
+    const nodes = Array.from({ length: 17 }, (_, index) => ({
+      id: `service-${index}`,
+      label: `Service ${index}`,
+      type: "service",
+    }));
+    const edges = nodes.slice(1).map((node, index) => ({ source: nodes[index].id, target: node.id }));
+    const document = compileDiagramIr({ kind: "architecture", nodes, edges });
+    const bounds = (geometry) => ({
+      width: Math.max(...nodes.map((node) => geometry[node.id].x + geometry[node.id].width))
+        - Math.min(...nodes.map((node) => geometry[node.id].x)),
+      height: Math.max(...nodes.map((node) => geometry[node.id].y + geometry[node.id].height))
+        - Math.min(...nodes.map((node) => geometry[node.id].y)),
+    });
+    const created = Object.fromEntries(document.nodes.map((node) => [node.id, node]));
+    expect(bounds(created).width).toBeLessThanOrEqual(1480);
+    expect(bounds(created).height).toBeGreaterThan(bounds(created).width);
+    const relayout = computeDiagramLayoutResult(document);
+    expect(bounds(relayout.nodes).width).toBeLessThanOrEqual(1480);
+    expect(relayout.nodes["service-0"].y).toBeLessThan(relayout.nodes["service-16"].y);
+  });
+
+  test("keeps a long architecture pipeline inside one boundary within the width limit", () => {
+    const nodes = [{ id: "system", label: "System", type: "boundary" }];
+    const edges = [];
+    for (let index = 0; index < 12; index += 1) {
+      const id = `service-${index}`;
+      nodes.push({ id, label: `Service ${index}`, type: "service", parentId: "system" });
+      if (index > 0) edges.push({ source: `service-${index - 1}`, target: id });
+    }
+    const document = compileDiagramIr({ kind: "architecture", nodes, edges });
+    const system = document.nodes.find((node) => node.id === "system");
+    expect(system.width).toBeLessThanOrEqual(1480);
+    expect(system.height).toBeGreaterThan(system.width);
+    for (const node of document.nodes.filter((item) => item.parentId === "system")) {
+      expect(node.x).toBeGreaterThan(system.x);
+      expect(node.x + node.width).toBeLessThan(system.x + system.width);
+    }
+  });
+
+  test("places unassigned architecture boundaries after the pipeline without covering nodes", () => {
+    const services = Array.from({ length: 14 }, (_, index) => ({
+      id: `service-${index}`,
+      label: `Service ${index}`,
+      type: "service",
+    }));
+    const boundaries = ["访问层", "业务服务层", "数据与基础设施层"].map((label, index) => ({
+      id: `boundary-${index}`,
+      label,
+      type: "boundary",
+    }));
+    const edges = services.slice(1).map((node, index) => ({ source: services[index].id, target: node.id }));
+    const document = compileDiagramIr({ kind: "architecture", nodes: [...services, ...boundaries], edges });
+    const result = computeDiagramLayoutResult(document);
+    const bottom = Math.max(...services.map((node) => result.nodes[node.id].y + result.nodes[node.id].height));
+    for (const boundary of boundaries) expect(result.nodes[boundary.id].y).toBeGreaterThan(bottom);
+    const width = Math.max(...Object.values(result.nodes).map((node) => node.x + node.width))
+      - Math.min(...Object.values(result.nodes).map((node) => node.x));
+    expect(width).toBeLessThanOrEqual(1480);
+  });
+
   test("separates generated architecture boundaries and keeps their children inside", () => {
     const document = compileDiagramIr({
       kind: "architecture",
@@ -223,6 +320,35 @@ describe("diagram auto layout", () => {
       - Math.min(...boundaries.map((node) => node.x));
     expect(contentWidth).toBeLessThanOrEqual(1480);
     expect(new Set(boundaries.map((node) => node.y)).size).toBeGreaterThan(1);
+  });
+
+  test("uses two rows of architecture groups when a single column wastes horizontal space", () => {
+    const nodes = [];
+    const edges = [];
+    let previousId;
+    for (let groupIndex = 0; groupIndex < 4; groupIndex += 1) {
+      const boundaryId = `group-${groupIndex}`;
+      nodes.push({ id: boundaryId, label: boundaryId, type: "boundary" });
+      for (let nodeIndex = 0; nodeIndex < 2; nodeIndex += 1) {
+        const id = `${boundaryId}-node-${nodeIndex}`;
+        nodes.push({ id, label: id, type: "service", parentId: boundaryId });
+        if (previousId) edges.push({ source: previousId, target: id });
+        previousId = id;
+      }
+    }
+    const document = compileDiagramIr({ kind: "architecture", nodes, edges });
+    const boundaries = document.nodes.filter((node) => node.shape === "boundary");
+    const width = Math.max(...boundaries.map((node) => node.x + node.width))
+      - Math.min(...boundaries.map((node) => node.x));
+    expect(width).toBeGreaterThan(900);
+    expect(width).toBeLessThanOrEqual(1480);
+    expect(new Set(boundaries.map((node) => node.y)).size).toBe(2);
+    const relayout = computeDiagramLayoutResult(document);
+    const relayoutWidth = Math.max(...boundaries.map((node) => relayout.nodes[node.id].x + relayout.nodes[node.id].width))
+      - Math.min(...boundaries.map((node) => relayout.nodes[node.id].x));
+    expect(relayoutWidth).toBeGreaterThan(900);
+    const vertical = computeDiagramLayoutResult(document, { direction: "top-to-bottom" });
+    expect(vertical.nodes["group-1"].y).toBeGreaterThan(vertical.nodes["group-0"].y);
   });
 
   test("returns a complete strategy result for every diagram kind", () => {
@@ -347,5 +473,40 @@ describe("diagram auto layout", () => {
       maxScale: 1,
       minScale: DIAGRAM_READABLE_MIN_SCALE,
     });
+  });
+
+  test("keeps the default starter geometry and refits longer translated labels", () => {
+    for (const kind of ["mind-map", "flowchart", "architecture"]) {
+      const document = createDefaultDiagramDocument(kind);
+      expect(fitDefaultDiagramLabels(document)).toBe(document);
+    }
+
+    const document = createDefaultDiagramDocument("mind-map", {
+      mindMapRoot: "Temat główny",
+      mindMapCapture: "Zbieranie pomysłów",
+      mindMapQuickNotes: "Szybkie notatki",
+    });
+    const fitted = fitDefaultDiagramLabels(document);
+    expect(fitted).not.toBe(document);
+    expect(fitted.nodes[0].width).toBeGreaterThanOrEqual(compactMindMapNodeSize("Temat główny", true).width);
+    for (const [index, left] of fitted.nodes.entries()) {
+      for (const right of fitted.nodes.slice(index + 1)) {
+        const overlaps = left.x < right.x + right.width && right.x < left.x + left.width
+          && left.y < right.y + right.height && right.y < left.y + left.height;
+        expect(overlaps).toBe(false);
+      }
+    }
+    const byId = Object.fromEntries(fitted.nodes.map((node) => [node.id, node]));
+    expect(byId["topic-1-a"].x).toBeGreaterThanOrEqual(byId["topic-1"].x + byId["topic-1"].width);
+
+    const architecture = fitDefaultDiagramLabels(createDefaultDiagramDocument("architecture", {
+      architectureStorage: "Magazyn obiektów i plików",
+    }));
+    const boundary = architecture.nodes.find((node) => node.id === "system");
+    for (const child of architecture.nodes.filter((node) => node.parentId === "system")) {
+      expect(child.x).toBeGreaterThan(boundary.x);
+      expect(child.x + child.width).toBeLessThan(boundary.x + boundary.width);
+      expect(child.y + child.height).toBeLessThan(boundary.y + boundary.height);
+    }
   });
 });

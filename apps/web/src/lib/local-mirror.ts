@@ -1,4 +1,6 @@
+import { clearAiBodyDraftScope } from "./ai-body-draft-store";
 import {
+  DEFAULT_MEMO_TITLE,
   createExcerpt,
   docToMarkdown,
   docToText,
@@ -8,6 +10,7 @@ import {
   mergeMemoDocs,
   getDiagramSummary,
   getInfographicSummary,
+  getPosterSummary,
   getTableSummary,
   getNotebookDescendantIds,
   resolveMemoContentDoc,
@@ -33,6 +36,9 @@ import { createClientUuid } from "@/lib/client-id";
 
 export type LocalMemoListParams = {
   notebookId?: string | null;
+  includeTotal?: boolean;
+  /** Remote continuation token; local mirrors use offset instead. */
+  cursor?: string | null;
   notebookIds?: string[];
   q?: string;
   tag?: string;
@@ -45,7 +51,7 @@ export type LocalMemoListParams = {
 
 export type LocalMemoListResponse = {
   memos: MemoSummary[];
-  totalCount: number;
+  totalCount?: number;
   nextCursor: string | null;
 };
 
@@ -80,6 +86,7 @@ const toSummary = (memo: MemoDetail): MemoSummary => ({
   excerpt: memo.excerpt,
   ...getDiagramSummary(memo.contentMarkdown),
   ...getInfographicSummary(memo.contentMarkdown),
+  ...getPosterSummary(memo.contentMarkdown),
   ...getTableSummary(memo.contentMarkdown),
   tags: memo.tags,
   isPinned: memo.isPinned,
@@ -255,14 +262,18 @@ export const listLocalMemos = async (scope: string, params: LocalMemoListParams)
     if (params.filter === "tagged" && memo.tags.length === 0) return false;
     if (params.filter === "untagged" && memo.tags.length > 0) return false;
     if (params.filter === "pinned" && !memo.isPinned) return false;
-    if (q && ![memo.title, memo.excerpt, memo.contentText, memo.tags.join(" ")].some((value) => value?.toLocaleLowerCase().includes(q))) return false;
+    if (q && ![memo.title || DEFAULT_MEMO_TITLE, memo.excerpt, memo.contentText, memo.tags.join(" ")].some((value) => value?.toLocaleLowerCase().includes(q))) return false;
     return true;
   });
 
   memos.sort((left, right) => {
     if (params.trash) return (right.deletedAt ?? "").localeCompare(left.deletedAt ?? "") || right.id.localeCompare(left.id);
     if (params.sort === "created-desc") return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
-    if (params.sort === "title-asc") return (left.title || left.excerpt).localeCompare(right.title || right.excerpt, "zh-CN") || right.updatedAt.localeCompare(left.updatedAt);
+    if (params.sort === "title-asc" || params.sort === "title-desc") {
+      const titleCompare = (left.title || left.excerpt).localeCompare(right.title || right.excerpt, "zh-CN");
+      if (titleCompare !== 0) return params.sort === "title-desc" ? -titleCompare : titleCompare;
+      return right.updatedAt.localeCompare(left.updatedAt);
+    }
     return Number(right.isPinned) - Number(left.isPinned) || right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id);
   });
 
@@ -271,7 +282,7 @@ export const listLocalMemos = async (scope: string, params: LocalMemoListParams)
   const page = memos.slice(offset, offset + (params.limit ?? 50));
   return {
     memos: page.map(toSummary),
-    totalCount,
+    ...(params.includeTotal === false ? {} : { totalCount }),
     nextCursor: offset + page.length < totalCount ? String(offset + page.length) : null,
   };
 };
@@ -547,7 +558,7 @@ export const getLocalNotebook = async (scope: string, notebookId: string) => {
   return result;
 };
 
-export const updateLocalNotebook = async (scope: string, notebookId: string, input: Partial<Pick<Notebook, "name" | "parentId" | "sortOrder">>) => {
+export const updateLocalNotebook = async (scope: string, notebookId: string, input: Partial<Pick<Notebook, "name" | "parentId" | "sortOrder" | "icon" | "color" | "textColor" | "colorTarget" | "isBold" | "iconInverted" | "rowInverted">>) => {
   const notebook = await getLocalNotebook(scope, notebookId);
   if (!notebook) return null;
   const updated = { ...notebook, ...input, updatedAt: new Date().toISOString() };
@@ -849,6 +860,8 @@ export const clearLocalScope = async (scope: string) => {
   await Promise.all(scopedResources
     .filter((resource) => resource.id.startsWith("local_resource_"))
     .map((resource) => removeCachedLocalResourceBytes(resource.url)));
+  // Unapplied AI body drafts live in their own database (#652 PR B).
+  await clearAiBodyDraftScope(scope);
 };
 
 export type { LocalMemo, LocalNotebook };

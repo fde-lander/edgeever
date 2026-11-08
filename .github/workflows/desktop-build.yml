@@ -255,7 +255,16 @@ jobs:
           echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [[ "$attempt" = "3" ]]; then
+              exit 1
+            fi
+            sleep "$((15 * attempt))"
+          done
 
       - name: Build Web renderer
         env:
@@ -316,6 +325,15 @@ jobs:
           echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
           echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
 
+      # GitHub's Intel runner drops Apple's HTTP/3 ticket requests. Keep the
+      # notarization/stapling checks and use HTTPS over TCP on this ephemeral VM.
+      # https://github.com/actions/runner-images/issues/14924
+      - name: Use TCP for Apple notarization tickets on Intel runners
+        if: matrix.arch == 'x64' && runner.environment == 'github-hosted'
+        run: |
+          echo "block return out quick proto udp from any to any port 443" | sudo pfctl -f -
+          sudo pfctl -E
+
       - name: Package desktop installer
         env:
           EDGE_EVER_DESKTOP_ARCH: ${{ matrix.arch }}
@@ -363,6 +381,16 @@ jobs:
             unpacked_directory="mac"
           fi
           bun run verify:desktop-protocol-e2e -- "release/desktop/$unpacked_directory/EdgeEver.app/Contents/MacOS/EdgeEver"
+
+      - name: Verify packaged macOS note windows
+        env:
+          EDGE_EVER_DESKTOP_ARCH: ${{ matrix.arch }}
+        run: |
+          unpacked_directory="mac-${{ matrix.arch }}"
+          if [[ "${{ matrix.arch }}" == "x64" ]]; then
+            unpacked_directory="mac"
+          fi
+          bun run verify:desktop-note-window-e2e -- "release/desktop/$unpacked_directory/EdgeEver.app/Contents/MacOS/EdgeEver"
 
       - name: Verify desktop installer
         env:
@@ -448,6 +476,9 @@ jobs:
             Start-Sleep -Seconds (15 * $attempt)
           }
 
+      - name: Test ACP process and workspace cleanup
+        run: bun test --cwd apps/desktop src/main/acp-cleanup.test.mjs
+
       - name: Build Web renderer
         env:
           EDGE_EVER_DESKTOP_BUILD: "1"
@@ -508,6 +539,9 @@ jobs:
 
       - name: Verify packaged Windows private protocol file flows
         run: bun run verify:desktop-protocol-e2e -- release/desktop/win-unpacked/EdgeEver.exe
+
+      - name: Verify packaged Windows note windows
+        run: bun run verify:desktop-note-window-e2e -- release/desktop/win-unpacked/EdgeEver.exe
 
       - name: Verify that Preview executables are unsigned
         shell: pwsh
@@ -702,6 +736,18 @@ jobs:
           done
           test -n "$executable"
           xvfb-run -a bun run verify:desktop-protocol-e2e -- "$executable"
+
+      - name: Verify packaged Linux note windows
+        run: |
+          executable=""
+          for candidate in release/desktop/linux-unpacked/EdgeEver release/desktop/linux-unpacked/edgeever; do
+            if [[ -x "$candidate" ]]; then
+              executable="$candidate"
+              break
+            fi
+          done
+          test -n "$executable"
+          xvfb-run -a bun run verify:desktop-note-window-e2e -- "$executable"
 
       - name: Create Linux checksum
         run: |

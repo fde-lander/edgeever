@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { autoUpdate, useFloating } from "@floating-ui/react-dom";
-import { FileDown, Pencil, Save, Trash2, X } from "lucide-react";
+import { AudioLines, Copy, FileDown, Pencil, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,11 +21,19 @@ import type { ResourceMenuTarget } from "./useEditorResourceActions";
 import { attachmentResourceMenuPosition } from "./attachment-resource-menu";
 import { imageResourceMenuPosition } from "./image-resource-menu-position";
 
-export const IconTooltip = ({ label, children }: { label: string; children: ReactNode }) => (
+export const IconTooltip = ({
+  label,
+  side = "bottom",
+  children,
+}: {
+  label: string;
+  side?: "top" | "right" | "bottom" | "left";
+  children: ReactNode;
+}) => (
   <TooltipProvider delayDuration={0} skipDelayDuration={0}>
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
+      <TooltipContent side={side}>{label}</TooltipContent>
     </Tooltip>
   </TooltipProvider>
 );
@@ -65,7 +73,8 @@ export const NoteLinkInteractionHint = ({
 
 type ResourceActionLabels = {
   download: string;
-  saveAs: string;
+  copy: string;
+  transcribe: string;
   rename: string;
   delete: string;
   unavailable: string;
@@ -75,9 +84,11 @@ export const ResourceActionMenu = ({
   target,
   canRename,
   canDelete,
+  canTranscribe,
   labels,
   onDownload,
-  onSaveAs,
+  onCopy,
+  onTranscribe,
   onRename,
   onDelete,
   onMouseEnter,
@@ -86,30 +97,37 @@ export const ResourceActionMenu = ({
   target: ResourceMenuTarget;
   canRename: boolean;
   canDelete: boolean;
+  canTranscribe: boolean;
   labels: ResourceActionLabels;
   onDownload: () => void;
-  onSaveAs: () => void;
+  onCopy: () => void;
+  onTranscribe: () => void;
   onRename: () => void;
   onDelete: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) => {
   const referenceElement = target.element ?? null;
+  // Keep a closing image menu in its detached panel until cleanup runs; never
+  // briefly turn it back into a floating menu on the document body.
+  const actionsElement = target.kind === "image" ? target.actionsElement ?? null : null;
   const { refs, floatingStyles, isPositioned } = useFloating({
     ...(target.kind === "image" ? imageResourceMenuPosition : attachmentResourceMenuPosition),
-    elements: { reference: referenceElement },
-    whileElementsMounted: autoUpdate,
+    elements: { reference: actionsElement ? null : referenceElement },
+    whileElementsMounted: actionsElement ? undefined : autoUpdate,
   });
 
   return createPortal(
   <TooltipProvider delayDuration={0} skipDelayDuration={0}>
     <div
-      ref={refs.setFloating}
+      ref={actionsElement ? undefined : refs.setFloating}
       data-edgeever-resource-menu
       role="toolbar"
       aria-label={labels.download}
-      className="fixed z-[110] flex items-center gap-1 overflow-hidden rounded-lg border border-slate-200 bg-card p-1 shadow-lg"
-      style={referenceElement ? {
+      className={actionsElement
+        ? "flex flex-wrap items-center gap-1"
+        : "fixed z-[110] flex items-center gap-1 overflow-hidden rounded-lg border border-slate-200 bg-card p-1 shadow-lg"}
+      style={actionsElement ? undefined : referenceElement ? {
         ...floatingStyles,
         visibility: isPositioned ? "visible" : "hidden",
       } : {
@@ -122,10 +140,11 @@ export const ResourceActionMenu = ({
             : "translateX(-50%)",
       }}
       onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
+      onMouseLeave={actionsElement ? undefined : onMouseLeave}
+      onMouseDown={actionsElement ? (event) => event.preventDefault() : undefined}
       onFocusCapture={onMouseEnter}
       onBlurCapture={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onMouseLeave();
+        if (!actionsElement && !event.currentTarget.contains(event.relatedTarget as Node | null)) onMouseLeave();
       }}
     >
       <IconTooltip label={labels.download}>
@@ -134,19 +153,27 @@ export const ResourceActionMenu = ({
           {labels.download}
         </Button>
       </IconTooltip>
-      <IconTooltip label={labels.saveAs}>
-        <Button type="button" size="sm" variant="ghost" aria-label={labels.saveAs} onClick={onSaveAs}>
-          <Save className="h-3.5 w-3.5" />
-          {labels.saveAs}
+      <IconTooltip label={labels.copy}>
+        <Button type="button" size="sm" variant="ghost" aria-label={labels.copy} onClick={onCopy}>
+          <Copy className="h-3.5 w-3.5" />
+          {labels.copy}
         </Button>
       </IconTooltip>
-      <IconTooltip label={canRename ? labels.rename : labels.unavailable}>
+      {canTranscribe ? (
+        <IconTooltip label={labels.transcribe}>
+          <Button type="button" size="sm" variant="ghost" aria-label={labels.transcribe} onClick={onTranscribe}>
+            <AudioLines className="h-3.5 w-3.5" />
+            {labels.transcribe}
+          </Button>
+        </IconTooltip>
+      ) : null}
+      {(!actionsElement || canRename) && <IconTooltip label={canRename ? labels.rename : labels.unavailable}>
         <Button type="button" size="sm" variant="ghost" aria-label={labels.rename} disabled={!canRename} onClick={onRename}>
           <Pencil className="h-3.5 w-3.5" />
           {labels.rename}
         </Button>
-      </IconTooltip>
-      <IconTooltip label={canDelete ? labels.delete : labels.unavailable}>
+      </IconTooltip>}
+      {(!actionsElement || canDelete) && <IconTooltip label={canDelete ? labels.delete : labels.unavailable}>
         <Button
           type="button"
           size="sm"
@@ -159,10 +186,10 @@ export const ResourceActionMenu = ({
           <Trash2 className="h-3.5 w-3.5" />
           {labels.delete}
         </Button>
-      </IconTooltip>
+      </IconTooltip>}
     </div>
   </TooltipProvider>,
-  document.body,
+  actionsElement ?? document.body,
   );
 };
 

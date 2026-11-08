@@ -4,11 +4,12 @@ import { FileText, Folder, Loader2, MessageCircle, Tag, X } from "lucide-react";
 import type {
   CompanionAction, CompanionAnswer, CompanionDiscoverySettings, CompanionEvent, CompanionMention, CompanionTurn, CompanionTurnInput,
 } from "@edgeever/shared";
-import { parseCompanionMentionQuery } from "@edgeever/shared";
+import { companionFailureDiagnostics, parseCompanionMentionQuery, getMemoDisplayTitle } from "@edgeever/shared";
 import { Button } from "@/components/ui/button";
 import { api, ApiRequestError } from "@/lib/api";
 import { companionLocale } from "@/lib/companion-locale";
 import { CompanionActionCard } from "./CompanionActionCard";
+import { CompanionCreatedNoteLinks } from "./CompanionCreatedNoteLinks";
 import { CompanionNoteText } from "./CompanionNoteText";
 import { CompanionQuestionForm } from "./CompanionQuestionForm";
 import { CompanionRunTimeline } from "./CompanionRunTimeline";
@@ -63,11 +64,13 @@ export function CompanionChat({
 
   const explainError = (cause: unknown) => {
     const code = cause instanceof ApiRequestError ? cause.code : "";
+    if (code === "ai_client_required" || code === "ai_direct_unavailable") return t("companion.clientUpdateRequired");
     if (code === "ai_not_configured") return t("companion.configureModel");
     if (code === "ai_credentials_rejected") return t("companion.credentialsRejected");
     if (code === "ai_provider_payment_required") return t("companion.providerPaymentRequired");
     if (code === "ai_provider_rate_limited") return t("companion.providerRateLimited");
     if (code === "ai_provider_request_rejected") return t("companion.providerRequestRejected");
+    if (code === "companion_response_too_long") return t("companion.responseTooLong");
     if (code === "companion_memory_conflict") return t("companion.conflict");
     if (code === "companion_history_full") return t("companion.historyFull");
     if (code === "companion_action_conflict") return t("companion.actions.conflict");
@@ -75,6 +78,7 @@ export function CompanionChat({
     if (code === "companion_action_uncertain") return t("companion.actions.status.uncertain");
     if (code === "companion_busy") return t("companion.recovered");
     if (cause instanceof ApiRequestError && cause.status === 403) return t("companion.unavailable");
+    if (companionFailureDiagnostics(cause)?.reason === "network") return t("companion.failureDetails.network");
     return t("companion.failed");
   };
   const reload = async () => {
@@ -110,14 +114,14 @@ export function CompanionChat({
     let cancelled = false;
     const timer = window.setTimeout(() => {
       void Promise.all([
-        api.listMemos({ q: query, trash: false, sort: "updated-desc", limit: 8 }),
+        api.listMemos({ q: query, trash: false, sort: "updated-desc", limit: 8, includeTotal: false }),
         api.listNotebooks(),
         api.listTags(),
       ]).then(([memos, notebooks, tags]) => {
         if (cancelled || !alive.current) return;
         const lower = query.toLowerCase();
         setMentionHits([
-          ...memos.memos.slice(0, 5).map(memo => ({ type: "memo" as const, id: memo.id, title: memo.title || t("common.untitledMemo") })),
+          ...memos.memos.slice(0, 5).map(memo => ({ type: "memo" as const, id: memo.id, title: getMemoDisplayTitle(memo.title, t("common.untitledMemo")) })),
           ...notebooks.notebooks.filter(notebook => !query || notebook.name.toLowerCase().includes(lower)).slice(0, 4)
             .map(notebook => ({ type: "notebook" as const, id: notebook.id, title: notebook.name })),
           ...tags.tags.filter(tag => !query || tag.name.toLowerCase().includes(lower)).slice(0, 4)
@@ -323,6 +327,7 @@ export function CompanionChat({
           onNotesChanged={onNotesChanged}
         />
         {turn.response ? <CompanionNoteText text={turn.response} sources={turn.sources} onOpenNote={onOpenNote} /> : null}
+        <CompanionCreatedNoteLinks response={turn.response} tools={turn.tools ?? []} onOpenNote={onOpenNote} />
         {turn.status === "interrupted" && turn.questions?.length && !running ? (
           <CompanionQuestionForm questions={turn.questions} busy={busy} onSubmit={answers => resume(turn, answers)} />
         ) : null}

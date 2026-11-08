@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { globSync, readFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
+import { claimPosterRender } from "./poster-render-service";
+import { registerPosterRenderRoutes } from "./poster-render-routes";
+import { Hono } from "hono";
 import { callMcpTool } from "./index.ts";
-import { parseDiagramDocument, parseTableDocument, serializeTableDocument, createDefaultTableDocument } from "@edgeever/shared";
+import { createPosterDocument, serializePosterDocument, parsePosterDocument, addTableField, parseDiagramDocument, parseInfographicDocument, parseTableDocument, serializeTableDocument, createDefaultTableDocument } from "@edgeever/shared";
 
 class SqliteD1PreparedStatement {
   constructor(db, sql, bindings = []) {
@@ -72,6 +75,299 @@ const createFixture = (scopes = ["read:memos", "write:memos"]) => {
 };
 
 describe("MCP template and AI instruction management", () => {
+  test("search snippets expose bounded body matches and preserve summary and access rules", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES ('nb_search', 'ws_mcp', 'Search')").run();
+    const call = (tool, args) => callMcpTool(context, auth, tool, args);
+    const create = args => call("create_memo", { notebookId: "nb_search", ...args });
+    const body = "行程安排😀。".repeat(200) + "退款将在七个工作日内到账。" + "其他事项😀。".repeat(100);
+    const { memo } = await create({ title: "Travel", contentMarkdown: body });
+    const summary = (await call("list_memos", {})).memos[0];
+    const found = await call("search_memos", { query: "退款" });
+    expect(found.memos).toHaveLength(1);
+    const { snippet, ...foundSummary } = found.memos[0];
+    expect(foundSummary).toEqual(summary);
+    expect(snippet).toContain("退款将在七个工作日内到账");
+    expect(Array.from(found.memos[0].snippet).length).toBeLessThanOrEqual(200);
+    expect(Buffer.from(found.memos[0].snippet).toString()).toBe(found.memos[0].snippet);
+    expect(found.memos[0].snippet).toStartWith("…");
+    expect(found.memos[0].snippet).toEndWith("…");
+    expect(found.memos[0]).not.toHaveProperty("contentText");
+
+    await create({ title: "English", contentMarkdown: "A long introduction. ".repeat(100) + "Refund POLICY applies." });
+    const english = (await call("search_memos", { query: "refund policy" })).memos[0];
+    expect(english.snippet).toContain("Refund POLICY");
+    const tokenMatch = (await call("search_memos", { query: "policy refund" })).memos[0];
+    expect(tokenMatch.snippet).toContain("Refund POLICY");
+    await create({ title: "Escaping", contentMarkdown: "Ask about refund (policy) here." });
+    expect((await call("search_memos", { query: "refund (policy) here" })).memos[0].snippet).toBe("Ask about refund (policy) here.");
+
+    await create({ title: "标题命中", tags: ["标签命中"], contentMarkdown: "Ordinary body." });
+    for (const query of ["标题命中", "标签命中"]) {
+      const result = (await call("search_memos", { query })).memos;
+      expect(result).toHaveLength(1);
+      expect(result[0]).not.toHaveProperty("snippet");
+      expect(result[0].excerpt).toBeTruthy();
+    }
+    expect((await call("search_memos", {})).memos.every(item => !("snippet" in item))).toBe(true);
+    expect((await call("list_memos", {})).memos.every(item => !("snippet" in item))).toBe(true);
+    expect((await callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "search_memos", { query: "退款" })).memos).toEqual([]);
+    sqlite.query("UPDATE memos SET is_deleted = 1 WHERE id = ?").run(memo.id);
+    expect((await call("search_memos", { query: "退款" })).memos).toEqual([]);
+  });
+
+  test("snippet generation uses one bounded search read as result and dataset sizes grow", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES ('nb_budget', 'ws_mcp', 'Budget')").run();
+    const contentMarkdown = "Budget preamble. ".repeat(300) + "budgetneedle refund rules.";
+    const db = context.env.storage.db;
+    for (const size of [12, 36]) {
+      for (let index = sqlite.query("SELECT count(*) AS total FROM memos").get().total; index < size; index++) {
+        await callMcpTool(context, auth, "create_memo", { notebookId: "nb_budget", title: String(index), contentMarkdown });
+      }
+      for (const limit of [1, 5, 10]) {
+        const reads = [];
+        context.env.storage.db = {
+          prepare(sql) {
+            const statement = db.prepare(sql);
+            return {
+              bind(...bindings) {
+                const bound = statement.bind(...bindings);
+                return { async all() {
+                  const result = await bound.all();
+                  reads.push({ sql, rows: result.results.length, bodyBytes: result.results.reduce((total, row) => total + Buffer.byteLength(row.content_text ?? ""), 0) });
+                  return result;
+                } };
+              },
+            };
+          },
+        };
+        const result = await callMcpTool(context, auth, "search_memos", { query: "budgetneedle", limit });
+        expect(reads).toHaveLength(1);
+        expect(reads[0].rows).toBe(limit);
+        expect(reads[0].bodyBytes).toBe(Buffer.byteLength(contentMarkdown) * limit);
+        expect(result.memos).toHaveLength(limit);
+        expect(result.memos.every(item => item.snippet.includes("budgetneedle") && Array.from(item.snippet).length <= 200)).toBe(true);
+        context.env.storage.db = db;
+      }
+    }
+  });
+
+  test("reads prose bodies as Markdown by default with an opt-in for legacy fields", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES ('nb_read', 'ws_mcp', 'Reading')").run();
+    const call = (tool, args) => callMcpTool(context, auth, tool, args);
+    const contentMarkdown = "A **distinctive** prose body.";
+    const { memo } = await call("create_memo", { notebookId: "nb_read", title: "Prose", contentMarkdown });
+    const { memo: poster } = await call("create_poster_memo", { notebookId: "nb_read", title: "Poster", heading: "Heading" });
+
+    const read = await call("get_memo", { memoId: memo.id });
+    const legacy = await call("get_memo", { memoId: memo.id, format: "all" });
+    expect(legacy.memo).toMatchObject({ contentJson: expect.any(Object), contentText: "A distinctive prose body.", contentMarkdown });
+    const { contentJson, contentText, ...markdownMemo } = legacy.memo;
+    expect(read.memo).toEqual(markdownMemo);
+    expect(read.memo).toMatchObject({ id: memo.id, revision: memo.revision });
+
+    const page = await call("list_memos", { includeContent: true });
+    const legacyPage = await call("list_memos", { includeContent: true, format: "all" });
+    expect(page).toEqual({ ...legacyPage, memos: legacyPage.memos.map(item => item.id === memo.id ? markdownMemo : item) });
+    expect(page.memos.find(item => item.id === poster.id)).toHaveProperty("contentJson");
+    const first = await call("list_memos", { includeContent: true, limit: 1 });
+    expect(first).toMatchObject({ hasMore: true, nextOffset: 1 });
+    const second = await call("list_memos", { includeContent: true, limit: 1, offset: first.nextOffset });
+    expect(second).toMatchObject({ hasMore: false, nextOffset: null });
+    expect([...first.memos, ...second.memos]).toEqual(page.memos);
+
+    const summary = await call("list_memos", { format: "all" });
+    const search = await call("search_memos", { query: "distinctive" });
+    expect(summary).toEqual(await call("list_memos", {}));
+    expect(search.memos).toHaveLength(1);
+    for (const item of [...summary.memos, ...search.memos]) {
+      expect(item).not.toHaveProperty("contentMarkdown");
+      expect(item).not.toHaveProperty("contentJson");
+      expect(item).not.toHaveProperty("contentText");
+    }
+    await expect(call("get_memo", { memoId: memo.id, format: "json" })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(call("list_memos", { includeContent: true, format: "json" })).rejects.toMatchObject({ code: "invalid_params" });
+  });
+
+  test("client render queue claims once, saves atomically, isolates workspaces and checks source revision", async () => {
+    const { sqlite, auth, context } = createFixture(["read:memos", "write:memos", "write:resources"]);
+    sqlite.query("INSERT INTO notebooks(id, workspace_id, name) VALUES ('nb_p', 'ws_mcp', 'Posters')").run();
+    const created = await callMcpTool(context, auth, "create_poster_memo", { notebookId: "nb_p", title: "Poster", heading: "Title" });
+    const input = { memoId: created.memo.id, expectedRevision: created.memo.revision };
+    const pending = await callMcpTool(context, auth, "request_poster_render", input);
+    expect(pending.status).toBe("pending");
+    expect((await callMcpTool(context, auth, "request_poster_render", input)).id).toBe(pending.id);
+    await expect(callMcpTool(context, { ...auth, scopes: ["write:memos"] }, "request_poster_render", input)).rejects.toMatchObject({code:"forbidden"});
+    await expect(callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "get_poster_render_job", {jobId: pending.id})).rejects.toMatchObject({code:"not_found"});
+    expect(await claimPosterRender(context.env.storage.db, "ws_other")).toBeNull();
+    const claim = await claimPosterRender(context.env.storage.db, auth.workspaceId);
+    expect(claim.id).toBe(pending.id);
+    expect(await claimPosterRender(context.env.storage.db, auth.workspaceId)).toBeNull();
+    const app = new Hono();
+    app.use("*", async (c,next) => { c.set("auth", {...auth, kind:"user", actorType:"user"}); await next(); });
+    registerPosterRenderRoutes(app);
+    const complete = body => app.request(`/api/v1/poster-render/${claim.id}/complete`, {method:"POST", headers:{"content-type":"application/json"},body:JSON.stringify(body)},context.env);
+    const source = (await callMcpTool(context, auth, "get_poster", {memoId:created.memo.id})).poster;
+    expect((await complete({claimToken:"wrong", document:source})).status).toBe(404);
+    sqlite.query("INSERT INTO resources(id,memo_id,object_key,kind,mime_type,byte_size) VALUES ('preview', ?, 'preview', 'image', 'image/png', 3)").run(created.memo.id);
+    const document = {...source,previewResourceId:"preview"};
+    expect((await complete({claimToken:claim.claim_token,document:{...document,background:"#ff0000"}})).status).toBe(400);
+    const response = await complete({claimToken:claim.claim_token, document});
+    expect(response.status).toBe(200);
+    expect((await response.json()).job.status).toBe("completed");
+    expect((await complete({claimToken:claim.claim_token,document})).status).toBe(200);
+    const saved = await callMcpTool(context, auth, "get_poster", {memoId:created.memo.id});
+    expect(saved.poster.previewResourceId).toBe("preview");
+    expect(saved.memo.revision).toBe(input.expectedRevision+1);
+    const next = await callMcpTool(context,auth,"request_poster_render",{memoId:created.memo.id,expectedRevision:saved.memo.revision,templateId:"folio"});
+    const second = await claimPosterRender(context.env.storage.db,auth.workspaceId);
+    await callMcpTool(context,auth,"update_poster",{memoId:created.memo.id,expectedRevision:saved.memo.revision,background:"#aabbcc"});
+    const conflict = await app.request(`/api/v1/poster-render/${second.id}/complete`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({claimToken:second.claim_token,document:{...document,templateId:"folio"}})},context.env);
+    expect(conflict.status).toBe(409);
+    sqlite.query("UPDATE poster_render_jobs SET expires_at = '2000-01-01' WHERE id = ?").run(next.id);
+    expect((await callMcpTool(context,auth,"get_poster_render_job",{jobId:next.id})).status).toBe("failed");
+  });
+
+  test("render commit guard rolls back when an edit arrives after validation", async () => {
+    const { sqlite, auth, context } = createFixture(["read:memos", "write:memos", "write:resources"]);
+    sqlite.query("INSERT INTO notebooks(id, workspace_id, name) VALUES ('nb_p', 'ws_mcp', 'Posters')").run();
+    const created = await callMcpTool(context,auth,"create_poster_memo",{notebookId:"nb_p",title:"Guard",heading:"Guard"});
+    const job = await callMcpTool(context,auth,"request_poster_render",{memoId:created.memo.id,expectedRevision:created.memo.revision});
+    const [first,second] = await Promise.all([claimPosterRender(context.env.storage.db,auth.workspaceId),claimPosterRender(context.env.storage.db,auth.workspaceId)]);
+    expect([first,second].filter(Boolean)).toHaveLength(1);
+    const claim = first ?? second;
+    const source = (await callMcpTool(context,auth,"get_poster",{memoId:created.memo.id})).poster;
+    sqlite.query("INSERT INTO resources(id,memo_id,object_key,kind,mime_type,byte_size) VALUES ('preview', ?, 'preview', 'image', 'image/png', 3)").run(created.memo.id);
+    const db = context.env.storage.db, originalBatch = db.batch.bind(db);
+    let injected = false;
+    db.batch = async statements => {
+      if (!injected && statements.some(statement=>statement.sql.includes("commit_guard"))) {
+        injected = true;
+        await callMcpTool(context,auth,"update_poster",{memoId:created.memo.id,expectedRevision:created.memo.revision,background:"#aabbcc"});
+      }
+      return originalBatch(statements);
+    };
+    const app = new Hono();
+    app.use("*", async(c,next)=>{c.set("auth",{...auth,kind:"user",actorType:"user"});await next();});
+    registerPosterRenderRoutes(app);
+    const response = await app.request(`/api/v1/poster-render/${job.id}/complete`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({claimToken:claim.claim_token,document:{...source,previewResourceId:"preview"}})},context.env);
+    expect(response.status).toBe(409);
+    const saved = await callMcpTool(context,auth,"get_poster",{memoId:created.memo.id});
+    expect(saved.poster.background).toBe("#aabbcc");
+    expect(saved.poster.previewResourceId).toBeUndefined();
+    expect(saved.memo.revision).toBe(created.memo.revision+1);
+    expect((await callMcpTool(context,auth,"get_poster_render_job",{jobId:job.id})).status).toBe("rendering");
+  });
+
+  test("poster design operations validate image ownership before dry-run or save", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks(id, workspace_id, name) VALUES ('nb_p', 'ws_mcp', 'Posters')").run();
+    const created = await callMcpTool(context, auth, "create_poster_memo", { notebookId: "nb_p", title: "Poster", heading: "Title" });
+    const other = await callMcpTool(context, auth, "create_poster_memo", { notebookId: "nb_p", title: "Other", heading: "Other" });
+    for (const [id, memoId, kind] of [["owned", created.memo.id, "image"], ["foreign", other.memo.id, "image"], ["attachment", created.memo.id, "attachment"]]) {
+      sqlite.query("INSERT INTO resources(id,memo_id,object_key,kind,mime_type,byte_size) VALUES (?, ?, ?, ?, 'image/png', 1)").run(id, memoId, id, kind);
+    }
+    const operation = resourceId => ({ op: "add", element: { id: "image", name: "Image", type: "image", resourceId, x: 0, y: 0, width: 200, height: 100 } });
+    const input = { memoId: created.memo.id, expectedRevision: created.memo.revision, operations: [operation("owned")] };
+    for (const id of ["foreign", "attachment", "missing"]) {
+      await expect(callMcpTool(context, auth, "update_poster", { ...input, dryRun: true, operations: [operation(id)] })).rejects.toMatchObject({ code: "invalid_params" });
+    }
+    const dry = await callMcpTool(context, auth, "update_poster", { ...input, dryRun: true });
+    expect(dry.poster.elements.some(element => element.id === "image")).toBe(true);
+    expect((await callMcpTool(context, auth, "get_poster", { memoId: created.memo.id })).poster.elements.some(element => element.id === "image")).toBe(false);
+    const saved = await callMcpTool(context, auth, "update_poster", input);
+    expect(saved.poster.elements.find(element => element.id === "image").resourceId).toBe("owned");
+    await expect(callMcpTool(context, auth, "update_poster", input)).rejects.toMatchObject({ code: "revision_conflict" });
+  });
+
+  test("poster preview/export returns actual owned image bytes and never a stale preview", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks(id, workspace_id, name) VALUES ('nb_p', 'ws_mcp', 'Posters')").run();
+    const poster = { ...createPosterDocument("Original"), previewResourceId: "preview" };
+    const created = await callMcpTool(context, auth, "create_memo", { notebookId: "nb_p", title: "Poster", contentMarkdown: serializePosterDocument(poster) });
+    sqlite.query("INSERT INTO resources(id,memo_id,object_key,kind,mime_type,byte_size) VALUES ('preview', ?, 'preview', 'image', 'image/png', 3)").run(created.memo.id);
+    let reads = 0;
+    context.env.storage.resources.get = async () => { reads++; return { size: 3, body: new Blob([new Uint8Array([1, 2, 3])]).stream(), writeHttpMetadata() {} }; };
+    const fullAuth = { ...auth, scopes: [...auth.scopes, "read:resources"] };
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "get_poster_preview", { memoId: created.memo.id })).rejects.toMatchObject({ code: "forbidden" });
+    expect(reads).toBe(0);
+    const preview = await callMcpTool(context, fullAuth, "get_poster_preview", { memoId: created.memo.id });
+    expect(preview).toMatchObject({ available: true, image: { data: "AQID", mimeType: "image/png" } });
+    const source = await callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "export_poster", { memoId: created.memo.id, format: "source" });
+    expect(JSON.parse(source.content).elements).toEqual(poster.elements);
+    const updated = await callMcpTool(context, auth, "update_poster", { memoId: created.memo.id, expectedRevision: created.memo.revision, edits: [{ id: "heading", patch: { text: "Updated" } }] });
+    expect(updated.poster.previewResourceId).toBeUndefined();
+    expect(await callMcpTool(context, fullAuth, "get_poster_preview", { memoId: created.memo.id })).toMatchObject({ available: false, reason: "browser_render_required" });
+    await expect(callMcpTool(context, fullAuth, "export_poster", { memoId: created.memo.id, format: "saved_preview" })).rejects.toMatchObject({ code: "preview_unavailable" });
+    expect(reads).toBe(1);
+    expect((await callMcpTool(context, auth, "get_poster_capabilities", {})).operations).toContain("add");
+  });
+  test("poster queries filter before pagination and include existing posters without matching prose titles", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)").run("nb_posters", "ws_mcp", "Posters");
+    const create = input => callMcpTool(context, auth, "create_memo", { notebookId: "nb_posters", ...input });
+    const first = await create({ title: "精力管理", contentMarkdown: serializePosterDocument(createPosterDocument("精力管理")) });
+    const second = await callMcpTool(context, auth, "create_poster_memo", { notebookId: "nb_posters", title: "精力分配", heading: "保护精力" });
+    const prose = await create({ title: "精力管理海报说明", contentMarkdown: "这只是普通笔记" });
+    const page = await callMcpTool(context, auth, "list_memos", { poster: true, limit: 1 });
+    expect(page.memos).toHaveLength(1);
+    expect(page.memos[0].poster).toBe(true);
+    expect(page.hasMore).toBe(true);
+    const next = await callMcpTool(context, auth, "list_memos", { poster: true, limit: 1, offset: page.nextOffset });
+    expect(new Set([page.memos[0].id, next.memos[0].id])).toEqual(new Set([first.memo.id, second.memo.id]));
+    expect(next.hasMore).toBe(false);
+    const full = await callMcpTool(context, auth, "list_memos", { poster: true, includeContent: true });
+    expect(full.memos.every(memo => parsePosterDocument(memo.contentMarkdown))).toBe(true);
+    const found = await callMcpTool(context, auth, "search_memos", { poster: true, query: "精力" });
+    expect(new Set(found.memos.map(memo => memo.id))).toEqual(new Set([first.memo.id, second.memo.id]));
+    expect(found.memos.every(memo => memo.poster)).toBe(true);
+    const excluded = await callMcpTool(context, auth, "search_memos", { poster: false });
+    expect(excluded.memos.map(memo => memo.id)).toEqual([prose.memo.id]);
+    expect((await callMcpTool(context, auth, "list_memos", { poster: false })).memos.map(memo => memo.id)).toEqual([prose.memo.id]);
+    expect((await callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "search_memos", { poster: true })).memos).toEqual([]);
+    expect((await callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "list_memos", { poster: true })).memos).toEqual([]);
+  });
+  test("creates an actual editable poster from copy without encoded source", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)").run("nb_posters", "ws_mcp", "Posters");
+    const input = { notebookId: "nb_posters", title: "时间管理与精力分配", heading: "精力管理大于时间管理", subtitle: "把最好的精力留给最重要的事。", template: "bold", format: "square" };
+    const created = await callMcpTool(context, auth, "create_poster_memo", input);
+    expect(created.poster).toBe(true);
+    const saved = await callMcpTool(context, auth, "get_memo", { memoId: created.memo.id });
+    const poster = parsePosterDocument(saved.memo.contentMarkdown);
+    expect(poster).toMatchObject({ width: 1080, height: 1080, copy: { title: input.heading, subtitle: input.subtitle } });
+    const read = await callMcpTool(context, auth, "get_poster", { memoId: created.memo.id });
+    const heading = read.poster.elements.find(element => element.role === "title");
+    const updated = await callMcpTool(context, auth, "update_poster", { memoId: created.memo.id, expectedRevision: read.memo.revision, edits: [{ id: heading.id, patch: { text: "保护你的精力" } }] });
+    expect(parsePosterDocument(updated.memo.contentMarkdown).copy.title).toBe("保护你的精力");
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "create_poster_memo", input)).rejects.toThrow();
+    await expect(callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "create_poster_memo", input)).rejects.toThrow();
+    const before = sqlite.query("SELECT COUNT(*) AS count FROM memos").get().count;
+    await expect(callMcpTool(context, auth, "create_poster_memo", { ...input, heading: "x".repeat(81) })).rejects.toThrow();
+    expect(sqlite.query("SELECT COUNT(*) AS count FROM memos").get().count).toBe(before);
+  });
+  test("poster tools preserve untouched elements, previews, scopes and revision guards", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)").run("nb_posters", "ws_mcp", "Posters");
+    const poster = { ...createPosterDocument("Original"), previewResourceId: "old_preview" };
+    const created = await callMcpTool(context, auth, "create_memo", { notebookId: "nb_posters", title: "Poster", contentMarkdown: serializePosterDocument(poster) });
+    const read = await callMcpTool(context, auth, "get_poster", { memoId: created.memo.id });
+    const heading = read.poster.elements.find(element => element.type === "text");
+    const input = { memoId: created.memo.id, expectedRevision: read.memo.revision, edits: [{ id: heading.id, patch: { text: "Updated", fill: "#16A06E" } }] };
+    const preview = await callMcpTool(context, auth, "update_poster", { ...input, dryRun: true });
+    expect(preview.poster.elements.find(element => element.id === heading.id).text).toBe("Updated");
+    expect((await callMcpTool(context, auth, "get_poster", { memoId: created.memo.id })).poster.previewResourceId).toBe("old_preview");
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "update_poster", input)).rejects.toThrow();
+    await expect(callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "get_poster", { memoId: created.memo.id })).rejects.toThrow();
+    const result = await callMcpTool(context, auth, "update_poster", input);
+    expect(result.poster.previewResourceId).toBeUndefined();
+    expect(result.poster.elements.filter(element => element.id !== heading.id)).toEqual(read.poster.elements.filter(element => element.id !== heading.id));
+    expect(parsePosterDocument(result.memo.contentMarkdown).elements.find(element => element.id === heading.id).text).toBe("Updated");
+    await expect(callMcpTool(context, auth, "update_poster", input)).rejects.toThrow();
+    await expect(callMcpTool(context, auth, "update_poster", { ...input, expectedRevision: result.memo.revision, edits: [{ id: "missing", patch: { text: "Bad" } }] })).rejects.toThrow();
+  });
   test.each([
     ["mind-map", [
       { id: "root", label: "Root" },
@@ -105,7 +401,7 @@ describe("MCP template and AI instruction management", () => {
     expect(created.diagram.nodes[0].layout).toBeUndefined();
     const stored = sqlite.query("SELECT content_markdown FROM memo_contents WHERE memo_id = ?").get(created.memo.id);
     const diagram = parseDiagramDocument(stored.content_markdown);
-    expect(diagram).toMatchObject({ kind, theme: "brand" });
+    expect(diagram).toMatchObject({ kind, theme: kind === "architecture" ? "brand" : "plain" });
     expect(diagram.nodes.map((node) => node.id)).toEqual(nodes.map((node) => node.id));
     expect(diagram.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))).toBeTrue();
     expect(diagram.nodes.every((node) => node.width > 0 && node.height > 0)).toBeTrue();
@@ -122,6 +418,47 @@ describe("MCP template and AI instruction management", () => {
       expect(boundary.y).toBeLessThan(api.y);
       expect(boundary.x + boundary.width).toBeGreaterThan(api.x + api.width);
     }
+  });
+
+  test("creates a revenue-share infographic and refuses to overwrite it as markdown", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_graphics", "ws_mcp", "Graphics");
+    const created = await callMcpTool(context, auth, "create_infographic_memo", {
+      notebookId: "nb_graphics",
+      template: "chart-pie-donut-plain-text",
+      data: {
+        title: "腾讯 2025 年营收占比",
+        desc: "图中比例为演示用估算，不代表腾讯官方披露数据。",
+        values: [
+          { label: "增值服务", value: 52 },
+          { label: "金融科技与企业服务", value: 30 },
+          { label: "网络广告", value: 16 },
+          { label: "其他业务", value: 2 },
+        ],
+      },
+    });
+    expect(created).toMatchObject({ infographic: true, template: "chart-pie-donut-plain-text", memo: { title: "腾讯 2025 年营收占比" } });
+    expect(JSON.stringify(created.memo)).not.toContain("edgeever-infographic-v1");
+    const stored = sqlite.query("SELECT content_markdown FROM memo_contents WHERE memo_id = ?").get(created.memo.id);
+    const infographic = parseInfographicDocument(stored.content_markdown);
+    expect(infographic.syntax).toContain("value 52");
+    const read = await callMcpTool(context, auth, "get_memo", { memoId: created.memo.id });
+    expect(read.infographic).toEqual({ template: "chart-pie-donut-plain-text" });
+    expect(read.memo.contentMarkdown).not.toContain("edgeever-infographic-v1");
+    await expect(callMcpTool(context, auth, "update_memo", {
+      memoId: created.memo.id, contentMarkdown: "# replaced",
+    })).rejects.toMatchObject({ code: "infographic_update_required" });
+    await expect(callMcpTool(context, auth, "create_infographic_memo", {
+      notebookId: "nb_graphics",
+      template: "chart-pie-donut-plain-text",
+      data: { title: "坏占比", values: [{ label: "甲", value: -5 }] },
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "create_infographic_memo", {
+      notebookId: "nb_graphics",
+      template: "chart-pie-donut-plain-text",
+      data: { title: "占比", values: [{ label: "甲", value: 1 }] },
+    })).rejects.toMatchObject({ code: "forbidden" });
   });
 
   test("rejects invalid diagram graphs before creating a memo", async () => {
@@ -216,6 +553,264 @@ describe("MCP template and AI instruction management", () => {
     })).rejects.toMatchObject({ code: "table_update_required" });
     const stored = sqlite.query("SELECT content_markdown FROM memo_contents WHERE memo_id = ?").get(created.memo.id);
     expect(parseTableDocument(stored.content_markdown)?.records).toHaveLength(1);
+  });
+
+  test("reads and mutates records in one structured table without replacing other records", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const created = await callMcpTool(context, auth, "create_memo", {
+      notebookId: "nb_tables",
+      title: "阅读清单",
+      contentMarkdown: serializeTableDocument(createDefaultTableDocument()),
+    });
+    const memoId = created.memo.id;
+    const first = await callMcpTool(context, auth, "get_table_records", { memoId, limit: 1 });
+    expect(first).toMatchObject({ memoId, totalRecords: 1, limit: 1, offset: 0 });
+    expect(first.fields.map((field) => field.id)).toEqual(["fld_name", "fld_status", "fld_date"]);
+    expect(first.records.map((record) => record.id)).toEqual(["rec_sample"]);
+
+    const added = await callMcpTool(context, auth, "add_table_record", {
+      memoId, expectedRevision: first.revision,
+      cells: { fld_name: "读一本书", fld_status: "进行中" },
+    });
+    expect(added.record).toMatchObject({ id: added.recordId, cells: { fld_name: "读一本书", fld_status: "进行中" } });
+    const page = await callMcpTool(context, auth, "get_table_records", { memoId, offset: 1, limit: 1 });
+    expect(page.records.map((record) => record.id)).toEqual([added.recordId]);
+    const byId = await callMcpTool(context, auth, "get_table_records", { memoId, recordId: added.recordId });
+    expect(byId.records[0].cells.fld_name).toBe("读一本书");
+
+    const changed = await callMcpTool(context, auth, "update_table_record", {
+      memoId, recordId: added.recordId, expectedRevision: added.revision,
+      cells: { fld_status: "完成", fld_date: "2026-09-30" },
+    });
+    expect(changed.record.cells).toMatchObject({ fld_name: "读一本书", fld_status: "完成", fld_date: "2026-09-30" });
+    const deleted = await callMcpTool(context, auth, "delete_table_record", {
+      memoId, recordId: added.recordId, expectedRevision: changed.revision,
+    });
+    expect(deleted.deleted).toBe(true);
+    const final = await callMcpTool(context, auth, "get_table_records", { memoId });
+    expect(final.records.map((record) => record.id)).toEqual(["rec_sample"]);
+    const stored = sqlite.query("SELECT content_markdown FROM memo_contents WHERE memo_id = ?").get(memoId);
+    expect(parseTableDocument(stored.content_markdown)?.records.map((record) => record.id)).toEqual(["rec_sample"]);
+  });
+
+  test("rejects stale revisions, invalid cells, non-tables, and missing scope for table tools", async () => {
+    const { auth, context } = createFixture();
+    const sqlite = context.env.storage.db.db;
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const table = await callMcpTool(context, auth, "create_memo", {
+      notebookId: "nb_tables", contentMarkdown: serializeTableDocument(createDefaultTableDocument()),
+    });
+    const plain = await callMcpTool(context, auth, "create_memo", {
+      notebookId: "nb_tables", contentMarkdown: "Plain note",
+    });
+    const memoId = table.memo.id;
+    const revision = table.memo.revision;
+    await expect(callMcpTool(context, auth, "add_table_record", {
+      memoId, expectedRevision: revision + 1, cells: { fld_name: "stale" },
+    })).rejects.toMatchObject({ code: "revision_conflict" });
+    await expect(callMcpTool(context, auth, "add_table_record", {
+      memoId, expectedRevision: revision, cells: { unknown: "value" },
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(callMcpTool(context, auth, "update_table_record", {
+      memoId, recordId: "rec_sample", expectedRevision: revision, cells: { fld_status: "not-an-option" },
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(callMcpTool(context, auth, "get_table_records", { memoId: plain.memo.id }))
+      .rejects.toMatchObject({ code: "not_table" });
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "delete_table_record", {
+      memoId, recordId: "rec_sample", expectedRevision: revision,
+    })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "get_table_records", { memoId }))
+      .rejects.toMatchObject({ code: "not_found" });
+  });
+
+  test("accepts only attachment resources owned by the target table memo", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const document = addTableField(createDefaultTableDocument(), { id: "fld_files", name: "附件", type: "attachment" });
+    const table = await callMcpTool(context, auth, "create_memo", {
+      notebookId: "nb_tables", contentMarkdown: serializeTableDocument(document),
+    });
+    const other = await callMcpTool(context, auth, "create_memo", {
+      notebookId: "nb_tables", contentMarkdown: "Other note",
+    });
+    sqlite.query("INSERT INTO resources (id, memo_id, object_key, kind, filename, mime_type, byte_size) VALUES (?, ?, ?, 'attachment', ?, ?, ?)")
+      .run("res_owned", table.memo.id, "mcp-owned", "notes.pdf", "application/pdf", 123);
+    sqlite.query("INSERT INTO resources (id, memo_id, object_key, kind, filename, mime_type, byte_size) VALUES (?, ?, ?, 'attachment', ?, ?, ?)")
+      .run("res_other", other.memo.id, "mcp-other", "secret.pdf", "application/pdf", 456);
+    await expect(callMcpTool(context, auth, "add_table_record", {
+      memoId: table.memo.id, expectedRevision: table.memo.revision,
+      cells: { fld_files: ["res_other"] },
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    const added = await callMcpTool(context, auth, "add_table_record", {
+      memoId: table.memo.id, expectedRevision: table.memo.revision,
+      cells: { fld_files: ["res_owned"] },
+    });
+    expect(added.record.cells.fld_files).toEqual([{
+      resourceId: "res_owned", filename: "notes.pdf", mimeType: "application/pdf", byteSize: 123,
+    }]);
+    await callMcpTool(context, auth, "delete_table_record", {
+      memoId: table.memo.id, recordId: added.recordId, expectedRevision: added.revision,
+    });
+    expect(sqlite.query("SELECT is_deleted FROM resources WHERE id = 'res_owned'").get().is_deleted).toBe(1);
+  });
+
+  test("creates a table from a field plan and edits its schema while preserving records", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const created = await callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "客户跟进", tags: ["CRM"],
+      fields: [
+        { name: "客户", type: "text" },
+        { name: "阶段", type: "select", options: ["线索", "洽谈", "成交"] },
+      ],
+    });
+    const memoId = created.memo.id;
+    const [customer, stage] = created.fields;
+    expect(created.memo.title).toBe("客户跟进");
+    expect(JSON.stringify(created.memo)).not.toContain("edgeever-table-v1");
+    expect((await callMcpTool(context, auth, "get_table_records", { memoId })).totalRecords).toBe(0);
+    const added = await callMcpTool(context, auth, "add_table_record", {
+      memoId, expectedRevision: created.revision,
+      cells: { [customer.id]: "明月公司", [stage.id]: "洽谈" },
+    });
+
+    const operations = [
+      { op: "update_field", fieldId: customer.id, changes: { name: "客户名称" } },
+      { op: "add_field", field: { name: "金额", type: "number" } },
+    ];
+    const preview = await callMcpTool(context, auth, "update_table_schema", {
+      memoId, expectedRevision: added.revision, operations, dryRun: true,
+    });
+    expect(preview).toMatchObject({ dryRun: true, changedCellCount: 0, removedAttachmentCount: 0 });
+    expect(preview.fields[2].id).toBeNull();
+    expect((await callMcpTool(context, auth, "get_table_records", { memoId })).fields).toHaveLength(2);
+    const changed = await callMcpTool(context, auth, "update_table_schema", {
+      memoId, expectedRevision: added.revision, operations,
+    });
+    expect(changed.fields.map((field) => field.name)).toEqual(["客户名称", "阶段", "金额"]);
+    expect(changed.fields[0].id).toBe(customer.id);
+    expect(changed.fields[2].id).toMatch(/^fld_/);
+    const after = await callMcpTool(context, auth, "get_table_records", { memoId, recordId: added.recordId });
+    expect(after.records[0].cells).toMatchObject({ [customer.id]: "明月公司", [stage.id]: "洽谈" });
+    expect(after.records[0].cells[changed.fields[2].id]).toBeNull();
+  });
+
+  test("previews destructive schema edits and requires explicit data-change authorization", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const created = await callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "销售线索",
+      fields: [
+        { name: "名称", type: "text" },
+        { name: "状态", type: "select", options: ["新建", "完成"] },
+      ],
+    });
+    const [nameField, statusField] = created.fields;
+    const added = await callMcpTool(context, auth, "add_table_record", {
+      memoId: created.memo.id, expectedRevision: created.revision,
+      cells: { [nameField.id]: "机会 A", [statusField.id]: "完成" },
+    });
+    const operations = [{ op: "update_field", fieldId: statusField.id, changes: { options: ["新建"] } }];
+    const preview = await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision, operations, dryRun: true,
+    });
+    expect(preview.changedCellCount).toBe(1);
+    await expect(callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision, operations,
+    })).rejects.toMatchObject({ code: "table_data_changes_required" });
+    expect((await callMcpTool(context, auth, "get_table_records", { memoId: created.memo.id, recordId: added.recordId }))
+      .records[0].cells[statusField.id]).toBe("完成");
+    const changed = await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision, operations, allowDataChanges: true,
+    });
+    expect(changed.changedCellCount).toBe(1);
+    const after = await callMcpTool(context, auth, "get_table_records", { memoId: created.memo.id, recordId: added.recordId });
+    expect(after.records[0].cells[statusField.id]).toBe("");
+    await expect(callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision,
+      operations: [{ op: "remove_field", fieldId: nameField.id }],
+    })).rejects.toMatchObject({ code: "revision_conflict" });
+    await expect(callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: changed.revision,
+      operations: [{ op: "remove_field", fieldId: nameField.id }],
+    })).rejects.toMatchObject({ code: "table_data_changes_required" });
+  });
+
+  test("rejects invalid table field plans and cross-workspace schema edits", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    await expect(callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "Invalid", fields: [{ name: "状态", type: "select" }],
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "Invalid",
+      fields: [{ name: "名称", type: "text" }, { name: "名称", type: "number" }],
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    const created = await callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "Valid", fields: [{ name: "名称", type: "text" }],
+    });
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "create_table_memo", {
+      notebookId: "nb_tables", title: "Denied", fields: [{ name: "名称", type: "text" }],
+    })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(callMcpTool(context, { ...auth, scopes: ["read:memos"] }, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: created.revision,
+      operations: [{ op: "add_field", field: { name: "金额", type: "number" } }],
+    })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: created.revision,
+      operations: [{ op: "remove_field", fieldId: created.fields[0].id }],
+    })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(callMcpTool(context, { ...auth, workspaceId: "ws_other" }, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: created.revision,
+      operations: [{ op: "add_field", field: { name: "金额", type: "number" } }],
+    })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  test("previews field removal, releases unused attachments, and converts cell values only when allowed", async () => {
+    const { sqlite, auth, context } = createFixture();
+    sqlite.query("INSERT INTO notebooks (id, workspace_id, name) VALUES (?, ?, ?)")
+      .run("nb_tables", "ws_mcp", "Tables");
+    const created = await callMcpTool(context, auth, "create_table_memo", {
+      notebookId: "nb_tables", title: "合同",
+      fields: [{ name: "预算", type: "text" }, { name: "文件", type: "attachment" }],
+    });
+    const [budget, file] = created.fields;
+    sqlite.query("INSERT INTO resources (id, memo_id, object_key, kind, filename, mime_type, byte_size) VALUES (?, ?, ?, 'attachment', ?, ?, ?)")
+      .run("res_contract", created.memo.id, "contract-file", "contract.pdf", "application/pdf", 100);
+    const added = await callMcpTool(context, auth, "add_table_record", {
+      memoId: created.memo.id, expectedRevision: created.revision,
+      cells: { [budget.id]: "1200", [file.id]: ["res_contract"] },
+    });
+    const changeType = [{ op: "update_field", fieldId: budget.id, changes: { type: "number" } }];
+    const typePreview = await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision, operations: changeType, dryRun: true,
+    });
+    expect(typePreview.changedCellCount).toBe(1);
+    const converted = await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: added.revision,
+      operations: changeType, allowDataChanges: true,
+    });
+    const row = await callMcpTool(context, auth, "get_table_records", { memoId: created.memo.id, recordId: added.recordId });
+    expect(row.records[0].cells[budget.id]).toBe(1200);
+
+    const removeFile = [{ op: "remove_field", fieldId: file.id }];
+    const dropPreview = await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: converted.revision, operations: removeFile, dryRun: true,
+    });
+    expect(dropPreview).toMatchObject({ changedCellCount: 1, removedAttachmentCount: 1 });
+    expect(sqlite.query("SELECT is_deleted FROM resources WHERE id = 'res_contract'").get().is_deleted).toBe(0);
+    await callMcpTool(context, auth, "update_table_schema", {
+      memoId: created.memo.id, expectedRevision: converted.revision,
+      operations: removeFile, allowDataChanges: true,
+    });
+    expect(sqlite.query("SELECT is_deleted FROM resources WHERE id = 'res_contract'").get().is_deleted).toBe(1);
   });
 
   test("keeps mind-map hierarchy edges consistent when a node is reparented", async () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
 import { File as ExpoFile } from "expo-file-system";
-import { ActivityIndicator, Check, ChevronDown, ChevronLeft, RotateCcw } from "../components/icons";
+import { ActivityIndicator, ChevronDown, ChevronLeft, RotateCcw } from "../components/icons";
 import { BackHandler, KeyboardAvoidingView, Platform, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Alert, Pressable, Text, TextInput } from "../components/LocalizedText";
@@ -22,17 +22,22 @@ import {
   writeMobileMemoDraft,
   type MobileMemoDraft,
 } from "../lib/mobile-drafts";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { localizeMissingNotebookName, useMobileLocale, getMobileCatalog, formatMobileCopy, type MobileLocale } from "../lib/mobile-locale";
 import { useSession } from "../lib/session";
 import { queueMobileMemoCreate, queueMobileMemoUpdate } from "../lib/sync-queue";
 import { createMobileDataScope, upsertLocalMemo } from "../lib/local-mirror";
 import { recordEditorStartup } from "../lib/startup-performance";
 import { prepareUploadAsset, type MobileImageUploadAsset } from "../lib/mobile-image-upload";
-import MobileWebClipCapture from "../components/MobileWebClipCapture";
+import { uploadMobileResource } from "../lib/mobile-resource-upload";
 import LocalTiptapEditor, { type LocalTiptapEditorRef } from "../components/LocalTiptapEditor";
 import { SAFE_DOM_WEBVIEW_PROPS } from "../lib/mobile-dom";
 import { safeDomCall } from "../lib/safe-dom-call";
 import { applyMobileEditorUpload, cancelMobileEditorUpload, flushMobileEditor } from "../lib/mobile-editor-controller";
+import {
+  getMobileEditorSaveChrome,
+  MOBILE_EDITOR_AUTOSAVE_DELAY_MS,
+  shouldScheduleMobileEditorAutosave,
+} from "../hooks/mobile-editor-save-chrome";
 import { showEdgeEverKeyboard } from "../../modules/edgeever-keyboard";
 import { MobileResourceActions } from "../components/MobileResourceActions";
 import { MobileTemplatePickerModal } from "../components/MobileTemplatePicker";
@@ -51,9 +56,6 @@ import { createOptimisticMemo, type MobileMemoUpdatePayload } from "./workspace-
 import { styles } from "./workspace-styles";
 import { NotebookPickerModal, SmartTagButton, TagPickerModal } from "./WorkspacePickers";
 import {
-  deleteMobileResourceFromDoc,
-  getMobileResourceUpdatePayload,
-  renameMobileResourceInDoc,
   type MobileResourceTarget,
 } from "../lib/mobile-attachments";
 import {
@@ -126,19 +128,15 @@ const resolveEditableMemoTitle = (title?: string | null) => {
 };
 
 const alertProtectedImageLoadFailure = (
-  locale: "zh-CN" | "en-US" | "ja",
+  locale: MobileLocale,
   failure: ProtectedResourceLoadFailure
 ) => {
   const statusLabel = failure.status != null
     ? String(failure.status)
-    : locale === "en-US"
-      ? "network error"
-      : "网络错误";
+    : getMobileCatalog(locale).mobile.common.networkError;
   Alert.alert(
-    locale !== "zh-CN" ? "Image failed to load" : "图片加载失败",
-    locale === "en-US"
-      ? `Could not load a note image (${statusLabel}). Check the network and try again.`
-      : `笔记中的图片未能加载（${statusLabel}）。请检查网络后重试。`
+    getMobileCatalog(locale).mobile.common.imageLoadFailed,
+    formatMobileCopy(getMobileCatalog(locale).mobile.common.noteImageLoadFailed, { status: statusLabel })
   );
 };
 
@@ -147,12 +145,12 @@ export const CreateMemoModal = ({
   client: clientProp,
   dataScope,
   defaultNotebookId,
+  finishForIncomingShare = false,
   imageCompressionEnabled,
   initialDraft,
   initialSharedImages = [],
   notebooks,
   onCreated,
-  onDismiss,
   onQueued,
   syncQueueScope,
 }: {
@@ -160,6 +158,7 @@ export const CreateMemoModal = ({
   client?: ReturnType<typeof useSession>["client"];
   dataScope: string;
   defaultNotebookId: string;
+  finishForIncomingShare?: boolean;
   imageCompressionEnabled: boolean;
   initialDraft?: MobileCreateMemoSeed | MobileWebClipDraft | null;
   initialSharedImages?: MobileSharedImage[];
@@ -204,6 +203,10 @@ export const CreateMemoModal = ({
   const [imageOperation, setImageOperation] = useState<"idle" | "creating" | "uploading">("idle");
   const imageOperationRef = useRef(imageOperation);
   const sharedImagesHandledRef = useRef(false);
+  const [importingSharedImages, setImportingSharedImages] = useState(initialSharedImages.length > 0);
+  const [sharedImageImportFailed, setSharedImageImportFailed] = useState(false);
+  const failedSharedImageUrisRef = useRef(new Set<string>());
+  const shareHandoffStartedRef = useRef(false);
   const createPendingRef = useRef(false);
   const submitStartedRef = useRef(false);
   const [submitStarted, setSubmitStarted] = useState(false);
@@ -533,15 +536,26 @@ export const CreateMemoModal = ({
       const memo = await materializeMemoForImage();
       setImageOperation("uploading");
       const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
-      const { resource } = await client!.uploadMemoResource(memo.id, new ExpoFile(uploadAsset.uri));
+      const { resource } = await uploadMobileResource(client!, memo.id, uploadAsset);
       applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
       if (resource.kind === "image" && !keepBusy) {
         safeDomCall(() => editorRef.current?.finishImageBatch([resource.url]));
       }
+      failedSharedImageUrisRef.current.delete(asset.uri);
+      setSharedImageImportFailed(failedSharedImageUrisRef.current.size > 0);
       return resource.kind === "image" ? resource.url : null;
     } catch (error) {
       cancelMobileEditorUpload(editorRef, uploadId);
-      Alert.alert("附件上传失败", error instanceof Error ? error.message : "请检查网络连接后重试");
+      if (asset && initialSharedImages.some((image) => image.uri === asset.uri)) {
+        failedSharedImageUrisRef.current.add(asset.uri);
+        setSharedImageImportFailed(true);
+      }
+      Alert.alert("附件上传失败", error instanceof Error ? error.message : "请检查网络连接后重试", [
+        { text: "取消", style: "cancel" },
+        // Keep the source asset in this editor so retrying does not require
+        // sharing again or creating another remote memo.
+        { text: "重试", onPress: () => { void uploadImageAsset(asset); } },
+      ]);
     } finally {
       if (!keepBusy) setImageOperation("idle");
     }
@@ -570,8 +584,14 @@ export const CreateMemoModal = ({
     }
     sharedImagesHandledRef.current = true;
     void (async () => {
-      for (const image of initialSharedImages) {
-        await uploadImageAsset(image);
+      try {
+        for (const image of initialSharedImages) {
+          if (await uploadImageAsset(image) === undefined) {
+            setSharedImageImportFailed(true);
+          }
+        }
+      } finally {
+        setImportingSharedImages(false);
       }
     })();
   }, [editorReady, initialSharedImages]);
@@ -606,6 +626,21 @@ export const CreateMemoModal = ({
   };
 
   const requestClose = () => submitCreateMemo();
+
+  useEffect(() => {
+    if (!finishForIncomingShare) {
+      shareHandoffStartedRef.current = false;
+      return;
+    }
+    if (!draftLoaded || !editorReady || importingSharedImages || sharedImageImportFailed || imageOperation !== "idle" || submitStarted || shareHandoffStartedRef.current) {
+      return;
+    }
+    // Save through the normal close path, including editor flush and queued
+    // writes. On failure keep both this editor and the next share intact;
+    // the user can retry saving without an automatic retry loop.
+    shareHandoffStartedRef.current = true;
+    void submitCreateMemo();
+  }, [finishForIncomingShare, draftLoaded, editorReady, importingSharedImages, sharedImageImportFailed, imageOperation, submitStarted, submitCreateMemo]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -860,6 +895,7 @@ export const RichEditorModal = ({
   const [draftRestored, setDraftRestored] = useState(Boolean(restoredDraft));
   const [ready, setReady] = useState(false);
   const [dirty, setDirty] = useState(Boolean(restoredDraft));
+  const [autosaveGeneration, setAutosaveGeneration] = useState(0);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -867,8 +903,22 @@ export const RichEditorModal = ({
   const [resourceTarget, setResourceTarget] = useState<MobileResourceTarget | null>(null);
   const editorStartup = useMobileEditorStartupGuard({ active: Boolean(memo && baseUrl), ready });
   const { pickUploadAssets, uploadSourcePicker } = useMobileEditorUploadAsset();
-  const notebookLabel = notebooks.find((notebook) => notebook.id === notebookId)?.name ?? "未分类";
-  const saveLabel = error ? "保存失败" : saving ? "保存中" : uploading ? "上传中" : dirty ? (draftRestored ? "本地草稿" : "未保存") : ready ? "已保存" : "加载中";
+  const notebookLabel = notebooks.find((notebook) => notebook.id === notebookId)?.name ?? localizeMissingNotebookName(resolvedLocale);
+  const saveChrome = getMobileEditorSaveChrome({
+    dirty,
+    draftRestored,
+    error: Boolean(error),
+    ready,
+    saving,
+    uploading,
+  });
+  const closingRef = useRef(false);
+  const requestCloseRef = useRef<() => Promise<void>>(async () => undefined);
+  const markAutosaveDirty = () => {
+    dirtyRef.current = true;
+    setDirty(true);
+    setAutosaveGeneration((current) => current + 1);
+  };
   const titleRef = useRef(title);
   const tagsTextRef = useRef(tagsText);
   const notebookIdRef = useRef(notebookId);
@@ -908,8 +958,7 @@ export const RichEditorModal = ({
     contentSnapshotRef.current = contentSnapshot;
     contentJsonRef.current = contentJson;
     contentMarkdownRef.current = docToMarkdown(contentJson);
-    dirtyRef.current = true;
-    setDirty(true);
+    markAutosaveDirty();
     setError(null);
     flushResolverRef.current?.();
     flushResolverRef.current = null;
@@ -956,9 +1005,9 @@ export const RichEditorModal = ({
         dirtyRef.current = false;
         setDirty(false);
       } else {
-        // Newer local edits arrived during the save; keep dirty so the next pass uploads them.
-        dirtyRef.current = true;
-        setDirty(true);
+        // Newer local edits arrived during the save. Restart the quiet period
+        // so the follow-up save does not fire on the timer that already elapsed.
+        markAutosaveDirty();
       }
       setDraftRestored(false);
       return savedMemo;
@@ -968,6 +1017,10 @@ export const RichEditorModal = ({
     } finally {
       savingRef.current = false;
       setSaving(false);
+      if (closingRef.current) {
+        closingRef.current = false;
+        void requestCloseRef.current();
+      }
     }
   };
 
@@ -980,9 +1033,14 @@ export const RichEditorModal = ({
   });
 
   const requestClose = async () => {
-    if (savingRef.current || uploadingRef.current) {
+    if (uploadingRef.current) {
       return;
     }
+    if (savingRef.current) {
+      closingRef.current = true;
+      return;
+    }
+    closingRef.current = false;
     if (initialFocusTimerRef.current !== null) {
       clearTimeout(initialFocusTimerRef.current);
       initialFocusTimerRef.current = null;
@@ -993,10 +1051,11 @@ export const RichEditorModal = ({
       onClose();
     }
   };
+  requestCloseRef.current = requestClose;
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      void requestClose();
+      void requestCloseRef.current();
       return true;
     });
     return () => subscription.remove();
@@ -1029,7 +1088,7 @@ export const RichEditorModal = ({
           safeDomCall(() => editorRef.current?.beginImageUpload(uploadId, previewDataUrl));
         }
         const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
-        const { resource } = await client.uploadMemoResource(memo.id, new ExpoFile(uploadAsset.uri));
+        const { resource } = await uploadMobileResource(client, memo.id, uploadAsset);
         applyMobileEditorUpload(editorRef, resource, uploadId, uploadAsset.name || (resource.kind === "image" ? "图片" : "附件"));
         if (resource.kind === "image") sources.push(resource.url);
         uploadId = null;
@@ -1131,14 +1190,21 @@ export const RichEditorModal = ({
   }, [dirty, memo, notebookId, tagsText, title]);
 
   useEffect(() => {
-    if (!memoBaseRef.current || !dirty || !ready || savingRef.current || uploadingRef.current) {
+    if (!memoBaseRef.current || !shouldScheduleMobileEditorAutosave({
+      active: true,
+      closing: closingRef.current,
+      dirty,
+      ready,
+      saving: savingRef.current,
+      uploading: uploadingRef.current,
+    })) {
       return;
     }
     const timeout = setTimeout(() => {
       void flushEditor().then(save);
-    }, 1200);
+    }, MOBILE_EDITOR_AUTOSAVE_DELAY_MS);
     return () => clearTimeout(timeout);
-  }, [dirty, memo, notebookId, ready, tagsText, title]);
+  }, [autosaveGeneration, dirty, memo, notebookId, ready, tagsText, title]);
 
   return (
     <SafeAreaView style={styles.richEditorSafeArea}>
@@ -1148,19 +1214,19 @@ export const RichEditorModal = ({
         style={styles.richEditorKeyboardAvoiding}
       >
         <View style={styles.createMemoHeader}>
-          <Pressable accessibilityLabel="返回" accessibilityRole="button" disabled={saving || uploading} onPress={() => void requestClose()} style={styles.createMemoBackButton}>
-            <ChevronLeft color={saving || uploading ? "#cbd5e1" : "#0f172a"} size={30} />
+          <Pressable accessibilityLabel="返回" accessibilityRole="button" disabled={uploading} onPress={() => void requestClose()} style={styles.createMemoBackButton}>
+            <ChevronLeft color={uploading ? "#cbd5e1" : "#0f172a"} size={30} />
           </Pressable>
           <View style={styles.createMemoHeaderActions}>
-            <Text numberOfLines={1} style={[styles.createMemoStatus, styles.richEditorHeaderStatus, (saving || uploading || dirty) && styles.createMemoStatusActive, error && styles.richEditorStatusError]}>{saveLabel}</Text>
+            <Text numberOfLines={1} style={[styles.createMemoStatus, styles.richEditorHeaderStatus, saveChrome.emphasized && styles.createMemoStatusActive, error && styles.richEditorStatusError]}>{saveChrome.label}</Text>
             <Pressable
               accessibilityLabel="完成编辑"
               accessibilityRole="button"
-              disabled={saving || uploading || !ready}
+              disabled={uploading || !ready}
               onPress={() => void requestClose()}
-              style={[styles.createMemoDoneButton, (saving || uploading || !ready) && styles.createMemoDoneButtonDisabled]}
+              style={[styles.createMemoDoneButton, (uploading || !ready) && styles.createMemoDoneButtonDisabled]}
             >
-              {saving ? <ActivityIndicator color="#64748b" size="small" /> : <Text style={[styles.createMemoDoneText, (uploading || !ready) && styles.createMemoDoneTextDisabled]}>完成</Text>}
+              <Text style={[styles.createMemoDoneText, (uploading || !ready) && styles.createMemoDoneTextDisabled]}>完成</Text>
             </Pressable>
           </View>
         </View>
@@ -1171,8 +1237,7 @@ export const RichEditorModal = ({
               autoFocus={initialFocus === "title"}
               onChangeText={(value) => {
                 setTitle(value);
-                dirtyRef.current = true;
-                setDirty(true);
+                markAutosaveDirty();
               }}
               placeholder={DEFAULT_MEMO_TITLE}
               placeholderTextColor="#94a3b8"
@@ -1197,8 +1262,7 @@ export const RichEditorModal = ({
                 disabled={saving || uploading}
                 onChange={(nextTags) => {
                   setTagsText(nextTags.join(", "));
-                  dirtyRef.current = true;
-                  setDirty(true);
+                  markAutosaveDirty();
                 }}
                 selectedTags={parseTags(tagsText)}
                 title={title}
@@ -1229,8 +1293,7 @@ export const RichEditorModal = ({
             }
             setNotebookId(nextNotebookId);
             setNotebookPickerOpen(false);
-            dirtyRef.current = true;
-            setDirty(true);
+            markAutosaveDirty();
           }}
           visible={notebookPickerOpen}
         />
@@ -1238,8 +1301,7 @@ export const RichEditorModal = ({
           dataScope={createMobileDataScope(session?.baseUrl ?? baseUrl, session?.user?.id)}
           onChange={(nextTags) => {
             setTagsText(nextTags.join(", "));
-            dirtyRef.current = true;
-            setDirty(true);
+            markAutosaveDirty();
           }}
           onClose={() => setTagPickerOpen(false)}
           selectedTags={parseTags(tagsText)}
@@ -1267,19 +1329,4 @@ const createLocalImagePreviewDataUrl = async (asset: { mimeType?: string | null;
   const file = new ExpoFile(asset.uri);
   const mimeType = asset.mimeType || file.type || "application/octet-stream";
   return `data:${mimeType};base64,${await file.base64()}`;
-};
-
-const appendResourceMarkdown = (
-  currentMarkdown: string,
-  resource: {
-    filename: string;
-    kind: "image" | "attachment";
-    url: string;
-  }
-) => {
-  const label = resource.filename.replace(/\]/g, "\\]");
-  const markdown = resource.kind === "image" ? `![${label}](${resource.url})` : `附件：[${label}](${resource.url})`;
-  const trimmed = currentMarkdown.trimEnd();
-
-  return trimmed ? `${trimmed}\n\n${markdown}\n` : `${markdown}\n`;
 };
