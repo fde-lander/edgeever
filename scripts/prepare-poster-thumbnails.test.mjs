@@ -122,3 +122,17 @@ test("a save during generation cannot publish a manifest for stale sources", asy
   await expect(ensurePosterThumbnails(f.options)).rejects.toThrow("sources changed during generation");
   expect(await readFile(path.join(f.output, "manifest.json"))).toEqual(before);
 });
+
+test("source state is stable when test files are added or removed (dockerignore parity)", async () => {
+  const f = await fixture();
+  const root = f.root;
+  const stateBefore = await sourceState(root);
+  const testFile = path.join(root, "apps/web/src/lib/poster-design/paper-list-artwork.test.mjs");
+  await mkdir(path.dirname(testFile), { recursive: true });
+  await writeFile(testFile, "// a test file that dockerignore would exclude\n");
+  const stateAfterAdding = await sourceState(root);
+  expect(stateAfterAdding.sourceHash).toBe(stateBefore.sourceHash);
+  await rm(testFile, { force: true });
+  const stateAfterRemoving = await sourceState(root);
+  expect(stateAfterRemoving.sourceHash).toBe(stateBefore.sourceHash);
+});

@@ -33,8 +33,12 @@ const sourceFiles = async (root, relative) => {
     throw error;
   });
   if (!entries) return [relative];
-  return (await Promise.all(entries.filter(entry => !entry.name.startsWith(".")).map(entry => sourceFiles(root, `${relative}/${entry.name}`)))).flat();
+  return (await Promise.all(entries.filter(entry => !entry.name.startsWith(".") && !isExcludedSourceFile(entry.name)).map(entry => sourceFiles(root, `${relative}/${entry.name}`)))).flat();
 };
+// Test files are excluded from the source hash. Docker builds drop them via
+// .dockerignore's `**/*.test.*` rule, so hashing them would make the build
+// context look stale and fail the Plan D pre-flight guard.
+const isExcludedSourceFile = name => /\.test\.(mjs|ts|tsx|js|jsx)$/.test(name);
 export async function sourceState(root = projectRoot) {
   const files = (await Promise.all(sources.map(relative => sourceFiles(root, relative)))).flat().sort();
   const hashes = await Promise.all(files.map(async file => [file, digest((await readFile(path.join(root, file), "utf8")).replace(/\r\n/g, "\n"))]));
