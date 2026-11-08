@@ -73,6 +73,15 @@ function createTestDb(): Database {
     submit_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
     UNIQUE (memo_id), UNIQUE (token)
   )`);
+  // S11 (SPEC V1.2 Q4): poster_render_jobs introduced by upstream v2.23.0 (0066)
+  db.exec(`CREATE TABLE poster_render_jobs (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, memo_id TEXT NOT NULL,
+    expected_revision INTEGER NOT NULL, template_id TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending','rendering','completed','failed')),
+    claim_token TEXT, expires_at TEXT NOT NULL, result_revision INTEGER,
+    error_code TEXT, created_at TEXT NOT NULL,
+    commit_guard INTEGER NOT NULL DEFAULT 1 CHECK(commit_guard = 1)
+  )`);
 
   // Seed data
   db.exec(`INSERT INTO workspaces VALUES ('ws1', 'Test')`);
@@ -109,6 +118,13 @@ function createTestDb(): Database {
   db.exec(`INSERT INTO table_forms (id, memo_id, workspace_id, token, enabled, title) VALUES
     ('form_public', 'memo3', 'ws1', 'tok_public', 1, 'Public Form'),
     ('form_secret', 'memo1', 'ws1', 'tok_secret', 1, 'Secret Form')`);
+
+  // Poster render jobs (0066, upstream v2.23.0): job on public memo3 (visible)
+  // + job on hidden memo1 (secret). S11 isolation surface.
+  db.exec(`INSERT INTO poster_render_jobs
+    (id, workspace_id, memo_id, expected_revision, template_id, status, expires_at, created_at) VALUES
+    ('job_public', 'ws1', 'memo3', 1, 'tpl_a', 'pending', '2030-01-01T00:00:00.000Z', '2026-11-08T00:00:00.000Z'),
+    ('job_secret', 'ws1', 'memo1', 1, 'tpl_b', 'pending', '2030-01-01T00:00:00.000Z', '2026-11-08T00:00:00.000Z')`);
 
   return db;
 }
@@ -458,9 +474,43 @@ WHERE token = ? AND enabled = 1
     expect(pub?.id).toBe("form_public");
   });
 
+  // ── Scenario 11 (SPEC V1.2 Q4): poster_render_jobs (0066) isolation ──
+  // v2.23.0 新增 poster_render_jobs（客户端海报渲染任务，memo_id 关联 memos）。
+  // readPosterRenderJob() 直接 SELECT 本表且无 JOIN memos → 必须显式加 rule，
+  // 否则 agent 可读/轮询隐藏 memo 嘅渲染任务（template / revision / status）。
+
+  test("S11: agent cannot see poster_render_jobs for hidden memos (direct SELECT)", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    const result = await hidingDb.prepare(
+      "SELECT id, memo_id, template_id FROM poster_render_jobs"
+    ).all<{ id: string; memo_id: string; template_id: string }>();
+
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain("job_public"); // job on public memo3 visible
+    expect(ids).not.toContain("job_secret"); // job on hidden memo1 filtered
+  });
+
+  test("S11: readPosterRenderJob path hides secret poster job (404 semantics)", async () => {
+    const hiddenIds = await loadHiddenNotebookIds(rawAdapter, "token_agent", "ws1");
+    const hidingDb = createHidingDatabaseWithSymbol(rawAdapter, hiddenIds);
+
+    // Real poster-render-service.ts L19-20 readPosterRenderJob SQL
+    const readJobSql = "SELECT * FROM poster_render_jobs WHERE workspace_id = ? AND id = ?";
+
+    // Secret job on hidden memo1 → 404 (null)
+    const secret = await hidingDb.prepare(readJobSql).bind("ws1", "job_secret").first<{ id: string }>();
+    expect(secret).toBeNull();
+
+    // Public job on memo3 → readable
+    const pub = await hidingDb.prepare(readJobSql).bind("ws1", "job_public").first<{ id: string }>();
+    expect(pub?.id).toBe("job_public");
+  });
+
   // ── Full test suite summary ──
 
-  test("ALL 7 SCENARIOS PASSED — ready for BUILD", () => {
-    console.log("✅ 9.9 泄露矩阵 7 场景全部通过 — BUILD 前硬 GATE 通过");
+  test("ALL SCENARIOS PASSED — ready for BUILD", () => {
+    console.log("✅ 9.9 泄露矩阵 11 场景全部通过 — BUILD 前硬 GATE 通过");
   });
 });

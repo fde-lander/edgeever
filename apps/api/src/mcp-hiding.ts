@@ -86,6 +86,11 @@ const INJECTION_RULES: InjectionRule[] = [
   // table_forms (0055) — form config linked via memo_id; hidden memo's form
   // must be invisible to agents (Q4: 404, isolation philosophy)
   { table: "table_forms", getInjection: MEMO_ID_SUBQUERY },
+  // poster_render_jobs (0066, upstream v2.23.0) — client-side poster render
+  // jobs linked via memo_id. readPosterRenderJob() selects this table with no
+  // JOIN memos, so the `memos` rule cannot cover it; without this entry an
+  // agent can read and poll a hidden memo's render job (SPEC V1.2 Q4).
+  { table: "poster_render_jobs", getInjection: MEMO_ID_SUBQUERY },
 ];
 
 const CONTENT_TABLES = new Set(INJECTION_RULES.map((r) => r.table.toLowerCase()));

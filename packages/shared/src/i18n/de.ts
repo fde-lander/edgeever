@@ -3894,7 +3894,20 @@ export const de = {
       "read:tags": "Tags lesen",
       "write:tags": "Tags verwalten",
       "ai:generate": "Video-Notiz-Zusammenfassungen generieren"
-    }
+    },
+    "hiding": {
+      "title": "Notizbücher ausblenden",
+      "description": "Wählen Sie Notizbücher, die für diesen Token ausgeblendet werden. Ausgeblendete Notizbücher, ihre Unter-Notizbücher, Notizen und Anhänge sind für KI-Agenten unsichtbar. Web- und Mobil-Sitzungen sind nicht betroffen.",
+      "configure": "Ausblenden konfigurieren",
+      "configureTooltip": "Legen Sie fest, welche Notizbücher dieser Token sehen kann",
+      "hidden": "ausgeblendet",
+      "collapse": "Einklappen",
+      "expand": "Ausklappen",
+      "loading": "Ausblendekonfiguration wird geladen...",
+      "noNotebooks": "Keine Notizbücher verfügbar",
+      "updateError": "Die Ausblendekonfiguration konnte nicht aktualisiert werden. Bitte erneut versuchen.",
+    },
+
   },
   "advancedPlay": {
     "title": "Erweiterte Workflows",

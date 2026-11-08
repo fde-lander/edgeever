@@ -3697,6 +3697,19 @@ export const ja = {
       "write:tags": "タグを管理",
       "ai:generate": "動画ノートの要約を生成",
     },
+    hiding: {
+      title: "ノートブック非表示",
+      description: "このトークンから隠すノートブックを選択します。非表示にしたノートブックとその子ノートブック、ノート、添付ファイルは AI Agent から見えなくなります。Web とモバイルのセッションには影響しません。",
+      configure: "非表示を設定",
+      configureTooltip: "このトークンが見られるノートブックを制御",
+      hidden: "非表示",
+      collapse: "折りたたむ",
+      expand: "展開",
+      loading: "非表示設定を読み込み中...",
+      noNotebooks: "利用できるノートブックがありません",
+      updateError: "非表示設定を更新できませんでした。もう一度お試しください。",
+    },
+
   },
   advancedPlay: {
     title: "応用プレイ",

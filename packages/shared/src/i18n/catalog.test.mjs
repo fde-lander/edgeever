@@ -43,4 +43,18 @@ describe("shared i18n catalogs", () => {
     expect(collectKeys(fr)).toEqual(collectKeys(enUS));
     expect(fr.login.title).toContain("connecter");
   });
+
+  test("every locale ships the mcp.hiding block (FDE fork feature)", () => {
+    // The FDE fork adds a per-token notebook hiding UI. en-US and zh-CN carry
+    // the copy; every other locale must at minimum mirror the structure so
+    // mobile-locale.tsx type-checks and the block never renders untranslated
+    // keys. Asserted per-locale for a readable failure message.
+    const catalogs = { "zh-TW": zhTW, ja, pl, ru, es, de, fr };
+    for (const [locale, catalog] of Object.entries(catalogs)) {
+      expect({ locale, hiding: collectKeys(catalog.mcp.hiding ?? {}) }).toEqual({
+        locale,
+        hiding: collectKeys(enUS.mcp.hiding),
+      });
+    }
+  });
 });

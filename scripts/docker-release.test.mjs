@@ -80,6 +80,10 @@ describe("Docker release contract", () => {
       "bun build scripts/self-hosted-server.mjs --target=bun --format=esm --outdir=dist/self-hosted --sourcemap=none",
     );
     expect(dockerfile).toContain("RUN bun run build:web && bun run build:self-hosted");
+    // FDE fork Plan D guard (SPEC V1.2 3.2.8): keeps stale poster sources from
+    // silently launching chromium inside the build. Must stay a standalone line —
+    // merging it into the build command would break the assertion above.
+    expect(dockerfile).toContain("RUN bun run check:poster:thumbnails");
     expect(dockerfile).toContain("scripts/prepare-poster-thumbnails.mjs scripts/prepare-poster-thumbnails.d.mts scripts/");
     expect(dockerfile).toContain("RUN apk add --no-cache chromium nodejs");
     expect(dockerfile).toContain("EDGE_EVER_POSTER_CHROME_EXECUTABLE=/usr/bin/chromium");

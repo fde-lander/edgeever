@@ -3697,6 +3697,19 @@ export const pl = {
       "write:tags": "Zarządzanie tagami",
       "ai:generate": "Generowanie podsumowań notatek wideo",
     },
+    hiding: {
+      title: "Ukrywanie notatników",
+      description: "Wybierz notatniki ukrywane przed tym tokenem. Ukryte notatniki, ich podnotatniki, notatki i załączniki są niewidoczne dla agentów AI. Sesje w przeglądarce i na telefonie pozostają bez zmian.",
+      configure: "Skonfiguruj ukrywanie",
+      configureTooltip: "Określ, które notatniki widzi ten token",
+      hidden: "ukryty",
+      collapse: "Zwiń",
+      expand: "Rozwiń",
+      loading: "Ładowanie konfiguracji ukrywania...",
+      noNotebooks: "Brak dostępnych notatników",
+      updateError: "Nie udało się zaktualizować konfiguracji ukrywania. Spróbuj ponownie.",
+    },
+
   },
   advancedPlay: {
     title: "Zaawansowane scenariusze",

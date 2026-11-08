@@ -3894,7 +3894,20 @@ export const es = {
       "read:tags": "Leer etiquetas",
       "write:tags": "Gestionar etiquetas",
       "ai:generate": "Generar resúmenes de notas en vídeo"
-    }
+    },
+    "hiding": {
+      "title": "Ocultar cuadernos",
+      "description": "Selecciona los cuadernos que se ocultan a este token. Los cuadernos ocultos, sus subcuadernos, notas y archivos adjuntos son invisibles para los agentes de IA. Las sesiones web y móviles no se ven afectadas.",
+      "configure": "Configurar ocultación",
+      "configureTooltip": "Controla qué cuadernos puede ver este token",
+      "hidden": "oculto",
+      "collapse": "Contraer",
+      "expand": "Expandir",
+      "loading": "Cargando configuración de ocultación...",
+      "noNotebooks": "No hay cuadernos disponibles",
+      "updateError": "No se pudo actualizar la configuración de ocultación. Inténtalo de nuevo.",
+    },
+
   },
   "advancedPlay": {
     "title": "Usos avanzados",

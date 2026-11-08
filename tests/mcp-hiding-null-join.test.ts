@@ -56,7 +56,15 @@ function createTestDb(): Database {
       sort_order INTEGER DEFAULT 0,
       created_at TEXT DEFAULT '',
       updated_at TEXT DEFAULT '',
-      is_deleted INTEGER NOT NULL DEFAULT 0
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      -- Upstream v2.23.0 notebook appearance columns (migrations 0073-0077).
+      -- notebookSelectSql() selects all of them, so the fixture must carry
+      -- them or every read path fails with "no such column: n.text_color".
+      color_target TEXT NOT NULL DEFAULT 'icon',
+      is_bold INTEGER NOT NULL DEFAULT 0,
+      text_color TEXT,
+      icon_inverted INTEGER NOT NULL DEFAULT 0,
+      row_inverted INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE memos (
       id TEXT PRIMARY KEY,

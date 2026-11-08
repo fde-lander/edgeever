@@ -38,6 +38,11 @@ COPY release-summary.json release-summary.json
 COPY scripts/self-hosted-config.mjs scripts/self-hosted-secrets.mjs scripts/self-hosted-server.mjs scripts/prepare-poster-thumbnails.mjs scripts/prepare-poster-thumbnails.d.mts scripts/
 COPY tests/browser/poster-thumbnail-generator.html tests/browser/poster-thumbnail-generator.ts tests/browser/
 COPY tsconfig.json ./
+# Plan D pre-flight guard (SPEC V1.2 3.2.8): fail fast when poster thumbnails are
+# stale instead of silently launching chromium in the build. Standalone line on
+# purpose: scripts/docker-release.test.mjs L82 asserts the build line byte-for-byte.
+# Fix: bun run prepare:poster:thumbnails  ->  git add apps/web/src/assets/poster-template-previews  ->  git commit
+RUN bun run check:poster:thumbnails
 RUN bun run build:web && bun run build:self-hosted
 
 FROM oven/bun:1.3.14-alpine AS runtime

@@ -3707,6 +3707,19 @@ export const zhTW = {
       "write:tags": "管理標籤",
       "ai:generate": "生成影片筆記總結",
     },
+    hiding: {
+      title: "分類隔離",
+      description: "選擇要對此 Token 隱藏的筆記本分類。被隱藏的分類及其子分類、筆記、附件對 AI Agent 不可見。網頁與手機端不受影響。",
+      configure: "設定分類隔離",
+      configureTooltip: "控制此 Token 能看到哪些筆記本分類",
+      hidden: "已隱藏",
+      collapse: "收合",
+      expand: "展開",
+      loading: "正在載入隔離設定...",
+      noNotebooks: "暫無可用的筆記本分類",
+      updateError: "更新隔離設定失敗，請重試",
+    },
+
   },
   advancedPlay: {
     title: "進階玩法",

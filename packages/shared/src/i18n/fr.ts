@@ -3894,7 +3894,20 @@ export const fr = {
       "read:tags": "Lire les étiquettes",
       "write:tags": "Gérer les étiquettes",
       "ai:generate": "Générer des résumés de notes vidéo"
-    }
+    },
+    hiding: {
+      title: "Masquage de carnets",
+      description: "Sélectionnez les carnets masqués pour ce jeton. Les carnets masqués, leurs sous-carnets, notes et pièces jointes sont invisibles pour les agents IA. Les sessions web et mobiles ne sont pas affectées.",
+      configure: "Configurer le masquage",
+      configureTooltip: "Contrôlez les carnets que ce jeton peut voir",
+      hidden: "masqué",
+      collapse: "Réduire",
+      expand: "Développer",
+      loading: "Chargement de la configuration de masquage...",
+      noNotebooks: "Aucun carnet disponible",
+      updateError: "Impossible de mettre à jour la configuration de masquage. Veuillez réessayer.",
+    },
+
   },
   advancedPlay: {
     title: "Usages avancés",
